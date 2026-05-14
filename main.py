@@ -8,10 +8,11 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QStackedWidget, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit, QComboBox,
-    QDateEdit, QFrame, QFileDialog, QMessageBox, QMenu,
+    QDateEdit, QFrame, QFileDialog, QMessageBox, QMenu, QInputDialog, QDialog,
+    QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem,
 )
-from PyQt6.QtCore import Qt, QDate, QPoint, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QAction
+from PyQt6.QtCore import Qt, QDate, QPoint, QRectF, pyqtSignal
+from PyQt6.QtGui import QFont, QColor, QAction, QPainter, QPixmap, QPen
 
 
 # ======================================================================= #
@@ -117,81 +118,39 @@ def apply_categorization(df: pd.DataFrame) -> pd.DataFrame:
 # ======================================================================= #
 from collections import defaultdict as _defaultdict
 
-_SADOVODS = [
-    (1,"Майер Сергей Александрович"),(1,"Майер Денис Сергеевич"),
-    (1,"Майер Дарья Сергеевна"),(1,"Майер Иван Сергеевич"),
-    (1,"Майер Митрий Сергеевич"),(1,"Майер Егор Сергеевич"),
-    (1,"Майер Анна Сергеевна"),(1,"Майер Ярослав Сергеевич"),
-    (1,"Майер Матвей Сергеевич"),
-    (2,"Санникова Эльвира Рафхатовна"),
-    (3,"Хисматуллин Анвар Мансурович"),
-    (4,"Митюков Денис Анатольевич"),
-    (5,"Кулаковская Татьяна Васильевна"),
-    (6,"Баранова Анастасия Анатольевна"),(6,"Радченко Ирина Анатольевна"),
-    (7,"Орлова Нина Борисовна"),
-    (8,"Раев Виталий Васильевич"),
-    (9,"Черкасова Лариса Валерьевна"),(10,"Черкасова Лариса Валерьевна"),
-    (11,"Евстратиков Сергей Николаевич"),
-    (12,"Янковский Олег Борисович"),
-    (13,"Шушакова Ольга Ивановна"),
-    (14,"Горшкова Наталья Николаевна"),
-    (15,"Съянова Ирина Игоревна"),(15,"Сьянова Ирина Игоревна"),
-    (16,"Колобков Юрий Витальевич"),
-    (17,"Белоусов Сергей Семенович"),
-    (18,"Билямова Галина Ивановна"),(18,"Билямов Владимир Викторович"),
-    (19,"Пермякова Наталья Владимировна"),
-    (19,"Сибирякова Галия Зайнетдиновна"),(19,"Сибирякова Галина Зайнетдиновна"),
-    (20,"Носков Никита Сергеевич"),
-    (21,"Троицких Ольга Андреевна"),
-    (22,"Обухов Александр Геннадьевич"),
-    (23,"Осокина Татьяна Вячеславовна"),
-    (24,"Онянов Николай Викторович"),
-    (26,"Снигирева Татьяна Сергеевна"),(26,"Устюгова Татьяна Сергеевна"),
-    (27,"Маслова Наталья Николаевна"),(27,"Смолин Николай Алексеевич"),
-    (28,"Берсенев Дмитрий Николаевич"),
-    (29,"Колесникова Зинаида Андреевна"),
-    (30,"Шмелев Геннадий Федорович"),
-    (31,"Каменских Любовь Владимировна"),(36,"Каменских Любовь Владимировна"),
-    (32,"Ермакова Валентина Сергеевна"),
-    (33,"Давыдова Светлана Андреевна"),
-    (34,"Законнова Мария Викторовна"),(34,"Законнов Алексей Александрович"),
-    (34,"Болгова Яна Александровна"),(34,"Болгов Алексей Сергеевич"),
-    (35,"Лядова Валентина Михайловна"),(35,"Серебрич Елена Рашидовна"),
-    (37,"Мозеров Борис Георгиевич"),
-    (38,"Халтурина Алефтина Александровна"),
-    (39,"Дулова Мария Егоровна"),
-    (40,"Маслакова Ирина Владимировна"),
-    (41,"Поздеев Олег Евгеньевич"),
-    (42,"Нестерова Лариса Викторовна"),
-    (43,"Заморин Игорь Борисович"),
-    (44,"Скобелкин Виктор Андрианович"),
-    (45,"Шубина Любовь Семеновна"),
-    (46,"Секлецова Анастасия Сергеевна"),
-    (47,"Дураков Владимир Николаевич"),
-    (48,"Аскаров Сергей Альбертович"),
-    (49,"Соколов Андрей Сергеевич"),
-    (50,"Иллиш Елена Николаевна"),
-    (205,"Санникова Эльвира Рафхатовна"),
-    (213,"Колесникова Зинаида Андреевна"),
-    (214,"Баранова Анастасия Анатольевна"),
-    ("15/207","Каренина Светлана Сергеевна"),
-    ("15/208","Белоусова Ольга Николаевна"),
-    ("15/208","Белоусов Сергей Семенович"),
-    ("15/211","Мозеров Игорь Борисович"),
-]
+_PLOTS_FILE = "snt_plots.json"
 
-def _build_plot_lookup():
+def _load_sadovods():
+    """Загружает пары (участок, владелец) из snt_plots.json."""
+    try:
+        if os.path.exists(_PLOTS_FILE):
+            with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            result = []
+            for entry in data:
+                num = entry.get("num", "")
+                for owner in entry.get("owners", []):
+                    if owner.strip():
+                        result.append((num, owner))
+            return result
+    except Exception:
+        pass
+    return []
+
+def _build_plot_lookup(sadovods):
     sur = _defaultdict(list)
     fio = _defaultdict(list)
-    for plot, name in _SADOVODS:
+    for plot, name in sadovods:
         n = name.lower().strip()
         fio[n].append(plot)
-        s = n.split()[0]
-        if plot not in sur[s]:
-            sur[s].append(plot)
+        parts = n.split()
+        if parts:
+            s = parts[0]
+            if plot not in sur[s]:
+                sur[s].append(plot)
     return sur, fio
 
-_SURNAME_MAP, _FIO_MAP = _build_plot_lookup()
+_SURNAME_MAP, _FIO_MAP = _build_plot_lookup(_load_sadovods())
 
 _PAT_PLOT = [
     re.compile(r'участ[а-яё]*\s*[№#]?\s*(\d+(?:/\d+)?)', re.I),
@@ -252,6 +211,8 @@ def get_plot(row: dict) -> str:
     return ""
 
 def apply_plot_column(df):
+    global _SURNAME_MAP, _FIO_MAP
+    _SURNAME_MAP, _FIO_MAP = _build_plot_lookup(_load_sadovods())
     df = df.copy()
     df["Участок"] = df.apply(lambda r: get_plot(r.to_dict()), axis=1)
     cols = list(df.columns)
@@ -1322,6 +1283,7 @@ class MeterWidget(QWidget):
         self._photos: dict = self._load_photos()  # {"plot:year:month": filepath}
         self._expanded_years: set = set()
         self._years: list = []
+        self._active_years: set = self._load_active_years()
         self._plots: list = list(map(str, range(1, 51))) + \
                             ["205", "213", "214", "15/207", "15/208", "15/211"]
         self._cell_widgets: dict = {}   # key → MeterCellWidget
@@ -1342,6 +1304,25 @@ class MeterWidget(QWidget):
         try:
             with open(self.DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    _YEARS_FILE = "snt_meters_years.json"
+
+    def _load_active_years(self) -> set:
+        import datetime
+        try:
+            if os.path.exists(self._YEARS_FILE):
+                with open(self._YEARS_FILE, "r", encoding="utf-8") as f:
+                    return set(json.load(f))
+        except Exception:
+            pass
+        return {datetime.date.today().year}
+
+    def _save_active_years(self):
+        try:
+            with open(self._YEARS_FILE, "w", encoding="utf-8") as f:
+                json.dump(sorted(self._active_years), f, ensure_ascii=False)
         except Exception:
             pass
 
@@ -1378,6 +1359,11 @@ class MeterWidget(QWidget):
         top.addWidget(title)
         top.addStretch()
 
+        btn_add_year = QPushButton("＋  Добавить год")
+        btn_add_year.setObjectName("btnSecondary")
+        btn_add_year.clicked.connect(self._add_year)
+        top.addWidget(btn_add_year)
+
         btn_save = QPushButton("💾  Сохранить всё")
         btn_save.setObjectName("btnPrimary")
         btn_save.clicked.connect(self._save_all)
@@ -1411,8 +1397,8 @@ class MeterWidget(QWidget):
 
     # ── Построение таблицы ────────────────────────────────────────────────
     def _get_years(self) -> list:
-        """Определяем годы из уже введённых данных + текущий год."""
-        years_set = set()
+        """Определяем годы: явно добавленные + из данных/фото + текущий."""
+        years_set = set(self._active_years)
         for key in self._data:
             parts = key.split(":")
             if len(parts) >= 2:
@@ -1557,6 +1543,18 @@ class MeterWidget(QWidget):
         self.status_lbl.setText(
             f"Заполнено ячеек: {total_filled}  ·  прикреплено фото: {total_photos}"
         )
+
+    def _add_year(self):
+        import datetime
+        current = datetime.date.today().year
+        year, ok = QInputDialog.getInt(
+            self, "Добавить год", "Введите год:",
+            value=current - 1, min=2000, max=current + 1, step=1
+        )
+        if ok:
+            self._active_years.add(year)
+            self._save_active_years()
+            self._rebuild()
 
     def _toggle_year(self, year: int):
         self._save_all_cells()
@@ -2525,6 +2523,267 @@ class DocsWidget(QWidget):
         )
 
 
+# ======================================================================= #
+#  ВКЛАДКА «КАРТА»
+# ======================================================================= #
+
+class _PlotMarker(QGraphicsEllipseItem):
+    """Кликабельный кружок с номером участка."""
+    R = 16
+
+    def __init__(self, plot_num: str, owners: list, on_click):
+        r = self.R
+        super().__init__(-r, -r, r * 2, r * 2)
+        self._plot_num = plot_num
+        self._owners   = owners
+        self._on_click = on_click
+        self.setBrush(QColor("#1565c0"))
+        self.setPen(QPen(QColor("#64b5f6"), 2))
+        self.setZValue(1)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptHoverEvents(True)
+
+        lbl = QGraphicsTextItem(plot_num, self)
+        lbl.setDefaultTextColor(QColor("#ffffff"))
+        f = QFont(); f.setPointSize(8); f.setBold(True)
+        lbl.setFont(f)
+        br = lbl.boundingRect()
+        lbl.setPos(-br.width() / 2, -br.height() / 2)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._on_click(self._plot_num, self._owners)
+        super().mousePressEvent(event)
+
+    def hoverEnterEvent(self, event):
+        self.setBrush(QColor("#1976d2"))
+        self.setPen(QPen(QColor("#90caf9"), 2))
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.setBrush(QColor("#1565c0"))
+        self.setPen(QPen(QColor("#64b5f6"), 2))
+        super().hoverLeaveEvent(event)
+
+
+class _MapView(QGraphicsView):
+    """QGraphicsView с зумом колесом мыши."""
+    def __init__(self, scene, map_widget):
+        super().__init__(scene)
+        self._map_widget = map_widget
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setStyleSheet("background:#0f1923; border:none;")
+
+    def wheelEvent(self, event):
+        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self.scale(factor, factor)
+
+    def mousePressEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._map_widget._placing_mode):
+            pos = self.mapToScene(event.pos())
+            self._map_widget._on_map_click(pos)
+        else:
+            super().mousePressEvent(event)
+
+
+class MapWidget(QWidget):
+    """Схема-карта участков: загрузи изображение, расставь участки кликом."""
+
+    COORDS_FILE = "snt_map_plots.json"
+    IMAGE_FILE  = "snt_map_image.json"   # хранит путь к картинке
+
+    def __init__(self):
+        super().__init__()
+        self._placing_mode = False
+        self._image_path   = self._load_image_path()
+        self._setup_ui()
+        self.reload_map()
+
+    # ── Персистентность ──────────────────────────────────────────────────
+
+    def _load_image_path(self) -> str:
+        try:
+            if os.path.exists(self.IMAGE_FILE):
+                with open(self.IMAGE_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f).get("path", "")
+        except Exception:
+            pass
+        return ""
+
+    def _save_image_path(self, path: str):
+        try:
+            with open(self.IMAGE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"path": path}, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _load_plot_coords(self) -> dict:
+        """{"20": [x_px, y_px], ...} — пиксельные координаты на схеме."""
+        try:
+            if os.path.exists(self.COORDS_FILE):
+                with open(self.COORDS_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_plot_coords(self, coords: dict):
+        try:
+            with open(self.COORDS_FILE, "w", encoding="utf-8") as f:
+                json.dump(coords, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _load_plots_owners(self) -> dict:
+        try:
+            if os.path.exists("snt_plots.json"):
+                with open("snt_plots.json", "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return {str(p["num"]): p.get("owners", []) for p in data}
+        except Exception:
+            pass
+        return {}
+
+    # ── UI ───────────────────────────────────────────────────────────────
+
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        bar = QWidget()
+        bar.setStyleSheet("background:#0d1b2a; border-bottom:1px solid #1e3a5f;")
+        bar_lay = QHBoxLayout(bar)
+        bar_lay.setContentsMargins(20, 8, 20, 8)
+        bar_lay.setSpacing(10)
+
+        title = QLabel("Карта участков", objectName="pageTitle")
+        bar_lay.addWidget(title)
+        bar_lay.addStretch()
+
+        self._hint_lbl = QLabel("")
+        self._hint_lbl.setStyleSheet("color:#5a8ab0; font-size:12px;")
+        bar_lay.addWidget(self._hint_lbl)
+
+        btn_load = QPushButton("🖼  Загрузить схему")
+        btn_load.setObjectName("btnSecondary")
+        btn_load.clicked.connect(self._pick_image)
+        bar_lay.addWidget(btn_load)
+
+        self._btn_place = QPushButton("📍  Расставить участки")
+        self._btn_place.setObjectName("btnSecondary")
+        self._btn_place.setCheckable(True)
+        self._btn_place.toggled.connect(self._toggle_place_mode)
+        bar_lay.addWidget(self._btn_place)
+
+        lay.addWidget(bar)
+
+        self._scene = QGraphicsScene()
+        self._view  = _MapView(self._scene, self)
+        self._view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        lay.addWidget(self._view, stretch=1)
+
+        self._info = QLabel("Кликните на участок чтобы увидеть информацию")
+        self._info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._info.setStyleSheet(
+            "background:#0d1b2a; color:#cdd9e5; font-size:13px;"
+            "padding:8px; border-top:1px solid #1e3a5f;"
+        )
+        lay.addWidget(self._info)
+
+    # ── Логика карты ─────────────────────────────────────────────────────
+
+    def _pick_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите изображение схемы СНТ", "",
+            "Изображения (*.png *.jpg *.jpeg *.bmp *.webp)"
+        )
+        if path:
+            self._image_path = path
+            self._save_image_path(path)
+            self.reload_map()
+
+    def _toggle_place_mode(self, on: bool):
+        self._placing_mode = on
+        if on:
+            self._btn_place.setStyleSheet(
+                "QPushButton{background:#b71c1c;color:white;border-radius:6px;padding:4px 12px;}"
+            )
+            self._hint_lbl.setText("Режим расстановки: кликните на схеме → выберите участок")
+            self._view.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self._view.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self._btn_place.setStyleSheet("")
+            self._hint_lbl.setText("")
+            self._view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self._view.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _on_map_click(self, pos):
+        """Вызывается из _MapView в режиме расстановки."""
+        owners   = self._load_plots_owners()
+        all_nums = sorted(
+            owners.keys() or [str(i) for i in range(1, 51)],
+            key=lambda x: (len(x), x)
+        )
+        num, ok = QInputDialog.getItem(
+            self, "Выбор участка",
+            "Какой участок разместить здесь?",
+            all_nums, 0, False
+        )
+        if ok and num:
+            coords = self._load_plot_coords()
+            coords[num] = [pos.x(), pos.y()]
+            self._save_plot_coords(coords)
+            self.reload_map()
+
+    def _on_plot_click(self, plot_num: str, owners: list):
+        text = " · ".join(owners) if owners else "нет данных"
+        self._info.setText(f"  Участок {plot_num}  —  {text}")
+
+    def reload_map(self):
+        self._scene.clear()
+
+        if self._image_path and os.path.exists(self._image_path):
+            px = QPixmap(self._image_path)
+            if px.isNull():
+                QMessageBox.warning(self, "Ошибка", "Не удалось загрузить изображение.")
+                self._image_path = ""
+                self.reload_map()
+                return
+            item = self._scene.addPixmap(px)
+            self._scene.setSceneRect(QRectF(0, 0, px.width(), px.height()))
+        else:
+            w, h = 820, 520
+            self._scene.setSceneRect(QRectF(0, 0, w, h))
+            self._scene.addRect(
+                QRectF(0, 0, w, h),
+                QPen(Qt.PenStyle.NoPen),
+                QColor("#0a1520")
+            )
+            t = self._scene.addText(
+                "Загрузите схему карты СНТ\n\n"
+                "Нажмите «🖼 Загрузить схему» и выберите скриншот или скан карты.\n"
+                "Затем нажмите «📍 Расставить участки» и кликайте по нужным местам.",
+                QFont("", 13)
+            )
+            t.setDefaultTextColor(QColor("#5a8ab0"))
+            br = t.boundingRect()
+            t.setPos((w - br.width()) / 2, (h - br.height()) / 2)
+
+        coords = self._load_plot_coords()
+        owners = self._load_plots_owners()
+        for plot_num, pos in coords.items():
+            if len(pos) < 2:
+                continue
+            owner_list = owners.get(str(plot_num), [])
+            marker = _PlotMarker(plot_num, owner_list, self._on_plot_click)
+            marker.setPos(pos[0], pos[1])
+            self._scene.addItem(marker)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2562,6 +2821,7 @@ class MainWindow(QMainWindow):
             ("📐  Нормативы",          4),
             ("📍  Участки",            5),
             ("🗂  Документы",          6),
+            ("🗺  Карта",              7),
         ]:
             item = QListWidgetItem(label)
             item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -2579,6 +2839,7 @@ class MainWindow(QMainWindow):
         self.rates       = RatesWidget()
         self.plots       = PlotsWidget()
         self.docs        = DocsWidget()
+        self.map_tab     = MapWidget()
         self.stack.addWidget(self.detail)       # 0
         self.stack.addWidget(self.sum_vznosy)   # 1
         self.stack.addWidget(self.sum_electro)  # 2
@@ -2586,6 +2847,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.rates)        # 4
         self.stack.addWidget(self.plots)        # 5
         self.stack.addWidget(self.docs)         # 6
+        self.stack.addWidget(self.map_tab)      # 7
         root.addWidget(self.stack, stretch=1)
 
         self.nav.setCurrentRow(2)
@@ -2598,6 +2860,8 @@ class MainWindow(QMainWindow):
                 self.sum_vznosy.refresh(self.detail.df_full)
             elif idx == 2:
                 self.sum_electro.refresh(self.detail.df_full)
+            elif idx == 7:
+                self.map_tab.reload_map()
 
     def _apply_styles(self):
         self.setStyleSheet("""
