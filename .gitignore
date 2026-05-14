@@ -1,1 +1,9 @@
 /.venv
+/data/
+/.claude/
+/__pycache__/
+*.pyc
+*.pyo
+/dist/
+/build/
+*.spec

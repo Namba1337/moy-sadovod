@@ -3,6 +3,8 @@ import re
 import json
 import os
 import shutil
+
+DATA_DIR = "data"
 import pandas as pd
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -118,7 +120,7 @@ def apply_categorization(df: pd.DataFrame) -> pd.DataFrame:
 # ======================================================================= #
 from collections import defaultdict as _defaultdict
 
-_PLOTS_FILE = "snt_plots.json"
+_PLOTS_FILE = os.path.join(DATA_DIR, "snt_plots.json")
 
 def _load_sadovods():
     """Загружает пары (участок, владелец) из snt_plots.json."""
@@ -679,7 +681,7 @@ class SummaryWidget(QWidget):
     """Сводная таблица: участок × год → суммы взносов и электроэнергии."""
 
     # Файл для хранения плановых сумм
-    PLAN_FILE = "snt_plan.json"
+    PLAN_FILE = os.path.join(DATA_DIR, "snt_plan.json")
 
     def __init__(self, mode: str = "vznosy"):
         super().__init__()
@@ -1272,8 +1274,8 @@ class MeterCellWidget(QWidget):
 class MeterWidget(QWidget):
     """Вкладка передачи показаний счётчиков."""
 
-    DATA_FILE  = "snt_meters.json"
-    PHOTO_DIR  = "snt_photos"
+    DATA_FILE  = os.path.join(DATA_DIR, "snt_meters.json")
+    PHOTO_DIR  = os.path.join(DATA_DIR, "snt_photos")
     MONTH_NAMES = ["янв", "фев", "мар", "апр", "май", "июн",
                    "июл", "авг", "сен", "окт", "ноя", "дек"]
 
@@ -1307,7 +1309,7 @@ class MeterWidget(QWidget):
         except Exception:
             pass
 
-    _YEARS_FILE = "snt_meters_years.json"
+    _YEARS_FILE = os.path.join(DATA_DIR, "snt_meters_years.json")
 
     def _load_active_years(self) -> set:
         import datetime
@@ -1622,7 +1624,7 @@ class MeterWidget(QWidget):
 class RatesWidget(QWidget):
     """Вкладка тарифов на электроэнергию (₽/кВт·ч)."""
 
-    DATA_FILE = "snt_rates.json"
+    DATA_FILE = os.path.join(DATA_DIR, "snt_rates.json")
 
     def __init__(self):
         super().__init__()
@@ -1868,7 +1870,7 @@ class RatesWidget(QWidget):
 class PlotsWidget(QWidget):
     """Вкладка участков: ручное добавление и управление списком."""
 
-    DATA_FILE = "snt_plots.json"
+    DATA_FILE = os.path.join(DATA_DIR, "snt_plots.json")
 
     def __init__(self):
         super().__init__()
@@ -2412,7 +2414,7 @@ class DocCell(QWidget):
 class DocsWidget(QWidget):
     """Вкладка документов: таблица по участку и типу документа."""
 
-    DATA_FILE = "snt_docs.json"
+    DATA_FILE = os.path.join(DATA_DIR, "snt_docs.json")
     DOC_TYPES = [
         "Паспорт",
         "Договор",
@@ -2592,8 +2594,8 @@ class _MapView(QGraphicsView):
 class MapWidget(QWidget):
     """Схема-карта участков: загрузи изображение, расставь участки кликом."""
 
-    COORDS_FILE = "snt_map_plots.json"
-    IMAGE_FILE  = "snt_map_image.json"   # хранит путь к картинке
+    COORDS_FILE = os.path.join(DATA_DIR, "snt_map_plots.json")
+    IMAGE_FILE  = os.path.join(DATA_DIR, "snt_map_image.json")
 
     def __init__(self):
         super().__init__()
@@ -2639,8 +2641,8 @@ class MapWidget(QWidget):
 
     def _load_plots_owners(self) -> dict:
         try:
-            if os.path.exists("snt_plots.json"):
-                with open("snt_plots.json", "r", encoding="utf-8") as f:
+            if os.path.exists(os.path.join(DATA_DIR, "snt_plots.json")):
+                with open(os.path.join(DATA_DIR, "snt_plots.json"), "r", encoding="utf-8") as f:
                     data = json.load(f)
                 return {str(p["num"]): p.get("owners", []) for p in data}
         except Exception:
@@ -2955,6 +2957,7 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    os.makedirs(DATA_DIR, exist_ok=True)
     app = QApplication(sys.argv)
     app.setApplicationName("СНТ Финансовый учёт")
     window = MainWindow()
