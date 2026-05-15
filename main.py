@@ -4,7 +4,9 @@ import json
 import os
 import shutil
 import calendar
+import zipfile
 from datetime import date
+from pathlib import Path
 
 DATA_DIR = "data"
 import pandas as pd
@@ -1356,6 +1358,13 @@ class MeterWidget(QWidget):
         except Exception:
             pass
 
+    def reload(self):
+        self._data = self._load_data()
+        self._photos = self._load_photos()
+        self._active_years = self._load_active_years()
+        self._cell_widgets.clear()
+        self._rebuild()
+
     def _load_photos(self) -> dict:
         try:
             pf = os.path.join(self.PHOTO_DIR, "_index.json")
@@ -1726,6 +1735,10 @@ class RatesWidget(QWidget):
         except Exception:
             pass
 
+    def reload(self):
+        self._rates = self._load()
+        self._rebuild_table()
+
     def _setup_ui(self):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
@@ -1970,6 +1983,10 @@ class PlotsWidget(QWidget):
                 json.dump(self._plots, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    def reload(self):
+        self._plots = self._load()
+        self._rebuild_table()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -3636,8 +3653,13 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        left_panel = QWidget(objectName="leftPanel")
+        left_panel.setFixedWidth(210)
+        left_lyt = QVBoxLayout(left_panel)
+        left_lyt.setContentsMargins(0, 0, 0, 0)
+        left_lyt.setSpacing(0)
+
         self.nav = QListWidget(objectName="navPanel")
-        self.nav.setFixedWidth(210)
 
         logo = QListWidgetItem("💼  СНТ Учёт")
         logo.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -3666,7 +3688,21 @@ class MainWindow(QMainWindow):
             self.nav_indices[self.nav.count() - 1] = idx
 
         self.nav.currentRowChanged.connect(self._on_nav_changed)
-        root.addWidget(self.nav)
+
+        btn_save_proj = QPushButton("💾  Сохранить проект")
+        btn_save_proj.setObjectName("btnNavAction")
+        btn_save_proj.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_save_proj.clicked.connect(self._save_project)
+
+        btn_load_proj = QPushButton("📂  Загрузить проект")
+        btn_load_proj.setObjectName("btnNavAction")
+        btn_load_proj.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_load_proj.clicked.connect(self._load_project)
+
+        left_lyt.addWidget(self.nav)
+        left_lyt.addWidget(btn_save_proj)
+        left_lyt.addWidget(btn_load_proj)
+        root.addWidget(left_panel)
 
         self.stack = QStackedWidget(objectName="contentArea")
         self.detail      = DetailWidget()
@@ -3710,12 +3746,113 @@ class MainWindow(QMainWindow):
             elif idx == 8:
                 self.energy_debt.refresh(self.detail.df_full)
 
+    # ── Сохранение / загрузка проекта ────────────────────────────────────
+
+    _PROJECT_JSON_FILES = [
+        "snt_plots.json", "snt_plan.json", "snt_rates.json",
+        "snt_map_plots.json", "snt_map_image.json",
+        "snt_meters.json", "snt_meters_years.json",
+        "snt_meter_replacements.json", "snt_energy_baseline.json",
+        "snt_common_meter.json",
+    ]
+
+    def _save_project(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить проект СНТ", "", "Проект СНТ (*.snt)")
+        if not path:
+            return
+        if not path.endswith(".snt"):
+            path += ".snt"
+
+        data_dir = Path(DATA_DIR)
+        errors = []
+        try:
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for fname in self._PROJECT_JSON_FILES:
+                    src = data_dir / fname
+                    if src.exists():
+                        zf.write(src, f"data/{fname}")
+
+                # включаем файл карты, если он локальный
+                map_cfg = data_dir / "snt_map_image.json"
+                if map_cfg.exists():
+                    try:
+                        with open(map_cfg, encoding="utf-8") as f:
+                            img_path = json.load(f).get("path", "")
+                        if img_path and Path(img_path).is_file():
+                            ext = Path(img_path).suffix
+                            zf.write(img_path, f"map_image{ext}")
+                    except Exception as e:
+                        errors.append(f"Изображение карты: {e}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить проект:\n{e}")
+            return
+
+        msg = f"Проект сохранён:\n{path}"
+        if errors:
+            msg += "\n\nПредупреждения:\n" + "\n".join(errors)
+        QMessageBox.information(self, "Сохранено", msg)
+
+    def _load_project(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Загрузить проект СНТ", "", "Проект СНТ (*.snt)")
+        if not path:
+            return
+
+        reply = QMessageBox.question(
+            self, "Загрузка проекта",
+            "Текущие данные будут заменены данными из файла.\nПродолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        data_dir = Path(DATA_DIR)
+        data_dir.mkdir(exist_ok=True)
+        try:
+            with zipfile.ZipFile(path, "r") as zf:
+                names = zf.namelist()
+
+                # извлекаем JSON-файлы данных
+                for name in names:
+                    if name.startswith("data/") and name.endswith(".json"):
+                        fname = name[5:]
+                        if fname:
+                            dest = data_dir / fname
+                            dest.write_bytes(zf.read(name))
+
+                # извлекаем изображение карты
+                map_name = next(
+                    (n for n in names if n.startswith("map_image.")), None)
+                if map_name:
+                    ext = Path(map_name).suffix
+                    img_dest = data_dir / f"map_image{ext}"
+                    img_dest.write_bytes(zf.read(map_name))
+                    map_cfg = data_dir / "snt_map_image.json"
+                    with open(map_cfg, "w", encoding="utf-8") as f:
+                        json.dump({"path": str(img_dest.resolve())}, f)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить проект:\n{e}")
+            return
+
+        # перезагружаем все виджеты из новых файлов
+        self.plots.reload()
+        self.rates.reload()
+        self.meters.reload()
+        self.map_tab.reload_map()
+        self.energy_debt.refresh(self.detail.df_full)
+
+        QMessageBox.information(self, "Загружено", "Проект успешно загружен.")
+
     def _apply_styles(self):
         self.setStyleSheet("""
             QMainWindow { background: #0f1923; }
+            QWidget#leftPanel {
+                background: #0d1b2a;
+                border-right: 1px solid #1e3a5f;
+            }
             QListWidget#navPanel {
-                background: #0d1b2a; border: none;
-                border-right: 1px solid #1e3a5f; padding: 0; outline: 0;
+                background: #0d1b2a; border: none; padding: 0; outline: 0;
             }
             QListWidget#navPanel::item {
                 color: #8eb3d4; padding: 13px 20px; font-size: 14px;
@@ -3727,6 +3864,14 @@ class MainWindow(QMainWindow):
             QListWidget#navPanel::item:hover:!selected {
                 background: #132336; color: #b0cfe8;
             }
+            QPushButton#btnNavAction {
+                background: #0d1b2a; color: #7a9bb8;
+                border: none; border-top: 1px solid #1e3a5f;
+                padding: 11px 20px; font-size: 13px;
+                text-align: left;
+            }
+            QPushButton#btnNavAction:hover { background: #132336; color: #b0cfe8; }
+            QPushButton#btnNavAction:pressed { background: #0a1520; }
             QStackedWidget#contentArea { background: #111e2b; }
             QWidget {
                 background: #111e2b; color: #cdd9e5;
