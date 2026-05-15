@@ -377,6 +377,18 @@ class DetailWidget(QWidget):
             QMessageBox.critical(self, "Ошибка загрузки", f"Не удалось загрузить файл:\n{e}")
 
     # ------------------------------------------------------------------ #
+    def load_dataframe(self, df: "pd.DataFrame"):
+        """Восстанавливает DataFrame из сохранённого проекта без диалога выбора файла."""
+        self.df_full = df
+        min_d, max_d = df["Дата"].min(), df["Дата"].max()
+        if pd.notna(min_d):
+            self.date_from.setDate(QDate(min_d.year, min_d.month, min_d.day))
+        if pd.notna(max_d):
+            self.date_to.setDate(QDate(max_d.year, max_d.month, max_d.day))
+        self.apply_filters()
+        self.dataLoaded.emit(self.df_full)
+
+    # ------------------------------------------------------------------ #
     def refresh_plot_column(self):
         """Пересчитывает столбец «Участок» по актуальным данным из snt_plots.json."""
         if self.df_full is None:
@@ -445,7 +457,7 @@ class DetailWidget(QWidget):
             "Назначение": 340, "Категория": 210, "Участок": 80,
         }
 
-        for row_idx, (_, row) in enumerate(df.iterrows()):
+        for row_idx, (df_idx, row) in enumerate(df.iterrows()):
             cat       = str(row.get("Категория", "Прочее"))
             row_color = CATEGORY_COLORS.get(cat, QColor(55, 55, 60))
 
@@ -463,6 +475,8 @@ class DetailWidget(QWidget):
 
                 item = QTableWidgetItem(text)
                 item.setBackground(row_color)
+                if col_idx == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, df_idx)
 
                 if col == "Поступление" and text:
                     item.setForeground(QColor("#81d4a0"))
@@ -543,8 +557,13 @@ class DetailWidget(QWidget):
         """Вставляет копию строки row сразу под ней."""
         col_count = self.table.columnCount()
         insert_at = row + 1
-        self.table.insertRow(insert_at)
 
+        # Получаем pandas-индекс исходной строки
+        src_item0 = self.table.item(row, 0)
+        src_df_idx = src_item0.data(Qt.ItemDataRole.UserRole) if src_item0 else None
+
+        self.table.blockSignals(True)
+        self.table.insertRow(insert_at)
         for col in range(col_count):
             src_item = self.table.item(row, col)
             if src_item:
@@ -553,8 +572,16 @@ class DetailWidget(QWidget):
                 new_item.setForeground(src_item.foreground())
                 new_item.setTextAlignment(src_item.textAlignment())
                 self.table.setItem(insert_at, col, new_item)
+        self.table.blockSignals(False)
 
-        # Выделяем новую строку
+        # Дублируем строку в df_full и присваиваем новый индекс
+        if self.df_full is not None and src_df_idx is not None and src_df_idx in self.df_full.index:
+            new_df_idx = int(self.df_full.index.max()) + 1
+            self.df_full.loc[new_df_idx] = self.df_full.loc[src_df_idx].copy()
+            new_item0 = self.table.item(insert_at, 0)
+            if new_item0:
+                new_item0.setData(Qt.ItemDataRole.UserRole, new_df_idx)
+
         self.table.selectRow(insert_at)
         self._update_summary()
 
@@ -567,7 +594,11 @@ class DetailWidget(QWidget):
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            item0 = self.table.item(row, 0)
+            df_idx = item0.data(Qt.ItemDataRole.UserRole) if item0 else None
             self.table.removeRow(row)
+            if self.df_full is not None and df_idx is not None and df_idx in self.df_full.index:
+                self.df_full = self.df_full.drop(index=df_idx)
             self._update_summary()
 
     # ------------------------------------------------------------------ #
@@ -606,6 +637,27 @@ class DetailWidget(QWidget):
                 item.setForeground(QColor("#cdd9e5"))
 
         self.table.blockSignals(False)
+
+        # Записываем изменение обратно в df_full
+        if self.df_full is not None:
+            item0 = self.table.item(item.row(), 0)
+            df_idx = item0.data(Qt.ItemDataRole.UserRole) if item0 else None
+            if df_idx is not None and df_idx in self.df_full.index:
+                new_text = item.text().strip()
+                if col in ("Поступление", "Списание"):
+                    raw = new_text.replace(" ", "").replace(" ", "").replace("₽", "").replace(",", ".")
+                    try:
+                        self.df_full.at[df_idx, col] = float(raw) if raw else float("nan")
+                    except ValueError:
+                        pass
+                elif col == "Дата":
+                    try:
+                        self.df_full.at[df_idx, col] = pd.to_datetime(new_text, dayfirst=True)
+                    except Exception:
+                        pass
+                else:
+                    self.df_full.at[df_idx, col] = new_text
+
         self._update_summary()
 
     def _update_summary(self):
@@ -3896,6 +3948,15 @@ class MainWindow(QMainWindow):
                     if src.exists():
                         zf.write(src, f"data/{fname}")
 
+                # сохраняем данные вкладки «Детализация»
+                if self.detail.df_full is not None:
+                    try:
+                        json_str = self.detail.df_full.to_json(
+                            orient="records", force_ascii=False)
+                        zf.writestr("data/detail_transactions.json", json_str)
+                    except Exception as e:
+                        errors.append(f"Детализация: {e}")
+
                 # включаем файл карты, если он локальный
                 map_cfg = data_dir / "snt_map_image.json"
                 if map_cfg.exists():
@@ -3936,13 +3997,27 @@ class MainWindow(QMainWindow):
             with zipfile.ZipFile(path, "r") as zf:
                 names = zf.namelist()
 
-                # извлекаем JSON-файлы данных
+                # извлекаем JSON-файлы данных (кроме транзакций — они в памяти)
                 for name in names:
                     if name.startswith("data/") and name.endswith(".json"):
                         fname = name[5:]
-                        if fname:
+                        if fname and fname != "detail_transactions.json":
                             dest = data_dir / fname
                             dest.write_bytes(zf.read(name))
+
+                # восстанавливаем данные вкладки «Детализация»
+                detail_df = None
+                if "data/detail_transactions.json" in names:
+                    try:
+                        from io import StringIO
+                        json_str = zf.read("data/detail_transactions.json").decode("utf-8")
+                        detail_df = pd.read_json(StringIO(json_str), orient="records")
+                        detail_df["Дата"] = pd.to_datetime(
+                            detail_df["Дата"], unit="ms", errors="coerce")
+                    except Exception as e:
+                        QMessageBox.warning(
+                            self, "Предупреждение",
+                            f"Не удалось загрузить данные Детализации:\n{e}")
 
                 # извлекаем изображение карты
                 map_name = next(
@@ -3963,7 +4038,11 @@ class MainWindow(QMainWindow):
         self.rates.reload()
         self.meters.reload()
         self.map_tab.reload_map()
-        self.energy_debt.refresh(self.detail.df_full)
+
+        if detail_df is not None:
+            self.detail.load_dataframe(detail_df)
+        else:
+            self.energy_debt.refresh(self.detail.df_full)
 
         QMessageBox.information(self, "Загружено", "Проект успешно загружен.")
 
