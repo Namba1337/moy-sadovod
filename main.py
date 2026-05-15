@@ -185,9 +185,24 @@ def _find_in_text(text):
 
 def _find_by_name(text):
     t = text.lower()
+    # 1. Полное ФИО (3 слова)
     for fio_n, plots in _FIO_MAP.items():
         if fio_n in t:
             return list(dict.fromkeys(plots))
+    # 2. «Фамилия Имя» (без отчества) — только при однозначном результате
+    seen: dict = {}
+    for fio_n, plots in _FIO_MAP.items():
+        parts = fio_n.split()
+        if len(parts) >= 2:
+            short = parts[0] + " " + parts[1]
+            if len(short) > 5 and re.search(r'\b' + re.escape(short) + r'\b', t):
+                for p in plots:
+                    seen.setdefault(short, [])
+                    if p not in seen[short]:
+                        seen[short].append(p)
+    for short, plots in seen.items():
+        return list(dict.fromkeys(plots))   # первый однозначный
+    # 3. Только фамилия
     for sur, plots in _SURNAME_MAP.items():
         if re.search(r'\b' + re.escape(sur) + r'\b', t):
             return list(dict.fromkeys(plots))
@@ -358,6 +373,14 @@ class DetailWidget(QWidget):
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка загрузки", f"Не удалось загрузить файл:\n{e}")
+
+    # ------------------------------------------------------------------ #
+    def refresh_plot_column(self):
+        """Пересчитывает столбец «Участок» по актуальным данным из snt_plots.json."""
+        if self.df_full is None:
+            return
+        self.df_full = apply_plot_column(self.df_full)
+        self.apply_filters()
 
     # ------------------------------------------------------------------ #
     def apply_filters(self):
@@ -1960,6 +1983,8 @@ class RatesWidget(QWidget):
 class PlotsWidget(QWidget):
     """Вкладка участков: ручное добавление и управление списком."""
 
+    plotsUpdated = pyqtSignal()   # эмитится при любом изменении snt_plots.json
+
     DATA_FILE = os.path.join(DATA_DIR, "snt_plots.json")
 
     def __init__(self):
@@ -1983,6 +2008,7 @@ class PlotsWidget(QWidget):
                 json.dump(self._plots, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+        self.plotsUpdated.emit()
 
     def reload(self):
         self._plots = self._load()
@@ -3821,6 +3847,9 @@ class MainWindow(QMainWindow):
         self.detail.dataLoaded.connect(self.sum_vznosy.refresh)
         self.detail.dataLoaded.connect(self.sum_electro.refresh)
         self.detail.dataLoaded.connect(self.energy_debt.refresh)
+
+        # При изменении данных вкладки «Участки» — пересчитать столбец в Детализации
+        self.plots.plotsUpdated.connect(self.detail.refresh_plot_column)
 
         self.nav.setCurrentRow(2)
 
