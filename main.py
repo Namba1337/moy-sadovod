@@ -229,6 +229,8 @@ def get_plot(row: dict) -> str:
     if p: return ", ".join(str(x) for x in p)
     p = _find_by_name(text)
     if p: return ", ".join(str(x) for x in p[:2])
+    p = _find_by_name(cont)
+    if p: return ", ".join(str(x) for x in p[:2])
     p = _find_by_contragent(cont)
     if p: return ", ".join(str(x) for x in p[:2])
     return ""
