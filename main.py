@@ -1999,6 +1999,10 @@ class PlotsWidget(QWidget):
         title.setObjectName("pageTitle")
         top.addWidget(title)
         top.addStretch()
+        btn_import = QPushButton("📥  Импорт из Excel")
+        btn_import.setObjectName("btnSecondary")
+        btn_import.clicked.connect(self._import_from_excel)
+        top.addWidget(btn_import)
         btn_add = QPushButton("＋  Добавить участок")
         btn_add.setObjectName("btnPrimary")
         btn_add.clicked.connect(self._add_plot)
@@ -2085,6 +2089,94 @@ class PlotsWidget(QWidget):
                 self._plots[idx] = {**plot, "owners": updated}
                 self._save()
                 self._rebuild_table()
+
+    def _import_from_excel(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите файл Excel", "",
+            "Excel файлы (*.xlsx *.xls *.xlsm)"
+        )
+        if not path:
+            return
+
+        try:
+            df = pd.read_excel(path, dtype=str)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка чтения файла", str(e))
+            return
+
+        # Ищем столбцы по частичному совпадению
+        col_num = None
+        col_name = None
+        for col in df.columns:
+            col_lower = str(col).lower().strip()
+            if col_num is None and ("участк" in col_lower or col_lower in ("№", "n", "номер")):
+                col_num = col
+            if col_name is None and ("ф.и.о" in col_lower or "фио" in col_lower or "имя" in col_lower or col_lower == "ф.и.о."):
+                col_name = col
+
+        if col_num is None or col_name is None:
+            QMessageBox.warning(
+                self, "Неверный формат",
+                f"Не удалось найти нужные столбцы.\n"
+                f"Ожидается: «№ участка» и «Ф.И.О.»\n"
+                f"Найдены столбцы: {', '.join(str(c) for c in df.columns)}"
+            )
+            return
+
+        # Группируем по номеру участка
+        imported: dict[str, list[str]] = {}
+        for _, row in df.iterrows():
+            num = str(row[col_num]).strip()
+            name = str(row[col_name]).strip()
+            if not num or num.lower() in ("nan", "none", "") or not name or name.lower() in ("nan", "none", ""):
+                continue
+            imported.setdefault(num, [])
+            if name not in imported[num]:
+                imported[num].append(name)
+
+        if not imported:
+            QMessageBox.warning(self, "Пустой файл", "В файле не найдено данных об участках.")
+            return
+
+        # Диалог выбора режима импорта
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Импорт участков")
+        msg.setText(
+            f"Найдено {len(imported)} участков в файле.\n\n"
+            "Как импортировать?"
+        )
+        btn_replace = msg.addButton("Заменить всё", QMessageBox.ButtonRole.DestructiveRole)
+        btn_merge   = msg.addButton("Объединить",   QMessageBox.ButtonRole.AcceptRole)
+        btn_cancel  = msg.addButton("Отмена",        QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_merge)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked is btn_cancel:
+            return
+
+        if clicked is btn_replace:
+            self._plots = [{"num": num, "owners": owners} for num, owners in imported.items()]
+        else:
+            # Объединяем: добавляем новые участки, дополняем существующие
+            existing = {p["num"]: p for p in self._plots}
+            for num, owners in imported.items():
+                if num in existing:
+                    current_owners = existing[num].get("owners", [])
+                    for o in owners:
+                        if o not in current_owners:
+                            current_owners.append(o)
+                    existing[num]["owners"] = current_owners
+                else:
+                    existing[num] = {"num": num, "owners": owners}
+            self._plots = list(existing.values())
+
+        self._save()
+        self._rebuild_table()
+        QMessageBox.information(
+            self, "Импорт завершён",
+            f"Импортировано {len(imported)} участков."
+        )
 
     def _add_plot(self):
         dlg = PlotEditDialog(plot_data=None, parent=self)
