@@ -2333,7 +2333,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon
 
-
+#
 class OwnersPopup(QDialog):
     """Диалог просмотра/редактирования списка собственников участка."""
 
