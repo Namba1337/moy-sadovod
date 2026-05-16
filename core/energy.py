@@ -46,6 +46,12 @@ def load_meters() -> dict:
     return _read_json(METERS_FILE, {})
 
 
+def save_meters(data: dict) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(METERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def load_rates() -> list:
     """[{"date": "YYYY-MM-DD", "rate": "X.XX", "note": "..."}]"""
     return _read_json(RATES_FILE, [])
