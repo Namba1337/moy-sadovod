@@ -705,8 +705,25 @@ _CAT_ELECTRO = {
     "Членские взносы + Электроэнергия",
 }
 
-# Порядок участков для строк таблицы
-_PLOT_ORDER = [str(i) for i in range(1, 51)] + ["205", "213", "214", "15/207", "15/208", "15/211"]
+# Порядок участков для строк таблицы — динамически из snt_plots.json
+def _plot_num_key(s: str):
+    """Ключ сортировки: числовые участки по значению, остальные в конце."""
+    try:
+        return (0, int(s), s)
+    except ValueError:
+        return (1, 0, s)
+
+def _load_plot_order() -> list[str]:
+    """Возвращает список номеров участков из snt_plots.json, отсортированный по _plot_num_key."""
+    try:
+        if os.path.exists(_PLOTS_FILE):
+            with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            nums = [str(e.get("num", "")) for e in data if e.get("num")]
+            return sorted(set(nums), key=_plot_num_key)
+    except Exception:
+        pass
+    return []
 
 
 class SplitCellWidget(QWidget):
@@ -896,9 +913,10 @@ class SummaryWidget(QWidget):
         mixed_pivot = exp.groupby(["_участок","_год"])["_смешанный"].any().unstack(fill_value=False)
 
         years     = sorted(pivot.columns.tolist())
-        all_plots = [p for p in _PLOT_ORDER if p in pivot.index]
+        plot_order = _load_plot_order()
+        all_plots = [p for p in plot_order if p in pivot.index]
         extra     = [p for p in pivot.index if p not in all_plots]
-        all_plots += sorted(extra, key=lambda x: (len(x), x))
+        all_plots += sorted(extra, key=_plot_num_key)
 
         return pivot, mixed_pivot, years, all_plots
 
@@ -1301,486 +1319,6 @@ class SummaryWidget(QWidget):
 
 
 # ======================================================================= #
-#  ВКЛАДКА «ПЕРЕДАЧА ПОКАЗАНИЙ»
-# ======================================================================= #
-
-class MeterCellWidget(QWidget):
-    """Ячейка: поле ввода показания + кнопка фото."""
-
-    photo_changed = pyqtSignal(str, int, int)   # plot, year, month
-
-    def __init__(self, plot: str, year: int, month: int,
-                 value: str = "", has_photo: bool = False):
-        super().__init__()
-        self._plot = plot
-        self._year = year
-        self._month = month
-        self._anomaly: str | None = None
-
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(3, 1, 3, 1)
-        lay.setSpacing(4)
-
-        self.edit = QLineEdit(value)
-        self.edit.setPlaceholderText("показ.")
-        self.edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._normal_edit_style = (
-            "background: transparent; border: none; color: #cdd9e5;"
-            "font-size: 11px;"
-        )
-        self.edit.setStyleSheet(self._normal_edit_style)
-        lay.addWidget(self.edit, stretch=1)
-
-        self.btn_photo = QPushButton("📎" if not has_photo else "🖼")
-        self.btn_photo.setFixedSize(24, 24)
-        self._set_photo_style(has_photo)
-        self.btn_photo.clicked.connect(self._on_photo_click)
-        lay.addWidget(self.btn_photo)
-
-    def set_anomaly(self, kind: str | None, detail: str = ""):
-        """kind: 'drop' | 'spike' | None"""
-        self._anomaly = kind
-        if kind == "drop":
-            self.edit.setStyleSheet(
-                "background:#2a0d0d;border:1px solid #c62828;border-radius:3px;"
-                "color:#ef9a9a;font-size:11px;font-weight:700;"
-            )
-            self.setToolTip(detail or "Показание меньше предыдущего")
-        elif kind == "spike":
-            self.edit.setStyleSheet(
-                "background:#2a1f0d;border:1px solid #f9a825;border-radius:3px;"
-                "color:#ffd54f;font-size:11px;"
-            )
-            self.setToolTip(detail or "Расход существенно больше обычного")
-        else:
-            self.edit.setStyleSheet(self._normal_edit_style)
-            self.setToolTip("")
-
-    def _set_photo_style(self, has_photo: bool):
-        if has_photo:
-            style = ("QPushButton{background:#0d3b1a;border:1px solid #2e7d32;"
-                     "border-radius:4px;font-size:13px;}"
-                     "QPushButton:hover{background:#1b5e20;}")
-        else:
-            style = ("QPushButton{background:#162131;border:1px solid #2a4a6b;"
-                     "border-radius:4px;font-size:13px;}"
-                     "QPushButton:hover{background:#1e3a5f;}")
-        self.btn_photo.setStyleSheet(style)
-
-    def set_has_photo(self, has_photo: bool):
-        self.btn_photo.setText("🖼" if has_photo else "📎")
-        self._set_photo_style(has_photo)
-
-    def _on_photo_click(self):
-        self.photo_changed.emit(self._plot, self._year, self._month)
-
-    def get_value(self) -> str:
-        return self.edit.text().strip()
-
-
-class MeterWidget(QWidget):
-    """Вкладка передачи показаний счётчиков."""
-
-    DATA_FILE  = os.path.join(DATA_DIR, "snt_meters.json")
-    PHOTO_DIR  = os.path.join(DATA_DIR, "snt_photos")
-    MONTH_NAMES = ["янв", "фев", "мар", "апр", "май", "июн",
-                   "июл", "авг", "сен", "окт", "ноя", "дек"]
-
-    def __init__(self):
-        super().__init__()
-        self._data: dict = self._load_data()   # {"plot:year:month": value}
-        self._photos: dict = self._load_photos()  # {"plot:year:month": filepath}
-        self._expanded_years: set = set()
-        self._years: list = []
-        self._active_years: set = self._load_active_years()
-        self._plots: list = list(map(str, range(1, 51))) + \
-                            ["205", "213", "214", "15/207", "15/208", "15/211"]
-        self._cell_widgets: dict = {}   # key → MeterCellWidget
-        self._setup_ui()
-        self._rebuild()
-
-    # ── Персистентность ──────────────────────────────────────────────────
-    def _load_data(self) -> dict:
-        try:
-            if os.path.exists(self.DATA_FILE):
-                with open(self.DATA_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return {}
-
-    def _save_data(self):
-        try:
-            with open(self.DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    _YEARS_FILE = os.path.join(DATA_DIR, "snt_meters_years.json")
-
-    def _load_active_years(self) -> set:
-        import datetime
-        try:
-            if os.path.exists(self._YEARS_FILE):
-                with open(self._YEARS_FILE, "r", encoding="utf-8") as f:
-                    return set(json.load(f))
-        except Exception:
-            pass
-        return {datetime.date.today().year}
-
-    def _save_active_years(self):
-        try:
-            with open(self._YEARS_FILE, "w", encoding="utf-8") as f:
-                json.dump(sorted(self._active_years), f, ensure_ascii=False)
-        except Exception:
-            pass
-
-    def reload(self):
-        self._data = self._load_data()
-        self._photos = self._load_photos()
-        self._active_years = self._load_active_years()
-        self._cell_widgets.clear()
-        self._rebuild()
-
-    def _load_photos(self) -> dict:
-        try:
-            pf = os.path.join(self.PHOTO_DIR, "_index.json")
-            if os.path.exists(pf):
-                with open(pf, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return {}
-
-    def _save_photos(self):
-        try:
-            os.makedirs(self.PHOTO_DIR, exist_ok=True)
-            pf = os.path.join(self.PHOTO_DIR, "_index.json")
-            with open(pf, "w", encoding="utf-8") as f:
-                json.dump(self._photos, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    def _cell_key(self, plot: str, year: int, month: int) -> str:
-        return f"{plot}:{year}:{month}"
-
-    # ── UI ───────────────────────────────────────────────────────────────
-    def _setup_ui(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(14)
-
-        top = QHBoxLayout()
-        title = QLabel("Передача показаний счётчиков", objectName="pageTitle")
-        top.addWidget(title)
-        top.addStretch()
-
-        btn_add_year = QPushButton("＋  Добавить год")
-        btn_add_year.setObjectName("btnSecondary")
-        btn_add_year.clicked.connect(self._add_year)
-        top.addWidget(btn_add_year)
-
-        btn_replace = QPushButton("🔧  Замена счётчика")
-        btn_replace.setObjectName("btnSecondary")
-        btn_replace.clicked.connect(self._register_replacement)
-        top.addWidget(btn_replace)
-
-        btn_save = QPushButton("💾  Сохранить всё")
-        btn_save.setObjectName("btnPrimary")
-        btn_save.clicked.connect(self._save_all)
-        top.addWidget(btn_save)
-        lay.addLayout(top)
-
-        # Легенда
-        hint = QHBoxLayout()
-        hint.setSpacing(20)
-        for color, text in [
-            ("#cdd9e5", "  📎 — нет фото   🖼 — фото прикреплено"),
-            ("#2e7d32", "■  ячейка с фото"),
-            ("#ef9a9a", "■  показание < предыдущего"),
-            ("#ffd54f", "■  аномально большой расход"),
-        ]:
-            lb = QLabel(text)
-            lb.setStyleSheet(f"color: {color}; background: transparent; font-size: 11px;")
-            hint.addWidget(lb)
-        hint.addStretch()
-        lay.addLayout(hint)
-
-        self.table = QTableWidget()
-        self.table.setObjectName("summaryTable")
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSortingEnabled(False)
-        lay.addWidget(self.table)
-
-        self.status_lbl = QLabel("", objectName="statusLabel")
-        lay.addWidget(self.status_lbl)
-
-    # ── Построение таблицы ────────────────────────────────────────────────
-    def _get_years(self) -> list:
-        """Определяем годы: явно добавленные + из данных/фото + текущий."""
-        years_set = set(self._active_years)
-        for key in self._data:
-            parts = key.split(":")
-            if len(parts) >= 2:
-                try:
-                    years_set.add(int(parts[1]))
-                except Exception:
-                    pass
-        for key in self._photos:
-            parts = key.split(":")
-            if len(parts) >= 2:
-                try:
-                    years_set.add(int(parts[1]))
-                except Exception:
-                    pass
-        import datetime
-        years_set.add(datetime.date.today().year)
-        return sorted(years_set)
-
-    def _rebuild(self):
-        self._save_all_cells()   # сохраняем текущие значения перед перестройкой
-        self._cell_widgets.clear()
-
-        years = self._get_years()
-        self._years = years
-        all_plots = self._plots
-
-        # col_defs: ("year_header", year) | ("month", year, month)
-        col_defs = []
-        for year in years:
-            col_defs.append(("year_header", year, None))
-            if year in self._expanded_years:
-                for m in range(1, 13):
-                    col_defs.append(("month", year, m))
-
-        n_cols = 1 + len(col_defs)
-        n_rows = 1 + len(all_plots)   # строка кнопок + участки
-
-        self.table.blockSignals(True)
-        self.table.clearContents()
-        self.table.setRowCount(n_rows)
-        self.table.setColumnCount(n_cols)
-
-        # Заголовки
-        hdr_labels = ["Участок"]
-        for kind, year, month in col_defs:
-            hdr_labels.append(str(year) if kind == "year_header" else self.MONTH_NAMES[month - 1])
-        self.table.setHorizontalHeaderLabels(hdr_labels)
-
-        hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(0, 75)
-        for c_idx, (kind, year, month) in enumerate(col_defs, start=1):
-            hdr.setSectionResizeMode(c_idx, QHeaderView.ResizeMode.Interactive)
-            self.table.setColumnWidth(c_idx, 120 if kind == "year_header" else 95)
-
-        # Строка 0 — кнопки +/−
-        it0 = QTableWidgetItem("")
-        it0.setBackground(QColor("#080f18"))
-        it0.setFlags(Qt.ItemFlag.NoItemFlags)
-        self.table.setItem(0, 0, it0)
-
-        for c_idx, (kind, year, month) in enumerate(col_defs, start=1):
-            if kind == "year_header":
-                expanded = year in self._expanded_years
-                btn = QPushButton("−" if expanded else "+")
-                btn.setFixedSize(22, 22)
-                btn.setStyleSheet(
-                    "QPushButton{background:#1565c0;color:white;border-radius:4px;"
-                    "font-size:14px;font-weight:bold;padding:0;}"
-                    "QPushButton:hover{background:#1976d2;}"
-                )
-                btn.clicked.connect(lambda _, y=year: self._toggle_year(y))
-                cont = QWidget()
-                cont.setStyleSheet("background:#080f18;")
-                cl = QHBoxLayout(cont)
-                cl.setContentsMargins(4, 2, 4, 2)
-                cl.addStretch(); cl.addWidget(btn); cl.addStretch()
-                self.table.setCellWidget(0, c_idx, cont)
-            else:
-                it = QTableWidgetItem(self.MONTH_NAMES[month - 1].upper())
-                it.setBackground(QColor("#0a1828"))
-                it.setForeground(QColor("#5a8ab0"))
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-                it.setFlags(Qt.ItemFlag.NoItemFlags)
-                self.table.setItem(0, c_idx, it)
-        self.table.setRowHeight(0, 26)
-
-        # Строки участков
-        for r_idx, plot in enumerate(all_plots, start=1):
-            pi = QTableWidgetItem(f"уч. {plot}")
-            pi.setBackground(QColor("#0a1520"))
-            pi.setForeground(QColor("#90caf9"))
-            f = pi.font(); f.setBold(True); pi.setFont(f)
-            pi.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            pi.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            self.table.setItem(r_idx, 0, pi)
-
-            for c_idx, (kind, year, month) in enumerate(col_defs, start=1):
-                if kind == "year_header":
-                    # Годовая ячейка — показываем количество заполненных месяцев
-                    filled = sum(
-                        1 for m in range(1, 13)
-                        if self._data.get(self._cell_key(plot, year, m), "").strip()
-                    )
-                    photos = sum(
-                        1 for m in range(1, 13)
-                        if self._photos.get(self._cell_key(plot, year, m))
-                    )
-                    text = f"{filled}/12 мес." if filled else "—"
-                    bg = "#0a1e12" if filled else "#0a1118"
-                    fg = "#81d4a0" if filled else "#2a4a6a"
-                    it = QTableWidgetItem(text)
-                    if photos:
-                        it.setText(f"{text}  🖼{photos}")
-                    it.setBackground(QColor(bg))
-                    it.setForeground(QColor(fg))
-                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-                    it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                    self.table.setItem(r_idx, c_idx, it)
-                else:
-                    # Месячная ячейка — редактируемый виджет
-                    key = self._cell_key(plot, year, month)
-                    val = self._data.get(key, "")
-                    has_photo = bool(self._photos.get(key))
-                    bg = "#0a1e12" if has_photo else "#080e14"
-
-                    w = MeterCellWidget(plot, year, month, val, has_photo)
-                    w.setStyleSheet(f"background-color: {bg};")
-                    w.photo_changed.connect(self._on_photo_click)
-                    self._cell_widgets[key] = w
-
-                    self.table.setItem(r_idx, c_idx, QTableWidgetItem())
-                    self.table.item(r_idx, c_idx).setBackground(QColor(bg))
-                    self.table.setCellWidget(r_idx, c_idx, w)
-
-            self.table.setRowHeight(r_idx, 30)
-
-        self.table.blockSignals(False)
-
-        self._apply_anomalies()
-
-        total_filled = sum(1 for v in self._data.values() if v.strip())
-        total_photos = len(self._photos)
-        self.status_lbl.setText(
-            f"Заполнено ячеек: {total_filled}  ·  прикреплено фото: {total_photos}"
-        )
-
-    def _apply_anomalies(self):
-        """Прогоняет energy.anomalies для каждого участка и подсвечивает ячейки."""
-        replacements = energy.load_replacements()
-        anomaly_count = 0
-        for plot in self._plots:
-            for a in energy.anomalies(plot, self._data, replacements):
-                if a.type == "gap":
-                    continue
-                key = self._cell_key(plot, a.year, a.month)
-                w = self._cell_widgets.get(key)
-                if w is not None:
-                    w.set_anomaly(a.type, a.detail)
-                    anomaly_count += 1
-
-    def _register_replacement(self):
-        # Выбор участка
-        plot, ok = QInputDialog.getItem(
-            self, "Замена счётчика",
-            "На каком участке заменили счётчик?",
-            self._plots, 0, False,
-        )
-        if not ok or not plot:
-            return
-        readings = energy.plot_readings(plot, self._data)
-        last_val = readings[-1][2] if readings else None
-        dlg = MeterReplacementDialog(plot, self, prev_value=last_val)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        result = dlg.get_result()
-        if not result:
-            return
-        repls = energy.load_replacements()
-        repls.setdefault(str(plot), []).append(result)
-        repls[str(plot)].sort(key=lambda r: r.get("date", ""))
-        energy.save_replacements(repls)
-        self.status_lbl.setText(
-            f"✅  Замена счётчика на уч. {plot} от {result['date']} сохранена"
-        )
-        self._rebuild()
-
-    def _add_year(self):
-        import datetime
-        current = datetime.date.today().year
-        year, ok = QInputDialog.getInt(
-            self, "Добавить год", "Введите год:",
-            value=current - 1, min=2000, max=current + 1, step=1
-        )
-        if ok:
-            self._active_years.add(year)
-            self._save_active_years()
-            self._rebuild()
-
-    def _toggle_year(self, year: int):
-        self._save_all_cells()
-        if year in self._expanded_years:
-            self._expanded_years.discard(year)
-        else:
-            self._expanded_years.add(year)
-        self._rebuild()
-
-    # ── Сохранение ───────────────────────────────────────────────────────
-    def _save_all_cells(self):
-        """Считывает значения из всех активных виджетов и пишет в _data."""
-        for key, w in self._cell_widgets.items():
-            val = w.get_value()
-            if val:
-                self._data[key] = val
-            elif key in self._data:
-                del self._data[key]
-
-    def _save_all(self):
-        self._save_all_cells()
-        self._save_data()
-        self.status_lbl.setText("✅  Данные сохранены")
-
-    # ── Работа с фото ────────────────────────────────────────────────────
-    def _on_photo_click(self, plot: str, year: int, month: int):
-        key = self._cell_key(plot, year, month)
-        has_photo = bool(self._photos.get(key))
-
-        action_text = "Заменить фото" if has_photo else "Прикрепить фото"
-        path, _ = QFileDialog.getOpenFileName(
-            self, action_text, "",
-            "Изображения (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
-        )
-        if not path:
-            return
-
-        # Копируем файл в папку snt_photos
-        os.makedirs(self.PHOTO_DIR, exist_ok=True)
-        ext = os.path.splitext(path)[1].lower()
-        dest_name = f"{plot}_{year}_{month:02d}{ext}".replace("/", "-")
-        dest_path = os.path.join(self.PHOTO_DIR, dest_name)
-        shutil.copy2(path, dest_path)
-
-        self._photos[key] = dest_path
-        self._save_photos()
-
-        # Обновляем кнопку в виджете
-        if key in self._cell_widgets:
-            self._cell_widgets[key].set_has_photo(True)
-            self._cell_widgets[key].setStyleSheet("background-color: #0a1e12;")
-            # Обновляем фон ячейки в таблице
-            for r in range(self.table.rowCount()):
-                for c in range(self.table.columnCount()):
-                    if self.table.cellWidget(r, c) is self._cell_widgets[key]:
-                        self.table.item(r, c).setBackground(QColor("#0a1e12"))
-
-        self.status_lbl.setText(f"✅  Фото прикреплено: уч. {plot} {self.MONTH_NAMES[month-1]} {year}")
-
-
-# ======================================================================= #
 #  ВКЛАДКА «НОРМАТИВЫ»
 # ======================================================================= #
 
@@ -2067,6 +1605,7 @@ class PlotsWidget(QWidget):
     def reload(self):
         self._plots = self._load()
         self._rebuild_table()
+        self.plotsUpdated.emit()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -2711,6 +2250,17 @@ class DocsWidget(QWidget):
         except Exception:
             pass
 
+    def reload(self):
+        """Перечитывает snt_docs.json и перестраивает таблицу."""
+        self._docs = self._load()
+        self._cells.clear()
+        self._rebuild_table()
+
+    def refresh_plots(self):
+        """Перестраивает таблицу при изменении списка участков."""
+        self._cells.clear()
+        self._rebuild_table()
+
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -2744,7 +2294,8 @@ class DocsWidget(QWidget):
         self.table.blockSignals(True)
         self.table.clearContents()
 
-        rows = len(_PLOT_ORDER)
+        plot_order = _load_plot_order()
+        rows = len(plot_order)
         cols = 1 + len(self.DOC_TYPES)
         self.table.setRowCount(rows)
         self.table.setColumnCount(cols)
@@ -2752,7 +2303,7 @@ class DocsWidget(QWidget):
         headers = ["Участок"] + self.DOC_TYPES
         self.table.setHorizontalHeaderLabels(headers)
 
-        for r_idx, plot in enumerate(_PLOT_ORDER):
+        for r_idx, plot in enumerate(plot_order):
             plot_item = QTableWidgetItem(f"уч. {plot}")
             plot_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             plot_item.setForeground(QColor("#90caf9"))
@@ -2780,7 +2331,7 @@ class DocsWidget(QWidget):
     def _update_status(self):
         total = 0
         attached = 0
-        for plot in _PLOT_ORDER:
+        for plot in _load_plot_order():
             for doc_key in self.DOC_TYPES:
                 path = self._docs.get(str(plot), {}).get(doc_key, "")
                 total += 1
@@ -3225,26 +2776,30 @@ class MeterReplacementDialog(QDialog):
 
 
 class PlotCardDialog(QDialog):
-    """Карточка участка: помесячная сводка показаний, начислений и платежей."""
+    """Карточка участка: сводка показаний/начислений/платежей + ввод и правка показаний."""
+
+    MONTH_NAMES = ["янв", "фев", "мар", "апр", "май", "июн",
+                   "июл", "авг", "сен", "окт", "ноя", "дек"]
 
     def __init__(self, plot: str, df, parent=None):
         super().__init__(parent)
-        self._plot = plot
+        self._plot = str(plot)
         self._df = df
+        self._value_edits: dict[tuple[int, int], QLineEdit] = {}
         self.setWindowTitle(f"Участок {plot} — карточка")
-        self.setMinimumSize(820, 560)
+        self.setMinimumSize(960, 620)
         self.setModal(False)
 
         self._setup_ui()
         self._rebuild()
 
+    # ── UI ───────────────────────────────────────────────────────────────
     def _setup_ui(self):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(18, 18, 18, 16)
         lay.setSpacing(10)
 
-        # Шапка с владельцами
-        owners = energy.owners_map().get(str(self._plot), [])
+        owners = energy.owners_map().get(self._plot, [])
         owners_text = ", ".join(owners) if owners else "владельцы не указаны"
         head = QLabel(f"<b>Участок {self._plot}</b>  ·  {owners_text}")
         head.setStyleSheet("font-size:14px;color:#e8f4fd;background:transparent;")
@@ -3254,21 +2809,78 @@ class PlotCardDialog(QDialog):
         self.summary_lbl.setStyleSheet("color:#7a9bb8;background:transparent;font-size:12px;")
         lay.addWidget(self.summary_lbl)
 
+        # ── Панель ввода нового показания ──────────────────────────
+        entry = QFrame(objectName="entryBox")
+        eh = QHBoxLayout(entry)
+        eh.setContentsMargins(12, 8, 12, 8)
+        eh.setSpacing(8)
+
+        lbl = QLabel("📡  Передать показание:")
+        lbl.setStyleSheet("color:#8eb3d4;background:transparent;font-size:12px;")
+        eh.addWidget(lbl)
+
+        self.cb_month = QComboBox()
+        self.cb_month.setObjectName("filterCombo")
+        for i, m in enumerate(self.MONTH_NAMES, start=1):
+            self.cb_month.addItem(m, i)
+        today = date.today()
+        self.cb_month.setCurrentIndex(today.month - 1)
+        self.cb_month.setFixedWidth(80)
+        eh.addWidget(self.cb_month)
+
+        self.cb_year = QComboBox()
+        self.cb_year.setObjectName("filterCombo")
+        for y in range(today.year - 5, today.year + 2):
+            self.cb_year.addItem(str(y), y)
+        self.cb_year.setCurrentText(str(today.year))
+        self.cb_year.setFixedWidth(90)
+        eh.addWidget(self.cb_year)
+
+        self.le_value = QLineEdit()
+        self.le_value.setObjectName("searchInput")
+        self.le_value.setPlaceholderText("значение, кВт·ч")
+        self.le_value.setFixedWidth(160)
+        self.le_value.returnPressed.connect(self._on_add_reading)
+        eh.addWidget(self.le_value)
+
+        btn_add = QPushButton("💾  Сохранить", objectName="btnPrimary")
+        btn_add.clicked.connect(self._on_add_reading)
+        eh.addWidget(btn_add)
+        eh.addStretch()
+        lay.addWidget(entry)
+
+        # ── Таблица ────────────────────────────────────────────────
         self.table = QTableWidget(objectName="summaryTable")
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
             "Месяц", "Показание", "Расход (кВт·ч)",
-            "Тариф", "Начислено", "Оплачено", "Баланс мес.", "Долг нараст."
+            "Тариф", "Начислено", "Оплачено",
+            "Баланс мес.", "Долг нараст.", "",
         ])
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        hdr.setStretchLastSection(True)
+        for c, w in enumerate([90, 150, 110, 75, 110, 110, 110, 130, 40]):
+            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+            self.table.setColumnWidth(c, w)
+        hdr.setStretchLastSection(False)
         lay.addWidget(self.table, 1)
 
-        # Кнопки внизу
+        # ── Подсказка по аномалиям ─────────────────────────────────
+        hint = QHBoxLayout()
+        hint.setSpacing(16)
+        for color, text in [
+            ("#ef9a9a", "■  показание < предыдущего"),
+            ("#ffd54f", "■  аномально большой расход"),
+        ]:
+            lb = QLabel(text)
+            lb.setStyleSheet(f"color:{color};background:transparent;font-size:11px;")
+            hint.addWidget(lb)
+        hint.addStretch()
+        lay.addLayout(hint)
+
+        # ── Кнопки внизу ───────────────────────────────────────────
         bottom = QHBoxLayout()
         self.btn_replace = QPushButton("🔧  Зарегистрировать замену счётчика")
         self.btn_replace.setObjectName("btnSecondary")
@@ -3291,6 +2903,9 @@ class PlotCardDialog(QDialog):
         self.setStyleSheet("""
             QDialog { background: #111e2b; color: #cdd9e5; }
             QLabel  { background: transparent; }
+            QFrame#entryBox {
+                background: #0d1b2a; border: 1px solid #1e3a5f; border-radius: 8px;
+            }
             QPushButton#btnPrimary {
                 background: #1565c0; color: white; border: none; border-radius: 6px;
                 padding: 8px 18px; font-size: 13px; font-weight: 600;
@@ -3301,6 +2916,16 @@ class PlotCardDialog(QDialog):
                 border-radius: 6px; padding: 7px 14px; font-size: 13px;
             }
             QPushButton#btnSecondary:hover { background: #243f63; color: #cdd9e5; }
+            QLineEdit#searchInput, QComboBox#filterCombo {
+                background: #0d1b2a; border: 1px solid #2a4a6b; border-radius: 6px;
+                color: #cdd9e5; padding: 6px 10px; font-size: 13px;
+            }
+            QLineEdit#searchInput:focus { border: 1px solid #1976d2; }
+            QComboBox#filterCombo::drop-down { border: none; width: 18px; }
+            QComboBox QAbstractItemView {
+                background: #0d1b2a; border: 1px solid #2a4a6b;
+                color: #cdd9e5; selection-background-color: #1a2e45;
+            }
             QTableWidget#summaryTable {
                 background: #0d1b2a; border: 1px solid #1e3a5f; border-radius: 8px;
                 gridline-color: #1a2733; color: #cdd9e5; font-size: 12px;
@@ -3313,19 +2938,17 @@ class PlotCardDialog(QDialog):
             }
         """)
 
+    # ── Перестройка таблицы ──────────────────────────────────────────────
     def _rebuild(self):
+        self._value_edits.clear()
+
         meters = energy.load_meters()
         rates = energy.load_rates()
         repls = energy.load_replacements()
         baseline = energy.load_baseline()
 
         charges = energy.all_charges(self._plot, meters, rates, repls)
-        if not charges:
-            self.table.setRowCount(0)
-            self.summary_lbl.setText("Нет показаний по этому участку")
-            return
 
-        # Платежи по месяцам (ставим в месяц даты прихода)
         pay_by_month: dict[tuple[int, int], float] = {}
         for p in energy.payments_breakdown(self._plot, self._df):
             d = p["date"]
@@ -3334,17 +2957,21 @@ class PlotCardDialog(QDialog):
             key = (d.year, d.month)
             pay_by_month[key] = pay_by_month.get(key, 0.0) + p["amount"]
 
-        base = energy._to_float(baseline.get("balances", {}).get(str(self._plot))) or 0.0
+        base = energy._to_float(baseline.get("balances", {}).get(self._plot)) or 0.0
         base_start = energy._parse_iso(baseline.get("start_date", ""))
 
         rows = []
         cum = base
         for c in charges:
-            y, m = c["year"], c["month"]
             amount = c["amount"] or 0.0
-            paid = pay_by_month.get((y, m), 0.0)
+            paid = pay_by_month.get((c["year"], c["month"]), 0.0)
             cum += amount - paid
             rows.append({**c, "paid": paid, "balance": cum})
+
+        anomaly_map: dict[tuple[int, int], str] = {}
+        for a in energy.anomalies(self._plot, meters, repls):
+            if a.type in ("drop", "spike"):
+                anomaly_map[(a.year, a.month)] = a.type
 
         self.table.setRowCount(len(rows) + (1 if base != 0 else 0))
         r0 = 0
@@ -3357,15 +2984,14 @@ class PlotCardDialog(QDialog):
                 ("—", None), ("—", None),
                 (self._fmt_money(base), None),
                 (self._fmt_money(base), self._debt_color(base)),
+                ("", None),
             ], bold=True)
             r0 = 1
 
         for i, row in enumerate(rows):
             r = r0 + i
-            month_label = f"{energy.reading_date(row['year'], row['month']).strftime('%m.%Y')}"
-            value_text = f"{row['value']:g}"
-            if row["prev_value"] is not None:
-                value_text += f"  ({row['prev_value']:g})"
+            y, m = row["year"], row["month"]
+            month_label = f"{m:02d}.{y}"
             kwh_text = f"{row['kwh']:.0f}" if row["kwh"] is not None else "—"
             rate_text = f"{row['rate']:.2f}" if row["rate"] is not None else "—"
             charged_text = self._fmt_money(row["amount"]) if row["amount"] is not None else "—"
@@ -3376,14 +3002,17 @@ class PlotCardDialog(QDialog):
 
             self._set_row(r, [
                 (month_label, None),
-                (value_text, None),
+                None,                              # «Показание» — редактируемая ячейка, отдельный виджет
                 (kwh_text, None),
                 (rate_text, None),
                 (charged_text, "#f9a825" if row["amount"] else None),
                 (paid_text, "#81d4a0" if row["paid"] else None),
                 (mbal_text, None),
                 (bal_text, self._debt_color(row["balance"])),
+                None,                              # кнопка удаления
             ])
+            self._install_value_editor(r, y, m, row["value"], anomaly_map.get((y, m)))
+            self._install_delete_button(r, y, m)
 
         if rows:
             last = rows[-1]
@@ -3392,9 +3021,19 @@ class PlotCardDialog(QDialog):
                 f"оплачено всего: {self._fmt_money(sum(r['paid'] for r in rows))}  ·  "
                 f"итоговый баланс: {self._fmt_money(last['balance'])}"
             )
+        else:
+            self.summary_lbl.setText("Показаний по этому участку пока нет — внесите первое выше.")
 
+    # ── Помощники строк ──────────────────────────────────────────────────
     def _set_row(self, r: int, cells: list, bold: bool = False):
-        for c, (text, color) in enumerate(cells):
+        for c, cell in enumerate(cells):
+            if cell is None:
+                # Placeholder под ячейку-виджет: пустой item, чтобы сохранить выделение строки
+                ph = QTableWidgetItem("")
+                ph.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.table.setItem(r, c, ph)
+                continue
+            text, color = cell
             it = QTableWidgetItem(text)
             it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
             if color:
@@ -3403,8 +3042,120 @@ class PlotCardDialog(QDialog):
                 f = it.font(); f.setBold(True); it.setFont(f)
             it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             self.table.setItem(r, c, it)
-        self.table.setRowHeight(r, 28)
+        self.table.setRowHeight(r, 30)
 
+    def _install_value_editor(self, r: int, year: int, month: int,
+                              value: float, anomaly: str | None):
+        edit = QLineEdit(f"{value:g}")
+        edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        edit.setStyleSheet(self._value_edit_style(anomaly))
+        if anomaly == "drop":
+            edit.setToolTip("Показание меньше предыдущего")
+        elif anomaly == "spike":
+            edit.setToolTip("Расход существенно больше обычного")
+        edit.editingFinished.connect(
+            lambda y=year, m=month, e=edit: self._on_value_committed(y, m, e)
+        )
+        self._value_edits[(year, month)] = edit
+        self.table.setCellWidget(r, 1, edit)
+
+    def _install_delete_button(self, r: int, year: int, month: int):
+        btn = QPushButton("✕")
+        btn.setFixedSize(26, 22)
+        btn.setToolTip(f"Удалить показание за {month:02d}.{year}")
+        btn.setStyleSheet(
+            "QPushButton{background:#2a1318;color:#ef9a9a;border:1px solid #6e2a30;"
+            "border-radius:4px;font-size:12px;font-weight:bold;}"
+            "QPushButton:hover{background:#4a1a22;color:#ffcccc;}"
+        )
+        btn.clicked.connect(lambda _, y=year, m=month: self._on_delete_reading(y, m))
+        self.table.setCellWidget(r, 8, btn)
+
+    @staticmethod
+    def _value_edit_style(anomaly: str | None) -> str:
+        if anomaly == "drop":
+            return ("background:#2a0d0d;border:1px solid #c62828;border-radius:3px;"
+                    "color:#ef9a9a;font-size:12px;font-weight:700;padding:3px 6px;")
+        if anomaly == "spike":
+            return ("background:#2a1f0d;border:1px solid #f9a825;border-radius:3px;"
+                    "color:#ffd54f;font-size:12px;padding:3px 6px;")
+        return ("background:#162131;border:1px solid #2a4a6b;border-radius:3px;"
+                "color:#cdd9e5;font-size:12px;padding:3px 6px;")
+
+    # ── Сохранение ───────────────────────────────────────────────────────
+    def _on_add_reading(self):
+        month = self.cb_month.currentData()
+        year = self.cb_year.currentData()
+        val = self.le_value.text().strip().replace(",", ".")
+        if not val:
+            return
+        try:
+            num = float(val)
+        except ValueError:
+            QMessageBox.warning(self, "Показание", "Значение должно быть числом.")
+            return
+        if num < 0:
+            QMessageBox.warning(self, "Показание", "Значение не может быть отрицательным.")
+            return
+        self._store_reading(year, month, num)
+        self.le_value.clear()
+        self.le_value.setFocus()
+
+    def _on_value_committed(self, year: int, month: int, edit: QLineEdit):
+        text = edit.text().strip().replace(",", ".")
+        meters = energy.load_meters()
+        key = f"{self._plot}:{year}:{month}"
+        old_raw = meters.get(key, "")
+        if text == "" and old_raw == "":
+            return
+        if text == old_raw.strip().replace(",", "."):
+            return
+        if text == "":
+            # очистка ячейки = удаление показания
+            if self._confirm_delete(year, month):
+                meters.pop(key, None)
+                energy.save_meters(meters)
+                self._rebuild()
+            else:
+                self._rebuild()  # восстановить старое значение в виджете
+            return
+        try:
+            num = float(text)
+        except ValueError:
+            QMessageBox.warning(self, "Показание", "Значение должно быть числом.")
+            self._rebuild()
+            return
+        if num < 0:
+            QMessageBox.warning(self, "Показание", "Значение не может быть отрицательным.")
+            self._rebuild()
+            return
+        self._store_reading(year, month, num)
+
+    def _store_reading(self, year: int, month: int, value: float):
+        meters = energy.load_meters()
+        key = f"{self._plot}:{year}:{month}"
+        # сохраняем как целое если без дробной части
+        meters[key] = str(int(value)) if float(value).is_integer() else f"{value:g}"
+        energy.save_meters(meters)
+        self._rebuild()
+
+    def _on_delete_reading(self, year: int, month: int):
+        if not self._confirm_delete(year, month):
+            return
+        meters = energy.load_meters()
+        meters.pop(f"{self._plot}:{year}:{month}", None)
+        energy.save_meters(meters)
+        self._rebuild()
+
+    def _confirm_delete(self, year: int, month: int) -> bool:
+        reply = QMessageBox.question(
+            self, "Удалить показание",
+            f"Удалить показание за {month:02d}.{year} на уч. {self._plot}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    # ── Прочее ───────────────────────────────────────────────────────────
     @staticmethod
     def _fmt_money(v: float) -> str:
         if v is None:
@@ -3431,8 +3182,8 @@ class PlotCardDialog(QDialog):
         if not result:
             return
         repls = energy.load_replacements()
-        repls.setdefault(str(self._plot), []).append(result)
-        repls[str(self._plot)].sort(key=lambda r: r.get("date", ""))
+        repls.setdefault(self._plot, []).append(result)
+        repls[self._plot].sort(key=lambda r: r.get("date", ""))
         energy.save_replacements(repls)
         self._rebuild()
         QMessageBox.information(self, "Замена счётчика",
@@ -3847,12 +3598,11 @@ class MainWindow(QMainWindow):
             ("📋  Детализация",         0),
             ("💰  Членские взносы",     1),
             ("⚡  Электроэнергия",      2),
-            ("💸  Долги (электр-во)",   8),
-            ("📡  Показания счётчика",  3),
-            ("📐  Нормативы",           4),
-            ("📍  Участки",             5),
-            ("🗂  Документы",           6),
-            ("🗺  Карта",               7),
+            ("💸  Долги (электр-во)",   7),
+            ("📐  Нормативы",           3),
+            ("📍  Участки",             4),
+            ("🗂  Документы",           5),
+            ("🗺  Карта",               6),
         ]:
             item = QListWidgetItem(label)
             item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -3880,7 +3630,6 @@ class MainWindow(QMainWindow):
         self.detail      = DetailWidget()
         self.sum_vznosy  = SummaryWidget(mode="vznosy")
         self.sum_electro = SummaryWidget(mode="electro")
-        self.meters      = MeterWidget()
         self.rates       = RatesWidget()
         self.plots       = PlotsWidget()
         self.docs        = DocsWidget()
@@ -3889,12 +3638,11 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.detail)       # 0
         self.stack.addWidget(self.sum_vznosy)   # 1
         self.stack.addWidget(self.sum_electro)  # 2
-        self.stack.addWidget(self.meters)       # 3
-        self.stack.addWidget(self.rates)        # 4
-        self.stack.addWidget(self.plots)        # 5
-        self.stack.addWidget(self.docs)         # 6
-        self.stack.addWidget(self.map_tab)      # 7
-        self.stack.addWidget(self.energy_debt)  # 8
+        self.stack.addWidget(self.rates)        # 3
+        self.stack.addWidget(self.plots)        # 4
+        self.stack.addWidget(self.docs)         # 5
+        self.stack.addWidget(self.map_tab)      # 6
+        self.stack.addWidget(self.energy_debt)  # 7
         root.addWidget(self.stack, stretch=1)
 
         # Подписки на загрузку выписки
@@ -3902,8 +3650,9 @@ class MainWindow(QMainWindow):
         self.detail.dataLoaded.connect(self.sum_electro.refresh)
         self.detail.dataLoaded.connect(self.energy_debt.refresh)
 
-        # При изменении данных вкладки «Участки» — пересчитать столбец в Детализации
+        # При изменении данных вкладки «Участки» — обновить все зависимые вкладки
         self.plots.plotsUpdated.connect(self.detail.refresh_plot_column)
+        self.plots.plotsUpdated.connect(self.docs.refresh_plots)
 
         self.nav.setCurrentRow(2)
 
@@ -3915,10 +3664,10 @@ class MainWindow(QMainWindow):
                 self.sum_vznosy.refresh(self.detail.df_full)
             elif idx == 2:
                 self.sum_electro.refresh(self.detail.df_full)
-            elif idx == 7:
+            elif idx == 6:
                 # карта подхватывает актуальные долги
                 self.map_tab.set_debts(self.energy_debt.get_debts())
-            elif idx == 8:
+            elif idx == 7:
                 self.energy_debt.refresh(self.detail.df_full)
 
     # ── Сохранение / загрузка проекта ────────────────────────────────────
@@ -4034,9 +3783,9 @@ class MainWindow(QMainWindow):
             return
 
         # перезагружаем все виджеты из новых файлов
-        self.plots.reload()
+        self.plots.reload()   # также эмитит plotsUpdated → docs обновят списки
         self.rates.reload()
-        self.meters.reload()
+        self.docs.reload()
         self.map_tab.reload_map()
 
         if detail_df is not None:
