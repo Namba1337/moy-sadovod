@@ -2781,10 +2781,11 @@ class PlotCardDialog(QDialog):
     MONTH_NAMES = ["янв", "фев", "мар", "апр", "май", "июн",
                    "июл", "авг", "сен", "окт", "ноя", "дек"]
 
-    def __init__(self, plot: str, df, parent=None):
+    def __init__(self, plot: str, df, parent=None, as_of: date | None = None):
         super().__init__(parent)
         self._plot = str(plot)
         self._df = df
+        self._as_of = as_of or date.today()
         self._value_edits: dict[tuple[int, int], QLineEdit] = {}
         self.setWindowTitle(f"Участок {plot} — карточка")
         self.setMinimumSize(960, 620)
@@ -2856,9 +2857,9 @@ class PlotCardDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
-            "Месяц", "Показание", "Расход (кВт·ч)",
+            "Дата / Месяц", "Показание", "Расход (кВт·ч)",
             "Тариф", "Начислено", "Оплачено",
-            "Баланс мес.", "Долг нараст.", "",
+            "Изм. баланса", "Баланс нараст.", "",
         ])
         hdr = self.table.horizontalHeader()
         for c, w in enumerate([90, 150, 110, 75, 110, 110, 110, 130, 40]):
@@ -2947,34 +2948,33 @@ class PlotCardDialog(QDialog):
         repls = energy.load_replacements()
         baseline = energy.load_baseline()
 
-        charges = energy.all_charges(self._plot, meters, rates, repls)
-
-        pay_by_month: dict[tuple[int, int], float] = {}
-        for p in energy.payments_breakdown(self._plot, self._df):
-            d = p["date"]
-            if d is None:
-                continue
-            key = (d.year, d.month)
-            pay_by_month[key] = pay_by_month.get(key, 0.0) + p["amount"]
-
         base = energy._to_float(baseline.get("balances", {}).get(self._plot)) or 0.0
         base_start = energy._parse_iso(baseline.get("start_date", ""))
 
-        rows = []
-        cum = base
+        # ── Хронология: каждое снятие показания + каждый платёж — отдельная строка
+        charges = energy.all_charges(self._plot, meters, rates, repls, up_to=self._as_of)
+        payments = [
+            p for p in energy.payments_breakdown(self._plot, self._df)
+            if p["date"] is not None
+            and (base_start is None or p["date"] >= base_start)
+            and p["date"] <= self._as_of
+        ]
+        events: list[tuple[str, date, dict]] = []
         for c in charges:
-            amount = c["amount"] or 0.0
-            paid = pay_by_month.get((c["year"], c["month"]), 0.0)
-            cum += amount - paid
-            rows.append({**c, "paid": paid, "balance": cum})
+            events.append(("charge", energy.reading_date(c["year"], c["month"]), c))
+        for p in payments:
+            events.append(("payment", p["date"], p))
+        # При совпадении даты — начисление раньше платежа
+        events.sort(key=lambda e: (e[1], 0 if e[0] == "charge" else 1))
 
         anomaly_map: dict[tuple[int, int], str] = {}
         for a in energy.anomalies(self._plot, meters, repls):
             if a.type in ("drop", "spike"):
                 anomaly_map[(a.year, a.month)] = a.type
 
-        self.table.setRowCount(len(rows) + (1 if base != 0 else 0))
+        self.table.setRowCount(len(events) + (1 if base != 0 else 0))
         r0 = 0
+        cum = base
         if base != 0:
             label = "Начальное сальдо"
             if base_start:
@@ -2988,41 +2988,69 @@ class PlotCardDialog(QDialog):
             ], bold=True)
             r0 = 1
 
-        for i, row in enumerate(rows):
+        for i, (kind, evdate, payload) in enumerate(events):
             r = r0 + i
-            y, m = row["year"], row["month"]
-            month_label = f"{m:02d}.{y}"
-            kwh_text = f"{row['kwh']:.0f}" if row["kwh"] is not None else "—"
-            rate_text = f"{row['rate']:.2f}" if row["rate"] is not None else "—"
-            charged_text = self._fmt_money(row["amount"]) if row["amount"] is not None else "—"
-            paid_text = self._fmt_money(row["paid"]) if row["paid"] else "—"
-            mbal = (row["amount"] or 0.0) - row["paid"]
-            mbal_text = self._fmt_money(mbal) if mbal else "0 ₽"
-            bal_text = self._fmt_money(row["balance"])
+            if kind == "charge":
+                c = payload
+                y, m = c["year"], c["month"]
+                label = f"📡  {m:02d}.{y}"
+                kwh_text = f"{c['kwh']:.0f}" if c["kwh"] is not None else "—"
+                rate_text = f"{c['rate']:.2f}" if c["rate"] is not None else "—"
+                amount = c["amount"] or 0.0
+                charged_text = self._fmt_money(c["amount"]) if c["amount"] is not None else "—"
+                cum += amount
+                mbal_text = self._fmt_money(amount) if amount else "0 ₽"
+                self._set_row(r, [
+                    (label, None),
+                    None,                              # «Показание» — редактируемое поле
+                    (kwh_text, None),
+                    (rate_text, None),
+                    (charged_text, "#f9a825" if c["amount"] else None),
+                    ("—", None),
+                    (mbal_text, None),
+                    (self._fmt_money(cum), self._debt_color(cum)),
+                    None,                              # кнопка удаления
+                ])
+                self._install_value_editor(r, y, m, c["value"], anomaly_map.get((y, m)))
+                self._install_delete_button(r, y, m)
+            else:
+                p = payload
+                paid = p["amount"]
+                cum -= paid
+                label = f"💳  {p['date'].strftime('%d.%m.%Y')}"
+                if p.get("mixed"):
+                    label += " ⅟₂"   # подсказка что платёж пополам с членскими
+                self._set_row(r, [
+                    (label, "#81d4a0"),
+                    ("—", None),
+                    ("—", None),
+                    ("—", None),
+                    ("—", None),
+                    (self._fmt_money(paid), "#81d4a0"),
+                    (self._fmt_money(-paid), None),
+                    (self._fmt_money(cum), self._debt_color(cum)),
+                    ("", None),
+                ])
+                # tooltip с назначением платежа на всю строку
+                if p.get("purpose"):
+                    for col in range(self.table.columnCount()):
+                        it = self.table.item(r, col)
+                        if it is not None:
+                            it.setToolTip(p["purpose"])
 
-            self._set_row(r, [
-                (month_label, None),
-                None,                              # «Показание» — редактируемая ячейка, отдельный виджет
-                (kwh_text, None),
-                (rate_text, None),
-                (charged_text, "#f9a825" if row["amount"] else None),
-                (paid_text, "#81d4a0" if row["paid"] else None),
-                (mbal_text, None),
-                (bal_text, self._debt_color(row["balance"])),
-                None,                              # кнопка удаления
-            ])
-            self._install_value_editor(r, y, m, row["value"], anomaly_map.get((y, m)))
-            self._install_delete_button(r, y, m)
-
-        if rows:
-            last = rows[-1]
+        # Итоги — через energy.balance(), чтобы совпадали с вкладкой «Долги»
+        bal = energy.balance(self._plot, self._as_of, meters, rates, repls, baseline, self._df)
+        if events or base != 0:
             self.summary_lbl.setText(
-                f"Начислено всего: {self._fmt_money(base + sum(c['amount'] or 0 for c in rows))}  ·  "
-                f"оплачено всего: {self._fmt_money(sum(r['paid'] for r in rows))}  ·  "
-                f"итоговый баланс: {self._fmt_money(last['balance'])}"
+                f"Начислено всего: {self._fmt_money(bal.baseline + bal.charged)}  ·  "
+                f"оплачено всего: {self._fmt_money(bal.paid)}  ·  "
+                f"итоговый баланс: {self._fmt_money(bal.debt)}  ·  "
+                f"на {self._as_of.strftime('%d.%m.%Y')}"
             )
         else:
-            self.summary_lbl.setText("Показаний по этому участку пока нет — внесите первое выше.")
+            self.summary_lbl.setText(
+                "Показаний и платежей по этому участку пока нет — внесите первое выше."
+            )
 
     # ── Помощники строк ──────────────────────────────────────────────────
     def _set_row(self, r: int, cells: list, bold: bool = False):
@@ -3478,9 +3506,10 @@ class EnergyDebtWidget(QWidget):
         if not plot_item:
             return
         plot = plot_item.text().replace("уч. ", "").strip()
-        dlg = PlotCardDialog(plot, self._df, self)
+        as_of = self.date_as_of.date().toPyDate()
+        dlg = PlotCardDialog(plot, self._df, self, as_of=as_of)
         dlg.exec()
-        # после возможной замены счётчика — пересчитать
+        # после возможной правки показаний / замены счётчика — пересчитать
         self._rebuild()
 
     def _export_debtor_receipts(self):
