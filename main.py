@@ -2947,6 +2947,8 @@ class PlotCardDialog(QDialog):
         rates = energy.load_rates()
         repls = energy.load_replacements()
         baseline = energy.load_baseline()
+        if self._df is not None and not self._df.empty:
+            baseline["start_date"] = self._df["Дата"].min().date().isoformat()
 
         base = energy._to_float(baseline.get("balances", {}).get(self._plot)) or 0.0
         base_start = energy._parse_iso(baseline.get("start_date", ""))
@@ -3277,13 +3279,13 @@ class EnergyDebtWidget(QWidget):
         btn.clicked.connect(self._rebuild)
         top.addWidget(btn)
 
-        self.btn_baseline = QPushButton("⚙  Стартовое сальдо", objectName="btnSecondary")
-        self.btn_baseline.clicked.connect(self._edit_baseline)
-        top.addWidget(self.btn_baseline)
-
         self.btn_mass_pdf = QPushButton("📄  Квитанции должникам", objectName="btnSecondary")
         self.btn_mass_pdf.clicked.connect(self._export_debtor_receipts)
         top.addWidget(self.btn_mass_pdf)
+
+        btn_rates = QPushButton("📐  Нормативы", objectName="btnSecondary")
+        btn_rates.clicked.connect(self._open_rates_dialog)
+        top.addWidget(btn_rates)
 
         lay.addLayout(top)
 
@@ -3335,6 +3337,19 @@ class EnergyDebtWidget(QWidget):
                                   objectName="statusLabel")
         lay.addWidget(self.status_lbl)
 
+        self.rates = RatesWidget()
+
+    def _open_rates_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Нормативы — тарифы на электроэнергию")
+        dlg.resize(700, 500)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.rates)
+        dlg.exec()
+        lay.removeWidget(self.rates)
+        self.rates.setParent(self)  # type: ignore[arg-type]
+
     def refresh(self, df):
         self._df = df
         self._rebuild()
@@ -3368,6 +3383,8 @@ class EnergyDebtWidget(QWidget):
         rates = energy.load_rates()
         repls = energy.load_replacements()
         baseline = energy.load_baseline()
+        if self._df is not None and not self._df.empty:
+            baseline["start_date"] = self._df["Дата"].min().date().isoformat()
         owners = energy.owners_map()
         plots = self._plot_list()
 
@@ -3560,25 +3577,6 @@ class EnergyDebtWidget(QWidget):
                 f"✅  Сформировано {ok} квитанций в:\n{folder}"
             )
 
-    def _edit_baseline(self):
-        baseline = energy.load_baseline()
-        cur_date = baseline.get("start_date", "")
-        text, ok = QInputDialog.getText(
-            self, "Стартовая дата учёта",
-            "Дата начала учёта (YYYY-MM-DD), от которой засчитывать платежи:",
-            text=cur_date or date(date.today().year, 1, 1).isoformat()
-        )
-        if not ok:
-            return
-        try:
-            d = date.fromisoformat(text.strip())
-        except ValueError:
-            QMessageBox.warning(self, "Ошибка", "Дата в формате YYYY-MM-DD")
-            return
-        baseline["start_date"] = d.isoformat()
-        energy.save_baseline(baseline)
-        self._rebuild()
-
     @staticmethod
     def _fmt_money(v) -> str:
         if v is None:
@@ -3626,12 +3624,10 @@ class MainWindow(QMainWindow):
         for label, idx in [
             ("📋  Детализация",         0),
             ("💰  Членские взносы",     1),
-            ("⚡  Электроэнергия",      2),
-            ("💸  Долги (электр-во)",   7),
-            ("📐  Нормативы",           3),
-            ("📍  Участки",             4),
-            ("🗂  Документы",           5),
-            ("🗺  Карта",               6),
+            ("⚡  Электричество",       5),
+            ("📍  Участки",             2),
+            ("🗂  Документы",           3),
+            ("🗺  Карта",               4),
         ]:
             item = QListWidgetItem(label)
             item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -3658,25 +3654,20 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget(objectName="contentArea")
         self.detail      = DetailWidget()
         self.sum_vznosy  = SummaryWidget(mode="vznosy")
-        self.sum_electro = SummaryWidget(mode="electro")
-        self.rates       = RatesWidget()
         self.plots       = PlotsWidget()
         self.docs        = DocsWidget()
         self.map_tab     = MapWidget()
         self.energy_debt = EnergyDebtWidget()
         self.stack.addWidget(self.detail)       # 0
         self.stack.addWidget(self.sum_vznosy)   # 1
-        self.stack.addWidget(self.sum_electro)  # 2
-        self.stack.addWidget(self.rates)        # 3
-        self.stack.addWidget(self.plots)        # 4
-        self.stack.addWidget(self.docs)         # 5
-        self.stack.addWidget(self.map_tab)      # 6
-        self.stack.addWidget(self.energy_debt)  # 7
+        self.stack.addWidget(self.plots)        # 2
+        self.stack.addWidget(self.docs)         # 3
+        self.stack.addWidget(self.map_tab)      # 4
+        self.stack.addWidget(self.energy_debt)  # 5
         root.addWidget(self.stack, stretch=1)
 
         # Подписки на загрузку выписки
         self.detail.dataLoaded.connect(self.sum_vznosy.refresh)
-        self.detail.dataLoaded.connect(self.sum_electro.refresh)
         self.detail.dataLoaded.connect(self.energy_debt.refresh)
 
         # При изменении данных вкладки «Участки» — обновить все зависимые вкладки
@@ -3691,12 +3682,10 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentIndex(idx)
             if idx == 1:
                 self.sum_vznosy.refresh(self.detail.df_full)
-            elif idx == 2:
-                self.sum_electro.refresh(self.detail.df_full)
-            elif idx == 6:
+            elif idx == 4:
                 # карта подхватывает актуальные долги
                 self.map_tab.set_debts(self.energy_debt.get_debts())
-            elif idx == 7:
+            elif idx == 5:
                 self.energy_debt.refresh(self.detail.df_full)
 
     # ── Сохранение / загрузка проекта ────────────────────────────────────
@@ -3813,7 +3802,7 @@ class MainWindow(QMainWindow):
 
         # перезагружаем все виджеты из новых файлов
         self.plots.reload()   # также эмитит plotsUpdated → docs обновят списки
-        self.rates.reload()
+        self.energy_debt.rates.reload()
         self.docs.reload()
         self.map_tab.reload_map()
 
