@@ -2729,7 +2729,7 @@ class PlotCardDialog(QDialog):
         hint.setSpacing(16)
         for color, text in [
             ("#ef9a9a", "■  показание < предыдущего"),
-            ("#ffd54f", "■  аномально большой расход"),
+            ("#ffd54f", "■  аномально большой расход / замена счётчика"),
         ]:
             lb = QLabel(text)
             lb.setStyleSheet(f"color:{color};background:transparent;font-size:11px;")
@@ -2822,8 +2822,13 @@ class PlotCardDialog(QDialog):
             events.append(("charge", energy.reading_date(c["year"], c["month"]), c))
         for p in payments:
             events.append(("payment", p["date"], p))
-        # При совпадении даты — начисление раньше платежа
-        events.sort(key=lambda e: (e[1], 0 if e[0] == "charge" else 1))
+        for repl in repls.get(self._plot, []):
+            d = energy._parse_iso(repl.get("date", ""))
+            if d and d <= self._as_of:
+                events.append(("replacement", d, repl))
+        # charge < replacement < payment при совпадении даты
+        _kind_order = {"charge": 0, "replacement": 1, "payment": 2}
+        events.sort(key=lambda e: (e[1], _kind_order.get(e[0], 9)))
 
         anomaly_map: dict[tuple[int, int], str] = {}
         for a in energy.anomalies(self._plot, meters, repls):
@@ -2871,7 +2876,7 @@ class PlotCardDialog(QDialog):
                 ])
                 self._install_value_editor(r, y, m, c["value"], anomaly_map.get((y, m)))
                 self._install_delete_button(r, y, m)
-            else:
+            elif kind == "payment":
                 p = payload
                 paid = p["amount"]
                 cum -= paid
@@ -2895,6 +2900,30 @@ class PlotCardDialog(QDialog):
                         it = self.table.item(r, col)
                         if it is not None:
                             it.setToolTip(p["purpose"])
+            else:  # replacement
+                repl = payload
+                old_f = energy._to_float(repl.get("old_final"))
+                new_i = energy._to_float(repl.get("new_initial"))
+                reading_text = (
+                    f"{old_f:g} → {new_i:g}"
+                    if old_f is not None and new_i is not None else "—"
+                )
+                self._set_row(r, [
+                    (f"🔧  {evdate.strftime('%d.%m.%Y')}", "#ffd54f"),
+                    (reading_text, "#ffd54f"),
+                    ("—", None), ("—", None), ("—", None), ("—", None), ("—", None),
+                    (self._fmt_money(cum), self._debt_color(cum)),
+                    None,
+                ])
+                note = repl.get("note", "").strip()
+                tip = f"Замена счётчика: конечное {old_f:g}, начальное {new_i:g}"
+                if note:
+                    tip += f"\nПричина: {note}"
+                for col in range(self.table.columnCount()):
+                    it = self.table.item(r, col)
+                    if it is not None:
+                        it.setToolTip(tip)
+                self._install_delete_replacement_button(r, repl.get("date", ""))
 
         # Итоги — через energy.balance(), чтобы совпадали с вкладкой «Долги»
         bal = energy.balance(self._plot, self._as_of, meters, rates, repls, baseline, self._df)
@@ -2956,6 +2985,35 @@ class PlotCardDialog(QDialog):
         )
         btn.clicked.connect(lambda _, y=year, m=month: self._on_delete_reading(y, m))
         self.table.setCellWidget(r, 8, btn)
+
+    def _install_delete_replacement_button(self, r: int, repl_date: str):
+        btn = QPushButton("✕")
+        btn.setFixedSize(26, 22)
+        btn.setToolTip(f"Удалить запись о замене счётчика от {repl_date}")
+        btn.setStyleSheet(
+            "QPushButton{background:#2a2200;color:#ffd54f;border:1px solid #7a6000;"
+            "border-radius:4px;font-size:12px;font-weight:bold;}"
+            "QPushButton:hover{background:#4a3c00;color:#ffe57f;}"
+        )
+        btn.clicked.connect(lambda _, d=repl_date: self._on_delete_replacement(d))
+        self.table.setCellWidget(r, 8, btn)
+
+    def _on_delete_replacement(self, repl_date: str):
+        reply = QMessageBox.question(
+            self, "Удалить замену счётчика",
+            f"Удалить запись о замене счётчика от {repl_date} на уч. {self._plot}?\n"
+            "Расчёт расхода электроэнергии будет пересчитан.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        repls = energy.load_replacements()
+        plot_repls = repls.get(self._plot, [])
+        repls[self._plot] = [r for r in plot_repls if r.get("date") != repl_date]
+        if not repls[self._plot]:
+            del repls[self._plot]
+        energy.save_replacements(repls)
+        self._rebuild()
 
     @staticmethod
     def _value_edit_style(anomaly: str | None) -> str:
@@ -3754,6 +3812,10 @@ class EnergyDebtWidget(QWidget):
         btn_rates.clicked.connect(self._open_rates_dialog)
         top.addWidget(btn_rates)
 
+        btn_excel = QPushButton("📊  Экспорт в Excel", objectName="btnSecondary")
+        btn_excel.clicked.connect(self._export_excel)
+        top.addWidget(btn_excel)
+
         lay.addLayout(top)
 
         # Легенда
@@ -4063,6 +4125,44 @@ class EnergyDebtWidget(QWidget):
         sign = "-" if v < 0 else ""
         return f"{sign}{abs(v):,.2f} ₽".replace(",", " ")
 
+    def _export_excel(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт таблицы", "электроэнергия_долги.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        if not path.endswith(".xlsx"):
+            path += ".xlsx"
+
+        headers = [
+            self.table.horizontalHeaderItem(c).text()
+            for c in range(self.table.columnCount())
+        ]
+        rows = []
+        for r in range(self.table.rowCount()):
+            if self.table.isRowHidden(r):
+                continue
+            rows.append([
+                (self.table.item(r, c).text() if self.table.item(r, c) else "")
+                for c in range(self.table.columnCount())
+            ])
+
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, Alignment
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Долги по электроэнергии"
+            ws.append(headers)
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center")
+            for row in rows:
+                ws.append(row)
+            wb.save(path)
+            QMessageBox.information(self, "Экспорт завершён", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка экспорта", str(e))
+
 
 class VznosyDebtWidget(QWidget):
     """Вкладка контроля долгов по членским взносам."""
@@ -4113,6 +4213,10 @@ class VznosyDebtWidget(QWidget):
         btn_rates = QPushButton("📅  Периоды", objectName="btnSecondary")
         btn_rates.clicked.connect(self._open_rates_dialog)
         top.addWidget(btn_rates)
+
+        btn_excel = QPushButton("📊  Экспорт в Excel", objectName="btnSecondary")
+        btn_excel.clicked.connect(self._export_excel)
+        top.addWidget(btn_excel)
 
         lay.addLayout(top)
 
@@ -4363,6 +4467,44 @@ class VznosyDebtWidget(QWidget):
                 self, "Квитанции",
                 f"✅  Сформировано {ok} квитанций в:\n{folder}"
             )
+
+    def _export_excel(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт таблицы", "членские_взносы_долги.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        if not path.endswith(".xlsx"):
+            path += ".xlsx"
+
+        headers = [
+            self.table.horizontalHeaderItem(c).text()
+            for c in range(self.table.columnCount())
+        ]
+        rows = []
+        for r in range(self.table.rowCount()):
+            if self.table.isRowHidden(r):
+                continue
+            rows.append([
+                (self.table.item(r, c).text() if self.table.item(r, c) else "")
+                for c in range(self.table.columnCount())
+            ])
+
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, Alignment
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Долги по членским взносам"
+            ws.append(headers)
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center")
+            for row in rows:
+                ws.append(row)
+            wb.save(path)
+            QMessageBox.information(self, "Экспорт завершён", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка экспорта", str(e))
 
     @staticmethod
     def _fmt_money(v) -> str:
