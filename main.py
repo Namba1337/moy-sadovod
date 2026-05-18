@@ -251,6 +251,33 @@ def apply_plot_column(df):
 #  ВКЛАДКА ДЕТАЛИЗАЦИЯ
 # ======================================================================= #
 
+class _SortItem(QTableWidgetItem):
+    """QTableWidgetItem с корректной числовой и датовой сортировкой."""
+    _DATE_FMT = "%d.%m.%Y"
+
+    def __lt__(self, other: "QTableWidgetItem") -> bool:
+        a, b = self.text().strip(), other.text().strip()
+        if not a:
+            return False  # пустые значения — в конец
+        if not b:
+            return True
+        try:
+            def _num(s: str) -> float:
+                return float(
+                    s.replace(" ", "").replace(" ", "")
+                     .replace("₽", "").replace(",", ".")
+                )
+            return _num(a) < _num(b)
+        except ValueError:
+            pass
+        try:
+            from datetime import datetime
+            return datetime.strptime(a, self._DATE_FMT) < datetime.strptime(b, self._DATE_FMT)
+        except ValueError:
+            pass
+        return a < b
+
+
 class DetailWidget(QWidget):
     dataLoaded = pyqtSignal(object)   # эмитится после успешной загрузки выписки
 
@@ -474,7 +501,7 @@ class DetailWidget(QWidget):
                 else:
                     text = "" if pd.isna(val) else str(val)
 
-                item = QTableWidgetItem(text)
+                item = _SortItem(text)
                 item.setBackground(row_color)
                 item.setData(Qt.ItemDataRole.UserRole, df_idx)
 
@@ -580,7 +607,7 @@ class DetailWidget(QWidget):
         for col in range(col_count):
             src_item = self.table.item(row, col)
             if src_item:
-                new_item = QTableWidgetItem(src_item.text())
+                new_item = _SortItem(src_item.text())
                 new_item.setBackground(src_item.background())
                 new_item.setForeground(src_item.foreground())
                 new_item.setTextAlignment(src_item.textAlignment())
@@ -3867,11 +3894,21 @@ class EnergyDebtWidget(QWidget):
             if bal.debt > 0.5:
                 debt_count += 1
 
+            try:
+                plot_sort = float(str(plot).split(",")[0])
+            except ValueError:
+                plot_sort = 0.0
+            try:
+                reading_sort = float(last_reading_text) if last_reading_text != "—" else -1.0
+            except ValueError:
+                reading_sort = -1.0
+            date_sort = float(bal.last_reading[0] * 100 + bal.last_reading[1]) if bal.last_reading else -1.0
+
             cells = [
-                (f"уч. {plot}", plot, None, "#90caf9", True),
+                (f"уч. {plot}", plot_sort, None, "#90caf9", True),
                 (owner, owner, None, "#cdd9e5", False),
-                (last_reading_text, last_reading_text, None, "#cdd9e5", False),
-                (last_date_text, last_date_text, None, "#7a9bb8", False),
+                (last_reading_text, reading_sort, None, "#cdd9e5", False),
+                (last_date_text, date_sort, None, "#7a9bb8", False),
                 (self._fmt_money(bal.charged), bal.charged, None, "#f9a825" if bal.charged else "#3a5a7a", False),
                 (self._fmt_money(bal.paid), bal.paid, None, "#81d4a0" if bal.paid else "#3a5a7a", False),
                 (self._fmt_money(bal.baseline) if bal.baseline else "—", bal.baseline, None,
@@ -4203,8 +4240,13 @@ class VznosyDebtWidget(QWidget):
             if bal.years_unpaid and bal.years_unpaid >= 2:
                 years_unpaid_color = "#ef9a9a" if bal.years_unpaid >= 3 else "#ffd54f"
 
+            try:
+                plot_sort = float(str(plot).split(",")[0])
+            except ValueError:
+                plot_sort = 0.0
+
             cells = [
-                (f"уч. {plot}", plot, None, "#90caf9", True, ""),
+                (f"уч. {plot}", plot_sort, None, "#90caf9", True, ""),
                 (owner, owner, None, "#cdd9e5", False, ""),
                 (area_text, area if area is not None else 0.0, None, area_color, False, area_tip),
                 (self._fmt_money(bal.charged), bal.charged, None,
