@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QStackedWidget, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit, QComboBox,
     QDateEdit, QFrame, QFileDialog, QMessageBox, QMenu, QInputDialog, QDialog,
+    QCheckBox, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem,
 )
 from PyQt6.QtCore import Qt, QDate, QPoint, QRectF, pyqtSignal
@@ -475,8 +476,7 @@ class DetailWidget(QWidget):
 
                 item = QTableWidgetItem(text)
                 item.setBackground(row_color)
-                if col_idx == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, df_idx)
+                item.setData(Qt.ItemDataRole.UserRole, df_idx)
 
                 if col == "Поступление" and text:
                     item.setForeground(QColor("#81d4a0"))
@@ -562,7 +562,20 @@ class DetailWidget(QWidget):
         src_item0 = self.table.item(row, 0)
         src_df_idx = src_item0.data(Qt.ItemDataRole.UserRole) if src_item0 else None
 
+        # Дублируем строку в df_full заранее, чтобы знать новый индекс
+        # до того, как сортировка изменит позиции строк в таблице
+        new_df_idx = None
+        if self.df_full is not None and src_df_idx is not None and src_df_idx in self.df_full.index:
+            new_df_idx = int(self.df_full.index.max()) + 1
+            self.df_full.loc[new_df_idx] = self.df_full.loc[src_df_idx].copy()
+
+        # ВАЖНО: отключаем сортировку перед вставкой строки.
+        # При setSortingEnabled(True) вызов setItem() немедленно пересортировывает
+        # таблицу внутри самого вызова (blockSignals не помогает — сортировка
+        # не идёт через сигналы). Строка «улетает» на другую позицию, все
+        # последующие item(row, col) читают чужие данные → краш.
         self.table.blockSignals(True)
+        self.table.setSortingEnabled(False)
         self.table.insertRow(insert_at)
         for col in range(col_count):
             src_item = self.table.item(row, col)
@@ -571,16 +584,11 @@ class DetailWidget(QWidget):
                 new_item.setBackground(src_item.background())
                 new_item.setForeground(src_item.foreground())
                 new_item.setTextAlignment(src_item.textAlignment())
+                if new_df_idx is not None:
+                    new_item.setData(Qt.ItemDataRole.UserRole, new_df_idx)
                 self.table.setItem(insert_at, col, new_item)
+        self.table.setSortingEnabled(True)
         self.table.blockSignals(False)
-
-        # Дублируем строку в df_full и присваиваем новый индекс
-        if self.df_full is not None and src_df_idx is not None and src_df_idx in self.df_full.index:
-            new_df_idx = int(self.df_full.index.max()) + 1
-            self.df_full.loc[new_df_idx] = self.df_full.loc[src_df_idx].copy()
-            new_item0 = self.table.item(insert_at, 0)
-            if new_item0:
-                new_item0.setData(Qt.ItemDataRole.UserRole, new_df_idx)
 
         self.table.selectRow(insert_at)
         self._update_summary()
@@ -640,8 +648,7 @@ class DetailWidget(QWidget):
 
         # Записываем изменение обратно в df_full
         if self.df_full is not None:
-            item0 = self.table.item(item.row(), 0)
-            df_idx = item0.data(Qt.ItemDataRole.UserRole) if item0 else None
+            df_idx = item.data(Qt.ItemDataRole.UserRole)
             if df_idx is not None and df_idx in self.df_full.index:
                 new_text = item.text().strip()
                 if col in ("Поступление", "Списание"):
@@ -694,17 +701,6 @@ class DetailWidget(QWidget):
 #  ВКЛАДКА СВОДКА
 # ======================================================================= #
 
-# Категории, которые считаем взносами
-_CAT_VZNOSY = {
-    "Членские взносы",
-    "Членские взносы + Электроэнергия",
-}
-# Категории, которые считаем электроэнергией (от садоводов)
-_CAT_ELECTRO = {
-    "Электроэнергия (от садоводов)",
-    "Членские взносы + Электроэнергия",
-}
-
 # Порядок участков для строк таблицы — динамически из snt_plots.json
 def _plot_num_key(s: str):
     """Ключ сортировки: числовые участки по значению, остальные в конце."""
@@ -724,598 +720,6 @@ def _load_plot_order() -> list[str]:
     except Exception:
         pass
     return []
-
-
-class SplitCellWidget(QWidget):
-    """Виджет ячейки: левая часть — авто (текст), правая — редактируемое поле."""
-
-    # Сигнал: пользователь изменил правую часть (план)
-    edited = pyqtSignal(str, int, str)   # plot, year, value
-
-    def __init__(self, auto_text: str, auto_color: str,
-                 plan_value: str, plot: str, year: int,
-                 editable: bool = True):
-        super().__init__()
-        self._plot = plot
-        self._year = year
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # Левая часть — факт (авто)
-        self.lbl_auto = QLabel(auto_text)
-        self.lbl_auto.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-        self.lbl_auto.setStyleSheet(
-            f"color: {auto_color}; background: transparent; font-size: 11px; padding: 0 4px;"
-        )
-        layout.addWidget(self.lbl_auto, stretch=1)
-
-        # Разделитель
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet("color: #1e3a5f; background: #1e3a5f; max-width: 1px;")
-        layout.addWidget(sep)
-
-        # Правая часть — план (редактируемый)
-        if editable:
-            self.edit_plan = QLineEdit(plan_value)
-            self.edit_plan.setPlaceholderText("план")
-            self.edit_plan.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.edit_plan.setStyleSheet(
-                "background: transparent; border: none; color: #64b5f6;"
-                "font-size: 11px; padding: 0 4px;"
-            )
-            self.edit_plan.editingFinished.connect(self._on_edited)
-            layout.addWidget(self.edit_plan, stretch=1)
-        else:
-            self.edit_plan = None
-            lbl = QLabel(plan_value)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            lbl.setStyleSheet("color: #64b5f6; background: transparent; font-size: 11px; padding: 0 4px;")
-            layout.addWidget(lbl, stretch=1)
-
-    def _on_edited(self):
-        val = self.edit_plan.text().strip()
-        self.edited.emit(self._plot, self._year, val)
-
-
-class SummaryWidget(QWidget):
-    """Сводная таблица: участок × год → суммы взносов и электроэнергии."""
-
-    # Файл для хранения плановых сумм
-    PLAN_FILE = os.path.join(DATA_DIR, "snt_plan.json")
-
-    def __init__(self, mode: str = "vznosy"):
-        super().__init__()
-        self._df    = None
-        self._mode  = mode
-        self._plan  = self._load_plan()   # {"plot:year": "сумма"}
-        self._years : list = []
-        self._plots : list = []
-        self._setup_ui()
-
-    # ── Сохранение/загрузка плана ─────────────────────────────────────────
-    def _load_plan(self) -> dict:
-        try:
-            if os.path.exists(self.PLAN_FILE):
-                with open(self.PLAN_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return {}
-
-    def _save_plan(self):
-        try:
-            with open(self.PLAN_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._plan, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    def _plan_key(self, plot: str, year: int) -> str:
-        return f"{plot}:{year}"
-
-    def _on_plan_edited(self, plot: str, year: int, value: str):
-        key = self._plan_key(plot, year)
-        if value:
-            self._plan[key] = value
-        elif key in self._plan:
-            del self._plan[key]
-        self._save_plan()
-
-    # ------------------------------------------------------------------ #
-    #  UI
-    # ------------------------------------------------------------------ #
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(14)
-
-        # Заголовок — зависит от режима
-        is_vznosy = self._mode == "vznosy"
-        title_text = "📋  Членские взносы по участкам" if is_vznosy else "⚡  Электроэнергия по участкам"
-        title = QLabel(title_text, objectName="pageTitle")
-        layout.addWidget(title)
-
-        # Легенда
-        hint = QHBoxLayout()
-        hint.setSpacing(24)
-        legend_items = [
-            ("#81d4a0", "■  Оплачено"),
-            ("#c97c7c", "■  Смешанный платёж"),
-            ("#3a5a7a", "■  Не платил"),
-        ]
-        if is_vznosy:
-            legend_items.append(("#64b5f6", "  Правая ячейка — план (кликните для ввода)"))
-        for color, text in legend_items:
-            lbl = QLabel(text)
-            lbl.setStyleSheet(f"color: {color}; background: transparent; font-size: 11px;")
-            hint.addWidget(lbl)
-        hint.addStretch()
-        layout.addLayout(hint)
-
-        # Таблица
-        self.table = QTableWidget()
-        self.table.setObjectName("summaryTable")
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSortingEnabled(False)
-        self.table.setShowGrid(True)
-        layout.addWidget(self.table)
-
-        self.status_lbl = QLabel(
-            "Загрузите файл на вкладке «Детализация»", objectName="statusLabel"
-        )
-        layout.addWidget(self.status_lbl)
-
-    # ------------------------------------------------------------------ #
-    def refresh(self, df):
-        self._df = df
-        self._rebuild()
-
-    # ------------------------------------------------------------------ #
-    def _build_pivot(self):
-        """Возвращает (pivot, mixed_pivot, years, all_plots) или None."""
-        if self._df is None or self._df.empty:
-            return None
-
-        df = self._df.copy()
-        df = df[df["Участок"].astype(str).str.strip() != ""]
-        df = df[df["Категория"].astype(str).str.strip() != ""]
-
-        cats = _CAT_VZNOSY if self._mode == "vznosy" else _CAT_ELECTRO
-        df = df[df["Категория"].isin(cats)].copy()
-        if df.empty:
-            return None
-
-        mixed_mask = df["Категория"] == "Членские взносы + Электроэнергия"
-        df["_сумма"] = pd.to_numeric(df["Поступление"], errors="coerce").fillna(0)
-        df.loc[mixed_mask, "_сумма"] /= 2
-        df["_смешанный"] = mixed_mask
-        df["_год"] = df["Дата"].dt.year
-
-        rows_exp = []
-        for _, row in df.iterrows():
-            plots = [p.strip() for p in str(row["Участок"]).split(",") if p.strip()]
-            for p in plots:
-                r = row.copy()
-                r["_участок"] = p
-                r["_сумма"]   = row["_сумма"] / len(plots)
-                rows_exp.append(r)
-
-        if not rows_exp:
-            return None
-
-        exp = pd.DataFrame(rows_exp)
-        pivot       = exp.groupby(["_участок","_год"])["_сумма"].sum().unstack(fill_value=0)
-        mixed_pivot = exp.groupby(["_участок","_год"])["_смешанный"].any().unstack(fill_value=False)
-
-        years     = sorted(pivot.columns.tolist())
-        plot_order = _load_plot_order()
-        all_plots = [p for p in plot_order if p in pivot.index]
-        extra     = [p for p in pivot.index if p not in all_plots]
-        all_plots += sorted(extra, key=_plot_num_key)
-
-        return pivot, mixed_pivot, years, all_plots
-
-    # ------------------------------------------------------------------ #
-    def _rebuild(self):
-        if self._mode == "vznosy":
-            self._rebuild_vznosy()
-        else:
-            self._rebuild_electro()
-
-    # ------------------------------------------------------------------ #
-    #  ВЗНОСЫ — оригинальная логика (факт | план)
-    # ------------------------------------------------------------------ #
-    def _rebuild_vznosy(self):
-        result = self._build_pivot()
-        if result is None:
-            self.table.clearContents()
-            self.table.setRowCount(0)
-            self.status_lbl.setText("Нет данных для отображения")
-            return
-
-        pivot, mixed_pivot, years, all_plots = result
-        self._years = years
-        self._plots = all_plots
-
-        n_rows = len(all_plots) + 2
-        n_cols = 1 + len(years) + 1
-
-        self.table.blockSignals(True)
-        self.table.clearContents()
-        self.table.setRowCount(n_rows)
-        self.table.setColumnCount(n_cols)
-
-        headers = ["Участок"] + [str(y) for y in years] + ["Итого"]
-        self.table.setHorizontalHeaderLabels(headers)
-
-        hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(0, 75)
-        for c in range(1, n_cols):
-            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
-
-        def _ro_cell(text, fg="#5a7fa0", bg="#080f18", bold=False):
-            it = QTableWidgetItem(text)
-            it.setBackground(QColor(bg)); it.setForeground(QColor(fg))
-            f = it.font(); f.setBold(bold); it.setFont(f)
-            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            it.setFlags(Qt.ItemFlag.NoItemFlags)
-            return it
-
-        self.table.setItem(0, 0, _ro_cell(""))
-        for c in range(1, n_cols):
-            self.table.setItem(0, c, _ro_cell("факт  │  план", "#3a5a7a"))
-        self.table.setRowHeight(0, 18)
-
-        grand_fact = 0.0
-        grand_plan_sum = 0.0
-
-        for r_idx, plot in enumerate(all_plots, start=1):
-            plot_item = QTableWidgetItem(f"уч. {plot}")
-            plot_item.setBackground(QColor("#0a1520"))
-            plot_item.setForeground(QColor("#90caf9"))
-            f = plot_item.font(); f.setBold(True); plot_item.setFont(f)
-            plot_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            plot_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            self.table.setItem(r_idx, 0, plot_item)
-
-            plot_fact = 0.0
-            plot_plan_sum = 0.0
-
-            for c_idx, year in enumerate(years, start=1):
-                amount   = float(pivot.loc[plot, year]) if plot in pivot.index and year in pivot.columns else 0.0
-                is_mixed = bool(mixed_pivot.loc[plot, year]) if plot in mixed_pivot.index and year in mixed_pivot.columns else False
-                plot_fact += amount
-
-                if amount == 0:
-                    auto_text, auto_color, bg_color = "—", "#2a4a6a", "#0a1118"
-                elif is_mixed:
-                    auto_text  = f"{amount:,.0f}".replace(",", " ")
-                    auto_color, bg_color = "#c97c7c", "#150d0d"
-                else:
-                    auto_text  = f"{amount:,.0f}".replace(",", " ")
-                    auto_color, bg_color = "#81d4a0", "#080f0b"
-
-                plan_val = self._plan.get(self._plan_key(plot, year), "")
-                try:
-                    plot_plan_sum += float(plan_val.replace(" ", "").replace(",", "."))
-                except Exception:
-                    pass
-
-                self.table.setItem(r_idx, c_idx, QTableWidgetItem())
-                self.table.item(r_idx, c_idx).setBackground(QColor(bg_color))
-                widget = SplitCellWidget(auto_text, auto_color, plan_val, plot, year, editable=True)
-                widget.setStyleSheet(f"background-color: {bg_color};")
-                widget.edited.connect(self._on_plan_edited)
-                self.table.setCellWidget(r_idx, c_idx, widget)
-
-            grand_fact     += plot_fact
-            grand_plan_sum += plot_plan_sum
-
-            fact_text  = f"{plot_fact:,.0f}".replace(",", " ") if plot_fact else "—"
-            fact_color = "#81d4a0" if plot_fact else "#2a4a6a"
-            plan_text  = f"{plot_plan_sum:,.0f}".replace(",", " ") if plot_plan_sum else ""
-            tw = SplitCellWidget(fact_text, fact_color, plan_text, plot, 0, editable=False)
-            tw.setStyleSheet("background-color: #0a1520;")
-            self.table.setItem(r_idx, n_cols - 1, QTableWidgetItem())
-            self.table.item(r_idx, n_cols - 1).setBackground(QColor("#0a1520"))
-            self.table.setCellWidget(r_idx, n_cols - 1, tw)
-            self.table.setRowHeight(r_idx, 32)
-
-        total_row = n_rows - 1
-        ti = QTableWidgetItem("ИТОГО")
-        ti.setBackground(QColor("#060e16")); ti.setForeground(QColor("#64b5f6"))
-        f = ti.font(); f.setBold(True); ti.setFont(f)
-        ti.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-        ti.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self.table.setItem(total_row, 0, ti)
-
-        grand_total = 0.0
-        for c_idx, year in enumerate(years, start=1):
-            yf = float(pivot[year].sum()) if year in pivot.columns else 0.0
-            grand_total += yf
-            yp = sum(
-                float(self._plan.get(self._plan_key(p, year), "0").replace(" ", "").replace(",", "."))
-                for p in all_plots if self._plan.get(self._plan_key(p, year))
-            )
-            ft = f"{yf:,.0f}".replace(",", " ") if yf else "—"
-            pt = f"{yp:,.0f}".replace(",", " ") if yp else ""
-            w  = SplitCellWidget(ft, "#64b5f6", pt, "__total__", year, editable=False)
-            w.setStyleSheet("background-color: #060e16;")
-            self.table.setItem(total_row, c_idx, QTableWidgetItem())
-            self.table.item(total_row, c_idx).setBackground(QColor("#060e16"))
-            self.table.setCellWidget(total_row, c_idx, w)
-
-        gft = f"{grand_fact:,.0f}".replace(",", " ")
-        gpt = f"{grand_plan_sum:,.0f}".replace(",", " ") if grand_plan_sum else ""
-        gw  = SplitCellWidget(gft, "#64b5f6", gpt, "__total__", 0, editable=False)
-        gw.setStyleSheet("background-color: #060e16;")
-        self.table.setItem(total_row, n_cols - 1, QTableWidgetItem())
-        self.table.item(total_row, n_cols - 1).setBackground(QColor("#060e16"))
-        self.table.setCellWidget(total_row, n_cols - 1, gw)
-        self.table.setRowHeight(total_row, 34)
-
-        self.table.blockSignals(False)
-        self.status_lbl.setText(
-            f"Членские взносы  ·  участков: {len(all_plots)}  ·  лет: {len(years)}  ·  "
-            f"итого факт: {grand_fact:,.0f} ₽".replace(",", " ")
-        )
-
-    # ------------------------------------------------------------------ #
-    #  ЭЛЕКТРОЭНЕРГИЯ — с разворачиваемыми годами по месяцам
-    # ------------------------------------------------------------------ #
-
-    MONTH_NAMES = ["янв", "фев", "мар", "апр", "май", "июн",
-                   "июл", "авг", "сен", "окт", "ноя", "дек"]
-
-    def _rebuild_electro(self):
-        """Таблица электроэнергии: год можно развернуть в 12 месяцев."""
-        result = self._build_pivot()
-        if result is None:
-            self.table.clearContents()
-            self.table.setRowCount(0)
-            self.status_lbl.setText("Нет данных для отображения")
-            return
-
-        # Нам нужен помесячный pivot
-        df = self._df.copy()
-        df = df[df["Участок"].astype(str).str.strip() != ""]
-        cats = _CAT_ELECTRO
-        df = df[df["Категория"].isin(cats)].copy()
-        mixed_mask = df["Категория"] == "Членские взносы + Электроэнергия"
-        df["_сумма"] = pd.to_numeric(df["Поступление"], errors="coerce").fillna(0)
-        df.loc[mixed_mask, "_сумма"] /= 2
-        df["_год"]   = df["Дата"].dt.year
-        df["_месяц"] = df["Дата"].dt.month
-
-        rows_exp = []
-        for _, row in df.iterrows():
-            plots = [p.strip() for p in str(row["Участок"]).split(",") if p.strip()]
-            for p in plots:
-                r = row.copy(); r["_участок"] = p
-                r["_сумма"] = row["_сумма"] / len(plots)
-                rows_exp.append(r)
-
-        if not rows_exp:
-            self.table.clearContents()
-            self.table.setRowCount(0)
-            self.status_lbl.setText("Нет данных для отображения")
-            return
-
-        exp = pd.DataFrame(rows_exp)
-        _, _, years, all_plots = result   # all_plots и years из _build_pivot
-
-        # pivot по году
-        piv_year = exp.groupby(["_участок", "_год"])["_сумма"].sum().unstack(fill_value=0)
-        # pivot по (год, месяц)
-        piv_mon  = exp.groupby(["_участок", "_год", "_месяц"])["_сумма"].sum().unstack(fill_value=0)
-
-        self._years = years
-        self._plots = all_plots
-
-        # ── Строим список колонок с учётом expanded ───────────────────────
-        # _expanded_years: set лет, которые развёрнуты
-        if not hasattr(self, "_expanded_years"):
-            self._expanded_years = set()
-
-        # col_defs: список (kind, year, month|None)
-        #   kind = "year_header" | "month"
-        col_defs = []  # (kind, year, month)
-        for year in years:
-            col_defs.append(("year_header", year, None))
-            if year in self._expanded_years:
-                months_present = sorted(
-                    exp[exp["_год"] == year]["_месяц"].unique()
-                )
-                for m in months_present:
-                    col_defs.append(("month", year, m))
-
-        n_data_cols = len(col_defs)
-        n_cols = 1 + n_data_cols + 1   # участок + данные + итого
-        n_rows = len(all_plots) + 2    # подсказка + участки + итого
-
-        self.table.blockSignals(True)
-        self.table.clearContents()
-        self.table.setRowCount(n_rows)
-        self.table.setColumnCount(n_cols)
-
-        # ── Заголовки ─────────────────────────────────────────────────────
-        hdr_labels = ["Участок"]
-        for kind, year, month in col_defs:
-            if kind == "year_header":
-                hdr_labels.append(str(year))
-            else:
-                hdr_labels.append(self.MONTH_NAMES[month - 1])
-        hdr_labels.append("Итого")
-        self.table.setHorizontalHeaderLabels(hdr_labels)
-
-        hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(0, 75)
-        for c_idx, (kind, year, month) in enumerate(col_defs, start=1):
-            if kind == "year_header":
-                hdr.setSectionResizeMode(c_idx, QHeaderView.ResizeMode.Interactive)
-                self.table.setColumnWidth(c_idx, 110)
-            else:
-                hdr.setSectionResizeMode(c_idx, QHeaderView.ResizeMode.Interactive)
-                self.table.setColumnWidth(c_idx, 70)
-        hdr.setSectionResizeMode(n_cols - 1, QHeaderView.ResizeMode.Stretch)
-
-        # ── Строка 0: кнопки +/− на годовых колонках ─────────────────────
-        self.table.setItem(0, 0, QTableWidgetItem())
-        self.table.item(0, 0).setBackground(QColor("#080f18"))
-        self.table.item(0, 0).setFlags(Qt.ItemFlag.NoItemFlags)
-
-        for c_idx, (kind, year, month) in enumerate(col_defs, start=1):
-            if kind == "year_header":
-                expanded = year in self._expanded_years
-                btn = QPushButton("−" if expanded else "+")
-                btn.setFixedSize(22, 22)
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background: #1565c0; color: white; border-radius: 4px;
-                        font-size: 14px; font-weight: bold; padding: 0;
-                    }
-                    QPushButton:hover { background: #1976d2; }
-                    QPushButton:pressed { background: #0d47a1; }
-                """)
-                btn.clicked.connect(lambda checked, y=year: self._toggle_year(y))
-
-                container = QWidget()
-                container.setStyleSheet("background: #080f18;")
-                lay = QHBoxLayout(container)
-                lay.setContentsMargins(4, 2, 4, 2)
-                lay.addStretch()
-                lay.addWidget(btn)
-                lay.addStretch()
-                self.table.setCellWidget(0, c_idx, container)
-            else:
-                # Заголовок месяца — подкрашенный
-                it = QTableWidgetItem(self.MONTH_NAMES[month - 1].upper())
-                it.setBackground(QColor("#0a1828"))
-                it.setForeground(QColor("#5a8ab0"))
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-                it.setFlags(Qt.ItemFlag.NoItemFlags)
-                self.table.setItem(0, c_idx, it)
-
-        it_tot = QTableWidgetItem("")
-        it_tot.setBackground(QColor("#060e16"))
-        it_tot.setFlags(Qt.ItemFlag.NoItemFlags)
-        self.table.setItem(0, n_cols - 1, it_tot)
-        self.table.setRowHeight(0, 26)
-
-        # ── Строки участков ───────────────────────────────────────────────
-        grand_fact = 0.0
-
-        for r_idx, plot in enumerate(all_plots, start=1):
-            # Столбец «Участок»
-            pi = QTableWidgetItem(f"уч. {plot}")
-            pi.setBackground(QColor("#0a1520")); pi.setForeground(QColor("#90caf9"))
-            f = pi.font(); f.setBold(True); pi.setFont(f)
-            pi.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            pi.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            self.table.setItem(r_idx, 0, pi)
-
-            plot_fact = 0.0
-
-            for c_idx, (kind, year, month) in enumerate(col_defs, start=1):
-                if kind == "year_header":
-                    amount = float(piv_year.loc[plot, year]) if plot in piv_year.index and year in piv_year.columns else 0.0
-                    plot_fact += amount
-                    if amount == 0:
-                        text, fg, bg = "—", "#2a4a6a", "#0a1118"
-                    else:
-                        text = f"{amount:,.0f}".replace(",", " ")
-                        fg, bg = "#81d4a0", "#080f0b"
-                    it = QTableWidgetItem(text)
-                    it.setBackground(QColor(bg)); it.setForeground(QColor(fg))
-                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-                    it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                    f2 = it.font(); f2.setBold(True); it.setFont(f2)
-                    self.table.setItem(r_idx, c_idx, it)
-                else:
-                    # месячная ячейка
-                    try:
-                        amount = float(piv_mon.loc[(plot, year), month]) if (plot, year) in piv_mon.index and month in piv_mon.columns else 0.0
-                    except Exception:
-                        amount = 0.0
-                    if amount == 0:
-                        text, fg, bg = "—", "#1e3a5a", "#080e14"
-                    else:
-                        text = f"{amount:,.0f}".replace(",", " ")
-                        fg, bg = "#64b5f6", "#080d14"
-                    it = QTableWidgetItem(text)
-                    it.setBackground(QColor(bg)); it.setForeground(QColor(fg))
-                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-                    it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                    self.table.setItem(r_idx, c_idx, it)
-
-            grand_fact += plot_fact
-
-            # Итого по участку
-            tot_amount = float(piv_year.loc[plot].sum()) if plot in piv_year.index else 0.0
-            tot_text  = f"{tot_amount:,.0f}".replace(",", " ") if tot_amount else "—"
-            tot_color = "#81d4a0" if tot_amount else "#2a4a6a"
-            ti = QTableWidgetItem(tot_text)
-            ti.setBackground(QColor("#0a1520")); ti.setForeground(QColor(tot_color))
-            f3 = ti.font(); f3.setBold(True); ti.setFont(f3)
-            ti.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            ti.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            self.table.setItem(r_idx, n_cols - 1, ti)
-            self.table.setRowHeight(r_idx, 28)
-
-        # ── Строка ИТОГО ──────────────────────────────────────────────────
-        total_row = n_rows - 1
-        ti0 = QTableWidgetItem("ИТОГО")
-        ti0.setBackground(QColor("#060e16")); ti0.setForeground(QColor("#64b5f6"))
-        f4 = ti0.font(); f4.setBold(True); ti0.setFont(f4)
-        ti0.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-        ti0.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self.table.setItem(total_row, 0, ti0)
-
-        grand_total = 0.0
-        for c_idx, (kind, year, month) in enumerate(col_defs, start=1):
-            if kind == "year_header":
-                yf = float(piv_year[year].sum()) if year in piv_year.columns else 0.0
-                grand_total += yf
-                txt = f"{yf:,.0f}".replace(",", " ") if yf else "—"
-            else:
-                mf = float(piv_mon.xs(year, level="_год")[month].sum()) if year in piv_mon.index.get_level_values("_год") and month in piv_mon.columns else 0.0
-                txt = f"{mf:,.0f}".replace(",", " ") if mf else "—"
-            tit = QTableWidgetItem(txt)
-            tit.setBackground(QColor("#060e16")); tit.setForeground(QColor("#64b5f6"))
-            f5 = tit.font(); f5.setBold(True); tit.setFont(f5)
-            tit.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            tit.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            self.table.setItem(total_row, c_idx, tit)
-
-        gt_it = QTableWidgetItem(f"{grand_fact:,.0f}".replace(",", " "))
-        gt_it.setBackground(QColor("#060e16")); gt_it.setForeground(QColor("#64b5f6"))
-        f6 = gt_it.font(); f6.setBold(True); gt_it.setFont(f6)
-        gt_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-        gt_it.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self.table.setItem(total_row, n_cols - 1, gt_it)
-        self.table.setRowHeight(total_row, 30)
-
-        self.table.blockSignals(False)
-        self.status_lbl.setText(
-            f"Электроэнергия  ·  участков: {len(all_plots)}  ·  лет: {len(years)}  ·  "
-            f"итого: {grand_fact:,.0f} ₽".replace(",", " ")
-        )
-
-    def _toggle_year(self, year: int):
-        """Разворачивает/сворачивает год в таблице электроэнергии."""
-        if year in self._expanded_years:
-            self._expanded_years.discard(year)
-        else:
-            self._expanded_years.add(year)
-        self._rebuild_electro()
-
 
 
 # ======================================================================= #
@@ -1572,6 +976,361 @@ class RatesWidget(QWidget):
             self._rebuild_table()
 
 
+class VznosyRatesWidget(QWidget):
+    """Управление периодами членских взносов."""
+
+    DATA_FILE = os.path.join(DATA_DIR, "snt_vznosy_rates.json")
+
+    def __init__(self):
+        super().__init__()
+        self._rates: list = self._load()
+        self._setup_ui()
+        self._rebuild_table()
+
+    def _load(self) -> list:
+        try:
+            if os.path.exists(self.DATA_FILE):
+                with open(self.DATA_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return []
+
+    def _save(self):
+        try:
+            with open(self.DATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._rates, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def reload(self):
+        self._rates = self._load()
+        self._rebuild_table()
+
+    @staticmethod
+    def _fmt_date(iso: str) -> str:
+        try:
+            from datetime import datetime
+            return datetime.strptime(iso, "%Y-%m-%d").strftime("%d.%m.%Y")
+        except Exception:
+            return iso or "—"
+
+    def _sorted_periods(self) -> list:
+        """Периоды, отсортированные по date_from по убыванию (новые сверху)."""
+        def _key(r):
+            return r.get("date_from", r.get("date", ""))
+        return sorted(self._rates, key=_key, reverse=True)
+
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(16)
+
+        top = QHBoxLayout()
+        title = QLabel("Периоды членских взносов", objectName="pageTitle")
+        top.addWidget(title)
+        top.addStretch()
+        btn_add = QPushButton("＋  Добавить период")
+        btn_add.setObjectName("btnPrimary")
+        btn_add.clicked.connect(self._add_rate)
+        top.addWidget(btn_add)
+        lay.addLayout(top)
+
+        hint = QLabel(
+            "Каждый период — отдельная строка тарифа.  "
+            "ПКМ по строке — удалить.  "
+            "Двойной клик по сумме — редактировать."
+        )
+        hint.setStyleSheet("color: #5a7fa0; background: transparent; font-size: 11px;")
+        lay.addWidget(hint)
+
+        # ── Форма добавления периода ──────────────────────────────
+        self.form_frame = QFrame()
+        self.form_frame.setObjectName("filterFrame")
+        self.form_frame.setVisible(False)
+        form_lay = QHBoxLayout(self.form_frame)
+        form_lay.setContentsMargins(16, 12, 16, 12)
+        form_lay.setSpacing(10)
+
+        form_lay.addWidget(QLabel("С:", objectName="filterLabel"))
+        self.inp_date_from = QDateEdit()
+        self.inp_date_from.setObjectName("datePicker")
+        self.inp_date_from.setCalendarPopup(True)
+        self.inp_date_from.setDate(QDate.currentDate())
+        self.inp_date_from.setDisplayFormat("dd.MM.yyyy")
+        self.inp_date_from.setFixedWidth(115)
+        form_lay.addWidget(self.inp_date_from)
+
+        form_lay.addWidget(QLabel("По:", objectName="filterLabel"))
+        self.inp_date_to = QDateEdit()
+        self.inp_date_to.setObjectName("datePicker")
+        self.inp_date_to.setCalendarPopup(True)
+        self.inp_date_to.setDate(QDate.currentDate())
+        self.inp_date_to.setDisplayFormat("dd.MM.yyyy")
+        self.inp_date_to.setFixedWidth(115)
+        form_lay.addWidget(self.inp_date_to)
+
+        self.chk_open_end = QCheckBox("Открытый")
+        self.chk_open_end.setToolTip("Не указывать конечную дату (последний активный период)")
+        self.chk_open_end.setStyleSheet(
+            "QCheckBox{color:#cdd9e5;background:transparent;font-size:12px;}"
+            "QCheckBox::indicator{width:15px;height:15px;}"
+        )
+        self.chk_open_end.stateChanged.connect(
+            lambda s: self.inp_date_to.setEnabled(not bool(s))
+        )
+        form_lay.addWidget(self.chk_open_end)
+
+        form_lay.addWidget(QLabel("Сумма (₽):", objectName="filterLabel"))
+        self.inp_amount = QLineEdit()
+        self.inp_amount.setObjectName("searchInput")
+        self.inp_amount.setPlaceholderText("10000")
+        self.inp_amount.setFixedWidth(100)
+        form_lay.addWidget(self.inp_amount)
+
+        self.chk_per_sqm = QCheckBox("₽/м²")
+        self.chk_per_sqm.setToolTip("Сумма указана в рублях за м²")
+        self.chk_per_sqm.setStyleSheet(
+            "QCheckBox{color:#cdd9e5;background:transparent;font-size:12px;}"
+            "QCheckBox::indicator{width:15px;height:15px;}"
+        )
+        self.chk_per_sqm.stateChanged.connect(self._on_toggle_per_sqm)
+        form_lay.addWidget(self.chk_per_sqm)
+
+        form_lay.addWidget(QLabel("₽/м²:", objectName="filterLabel"))
+        self.inp_rate_sqm = QLineEdit()
+        self.inp_rate_sqm.setObjectName("searchInput")
+        self.inp_rate_sqm.setPlaceholderText("15.00")
+        self.inp_rate_sqm.setFixedWidth(80)
+        self.inp_rate_sqm.setEnabled(False)
+        form_lay.addWidget(self.inp_rate_sqm)
+
+        form_lay.addWidget(QLabel("Примечание:", objectName="filterLabel"))
+        self.inp_note = QLineEdit()
+        self.inp_note.setObjectName("searchInput")
+        self.inp_note.setPlaceholderText("необязательно")
+        form_lay.addWidget(self.inp_note, stretch=1)
+
+        btn_ok = QPushButton("✓  Сохранить")
+        btn_ok.setObjectName("btnPrimary")
+        btn_ok.clicked.connect(self._confirm_add)
+        form_lay.addWidget(btn_ok)
+
+        btn_cancel = QPushButton("✕")
+        btn_cancel.setObjectName("btnSecondary")
+        btn_cancel.clicked.connect(lambda: self.form_frame.setVisible(False))
+        form_lay.addWidget(btn_cancel)
+
+        lay.addWidget(self.form_frame)
+
+        # ── Таблица периодов ──────────────────────────────────────
+        self.table = QTableWidget()
+        self.table.setObjectName("summaryTable")
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(
+            ["Период с", "По (включительно)", "Сумма (₽)", "Цена за м² (₽)", "Примечание"]
+        )
+        hdr = self.table.horizontalHeader()
+        for c, (mode, w) in enumerate([
+            (QHeaderView.ResizeMode.Fixed, 130),
+            (QHeaderView.ResizeMode.Fixed, 150),
+            (QHeaderView.ResizeMode.Fixed, 130),
+            (QHeaderView.ResizeMode.Fixed, 130),
+            (QHeaderView.ResizeMode.Stretch, 0),
+        ]):
+            hdr.setSectionResizeMode(c, mode)
+            if w:
+                self.table.setColumnWidth(c, w)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSortingEnabled(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
+        self.table.itemChanged.connect(self._on_cell_edited)
+        lay.addWidget(self.table)
+
+        self.status_lbl = QLabel("", objectName="statusLabel")
+        lay.addWidget(self.status_lbl)
+
+    def _on_toggle_per_sqm(self, state):
+        on = bool(state)
+        self.inp_amount.setEnabled(not on)
+        self.inp_rate_sqm.setEnabled(on)
+        if on:
+            self.inp_amount.clear()
+            self.inp_rate_sqm.setFocus()
+        else:
+            self.inp_rate_sqm.clear()
+            self.inp_amount.setFocus()
+
+    def _rebuild_table(self):
+        self.table.blockSignals(True)
+        self.table.clearContents()
+
+        periods = self._sorted_periods()
+        self.table.setRowCount(len(periods))
+
+        for r_idx, entry in enumerate(periods):
+            date_from = entry.get("date_from", entry.get("date", ""))
+            date_to = entry.get("date_to", "")
+            is_current = (r_idx == 0)
+            is_per_sqm = bool(entry.get("per_sqm"))
+            bg = "#0d2a0d" if is_current else "#0a1520"
+            fg_date = "#81d4a0" if is_current else "#cdd9e5"
+            fg_value = "#64b5f6" if is_current else "#cdd9e5"
+
+            amount_text = "—" if is_per_sqm else str(entry.get("amount", ""))
+            rate_sqm_text = str(entry.get("rate_sqm", "")) if is_per_sqm else "—"
+            date_to_text = self._fmt_date(date_to) if date_to else "открытый"
+
+            cells = [
+                (self._fmt_date(date_from), fg_date,  True),   # read-only
+                (date_to_text,             fg_date,  True),   # read-only
+                (amount_text,              fg_value, is_per_sqm),
+                (rate_sqm_text,            fg_value, not is_per_sqm),
+                (entry.get("note", ""),    "#7a9bb8", False),
+            ]
+            for c_idx, (text, fg, read_only) in enumerate(cells):
+                it = QTableWidgetItem(text)
+                it.setBackground(QColor(bg))
+                it.setForeground(QColor(fg))
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+                if read_only:
+                    it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.table.setItem(r_idx, c_idx, it)
+
+            self.table.setRowHeight(r_idx, 34)
+
+        self.table.blockSignals(False)
+
+        if periods:
+            current = periods[0]
+            date_from = current.get("date_from", current.get("date", "?"))
+            date_to = current.get("date_to", "")
+            period_str = self._fmt_date(date_from)
+            if date_to:
+                period_str += f" — {self._fmt_date(date_to)}"
+            if current.get("per_sqm"):
+                desc = f"{current.get('rate_sqm', '?')} ₽/м²"
+            else:
+                desc = f"{current.get('amount', '?')} ₽"
+            self.status_lbl.setText(
+                f"Актуальный период: {period_str}  ·  {desc}  ·  всего периодов: {len(periods)}"
+            )
+        else:
+            self.status_lbl.setText("Нет периодов — добавьте первый")
+
+    def _add_rate(self):
+        self.inp_amount.clear()
+        self.inp_rate_sqm.clear()
+        self.inp_note.clear()
+        self.chk_per_sqm.setChecked(False)
+        self.chk_open_end.setChecked(False)
+        self.inp_date_to.setEnabled(True)
+        self.form_frame.setVisible(True)
+        self.inp_amount.setFocus()
+
+    def _confirm_add(self):
+        per_sqm = self.chk_per_sqm.isChecked()
+        if per_sqm:
+            raw = self.inp_rate_sqm.text().strip().replace(",", ".")
+            target = self.inp_rate_sqm
+        else:
+            raw = self.inp_amount.text().strip().replace(",", ".")
+            target = self.inp_amount
+
+        if not raw:
+            target.setFocus()
+            return
+        try:
+            v = float(raw)
+            if v <= 0:
+                raise ValueError
+        except ValueError:
+            target.setStyleSheet(target.styleSheet() + "border:1px solid #c62828;")
+            return
+
+        date_from_str = self.inp_date_from.date().toString("yyyy-MM-dd")
+        entry: dict = {
+            "date_from": date_from_str,
+            "amount": "" if per_sqm else raw,
+            "per_sqm": per_sqm,
+            "rate_sqm": raw if per_sqm else "",
+            "note": self.inp_note.text().strip(),
+        }
+        if not self.chk_open_end.isChecked():
+            entry["date_to"] = self.inp_date_to.date().toString("yyyy-MM-dd")
+
+        self._rates.append(entry)
+        self._save()
+        self.form_frame.setVisible(False)
+        self._rebuild_table()
+
+    def _on_cell_edited(self, item: QTableWidgetItem):
+        if self.table.signalsBlocked():
+            return
+        periods = self._sorted_periods()
+        r_idx = item.row()
+        if r_idx >= len(periods):
+            return
+        col = item.column()
+        val = item.text().strip()
+        entry = periods[r_idx]
+        orig_idx = next((i for i, e in enumerate(self._rates) if e is entry), None)
+        if orig_idx is None:
+            return
+        if col == 2 and not entry.get("per_sqm"):
+            self._rates[orig_idx]["amount"] = val.replace(",", ".")
+        elif col == 3 and entry.get("per_sqm"):
+            self._rates[orig_idx]["rate_sqm"] = val.replace(",", ".")
+        elif col == 4:
+            self._rates[orig_idx]["note"] = val
+        self._save()
+        self._rebuild_table()
+
+    def _context_menu(self, pos: QPoint):
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu{background:#0d1b2a;border:1px solid #2a4a6b;color:#cdd9e5;
+                  font-size:13px;padding:4px;}
+            QMenu::item{padding:8px 20px;border-radius:4px;}
+            QMenu::item:selected{background:#1a2e45;color:#ef9a9a;}
+        """)
+        act_del = QAction("🗑️  Удалить период", self)
+        act_del.triggered.connect(lambda: self._delete_rate(row))
+        menu.addAction(act_del)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _delete_rate(self, row: int):
+        periods = self._sorted_periods()
+        if row >= len(periods):
+            return
+        entry = periods[row]
+        date_from = entry.get("date_from", entry.get("date", ""))
+        date_to = entry.get("date_to", "")
+        period_str = self._fmt_date(date_from)
+        if date_to:
+            period_str += f" — {self._fmt_date(date_to)}"
+        if entry.get("per_sqm"):
+            desc = f"{entry.get('rate_sqm', '')} ₽/м²"
+        else:
+            desc = f"{entry.get('amount', '')} ₽"
+        reply = QMessageBox.question(
+            self, "Удаление периода",
+            f"Удалить период {period_str} ({desc})?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._rates = [e for e in self._rates if e is not entry]
+            self._save()
+            self._rebuild_table()
+
+
 class PlotsWidget(QWidget):
     """Вкладка участков: ручное добавление и управление списком."""
 
@@ -1647,9 +1406,9 @@ class PlotsWidget(QWidget):
         self.table.clearContents()
 
         plots_sorted = sorted(self._plots, key=lambda p: str(p.get("num", "")))
-        
-        self.table.setColumnCount(2)
-        self.table.setHorizontalHeaderLabels(["Участок", "Собственники"])
+
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Участок", "Собственники", "Площадь, м²"])
         self.table.setRowCount(len(plots_sorted))
 
         for r_idx, plot in enumerate(plots_sorted):
@@ -1662,7 +1421,24 @@ class PlotsWidget(QWidget):
             owner_widget = self._build_owners_cell(plot)
             self.table.setCellWidget(r_idx, 1, owner_widget)
 
+            area_raw = plot.get("area")
+            try:
+                area_v = float(area_raw) if area_raw not in (None, "") else None
+            except (TypeError, ValueError):
+                area_v = None
+            area_item = QTableWidgetItem(f"{area_v:g}" if area_v is not None else "—")
+            area_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            area_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            area_item.setForeground(QColor("#cdd9e5" if area_v is not None else "#7a9bb8"))
+            self.table.setItem(r_idx, 2, area_item)
+
             self.table.setRowHeight(r_idx, 28)
+
+        hdr = self.table.horizontalHeader()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
 
         self.table.blockSignals(False)
         self.status_label.setText(f"Участков: {len(plots_sorted)}")
@@ -1726,12 +1502,15 @@ class PlotsWidget(QWidget):
         # Ищем столбцы по частичному совпадению
         col_num = None
         col_name = None
+        col_area = None
         for col in df.columns:
             col_lower = str(col).lower().strip()
             if col_num is None and ("участк" in col_lower or col_lower in ("№", "n", "номер")):
                 col_num = col
             if col_name is None and ("ф.и.о" in col_lower or "фио" in col_lower or "имя" in col_lower or col_lower == "ф.и.о."):
                 col_name = col
+            if col_area is None and ("площад" in col_lower or "кв.м" in col_lower or "м²" in col_lower or "м2" in col_lower):
+                col_area = col
 
         if col_num is None or col_name is None:
             QMessageBox.warning(
@@ -1743,15 +1522,24 @@ class PlotsWidget(QWidget):
             return
 
         # Группируем по номеру участка
-        imported: dict[str, list[str]] = {}
+        imported: dict[str, dict] = {}
         for _, row in df.iterrows():
             num = str(row[col_num]).strip()
             name = str(row[col_name]).strip()
             if not num or num.lower() in ("nan", "none", "") or not name or name.lower() in ("nan", "none", ""):
                 continue
-            imported.setdefault(num, [])
-            if name not in imported[num]:
-                imported[num].append(name)
+            entry = imported.setdefault(num, {"owners": [], "area": None})
+            if name not in entry["owners"]:
+                entry["owners"].append(name)
+            if col_area is not None and entry["area"] is None:
+                raw = str(row[col_area]).strip().replace(",", ".")
+                if raw and raw.lower() not in ("nan", "none"):
+                    try:
+                        v = float(raw)
+                        if v > 0:
+                            entry["area"] = v
+                    except ValueError:
+                        pass
 
         if not imported:
             QMessageBox.warning(self, "Пустой файл", "В файле не найдено данных об участках.")
@@ -1775,19 +1563,32 @@ class PlotsWidget(QWidget):
             return
 
         if clicked is btn_replace:
-            self._plots = [{"num": num, "owners": owners} for num, owners in imported.items()]
+            new_plots = []
+            for num, entry in imported.items():
+                item = {"num": num, "owners": entry["owners"]}
+                if entry["area"] is not None:
+                    item["area"] = entry["area"]
+                new_plots.append(item)
+            self._plots = new_plots
         else:
             # Объединяем: добавляем новые участки, дополняем существующие
             existing = {p["num"]: p for p in self._plots}
-            for num, owners in imported.items():
+            for num, entry in imported.items():
+                owners = entry["owners"]
+                area = entry["area"]
                 if num in existing:
                     current_owners = existing[num].get("owners", [])
                     for o in owners:
                         if o not in current_owners:
                             current_owners.append(o)
                     existing[num]["owners"] = current_owners
+                    if area is not None and existing[num].get("area") in (None, "", 0):
+                        existing[num]["area"] = area
                 else:
-                    existing[num] = {"num": num, "owners": owners}
+                    item = {"num": num, "owners": owners}
+                    if area is not None:
+                        item["area"] = area
+                    existing[num] = item
             self._plots = list(existing.values())
 
         self._save()
@@ -2010,6 +1811,18 @@ class PlotEditDialog(QDialog):
                 "border-radius:5px;color:#7a9bb8;padding:7px 10px;"
             )
         form.addRow("Номер участка:", self.inp_num)
+
+        # Площадь участка (м²) — опционально, используется для расчёта ЧВ за м²
+        area_raw = self._plot_data.get("area")
+        area_text = ""
+        if area_raw not in (None, "", 0):
+            try:
+                area_text = f"{float(area_raw):g}"
+            except (TypeError, ValueError):
+                area_text = str(area_raw)
+        self.inp_area = QLineEdit(area_text)
+        self.inp_area.setPlaceholderText("например: 612 (необязательно)")
+        form.addRow("Площадь, м²:", self.inp_area)
         lay.addLayout(form)
 
         # Собственники
@@ -2091,7 +1904,23 @@ class PlotEditDialog(QDialog):
             QMessageBox.warning(self, "Ошибка", "Укажите номер участка")
             return
         owners = [i.text().strip() for i in self._owner_inputs if i.text().strip()]
-        self._result = {"num": num, "owners": owners}
+
+        area_raw = self.inp_area.text().strip().replace(",", ".")
+        area_val: float | None = None
+        if area_raw:
+            try:
+                area_val = float(area_raw)
+                if area_val <= 0:
+                    raise ValueError("non-positive")
+            except ValueError:
+                QMessageBox.warning(self, "Ошибка",
+                                    "Площадь должна быть положительным числом")
+                return
+
+        result = {"num": num, "owners": owners}
+        if area_val is not None:
+            result["area"] = area_val
+        self._result = result
         self.accept()
 
     def get_result(self) -> dict:
@@ -3239,6 +3068,617 @@ class PlotCardDialog(QDialog):
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
 
 
+class VznosyAdjustmentDialog(QDialog):
+    """Диалог добавления ручного платежа или переопределения начисления ЧВ."""
+
+    KIND_LABELS = {
+        "payment_manual": "Ручной платёж",
+        "charge_override": "Переопределение начисления за период",
+        "exempt_period": "Освобождение от взноса за период",
+    }
+
+    def __init__(self, plot: str, parent=None,
+                 default_kind: str = "payment_manual"):
+        super().__init__(parent)
+        self._plot = plot
+        self._result: dict | None = None
+        self.setWindowTitle(f"Корректировка ЧВ — уч. {plot}")
+        self.setMinimumWidth(480)
+        self.setModal(True)
+
+        from core import vznosy as _vznosy
+        self._periods = _vznosy.build_periods(_vznosy.load_rates())
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 20, 20, 18)
+        lay.setSpacing(12)
+
+        title = QLabel(f"Корректировка ЧВ на участке {plot}")
+        title.setStyleSheet("font-size:14px;font-weight:700;color:#e8f4fd;")
+        lay.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.cb_kind = QComboBox()
+        for key, label in self.KIND_LABELS.items():
+            self.cb_kind.addItem(label, key)
+        idx = self.cb_kind.findData(default_kind)
+        if idx >= 0:
+            self.cb_kind.setCurrentIndex(idx)
+        self.cb_kind.currentIndexChanged.connect(self._on_kind_changed)
+        form.addRow("Тип:", self.cb_kind)
+
+        self.inp_date = QDateEdit(calendarPopup=True)
+        self.inp_date.setDisplayFormat("dd.MM.yyyy")
+        self.inp_date.setDate(QDate.currentDate())
+        form.addRow("Дата:", self.inp_date)
+
+        self.cb_period = QComboBox()
+        self._fill_period_combo()
+        form.addRow("Период:", self.cb_period)
+
+        self.inp_amount = QLineEdit()
+        self.inp_amount.setPlaceholderText("например: 5000")
+        form.addRow("Сумма, ₽:", self.inp_amount)
+
+        self.inp_note = QLineEdit()
+        self.inp_note.setPlaceholderText("необязательно")
+        form.addRow("Примечание:", self.inp_note)
+
+        lay.addLayout(form)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+        self.setStyleSheet("""
+            QDialog { background: #111e2b; color: #cdd9e5; }
+            QLabel { background: transparent; color: #cdd9e5; font-size: 13px; }
+            QLineEdit, QDateEdit, QComboBox, QSpinBox {
+                background: #0d1b2a; border: 1px solid #2a4a6b;
+                border-radius: 5px; color: #cdd9e5; padding: 6px 8px; font-size: 13px;
+            }
+            QLineEdit:focus, QDateEdit:focus { border: 1px solid #1976d2; }
+            QDialogButtonBox QPushButton {
+                background: #1565c0; color: white; border: none;
+                border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
+            }
+            QDialogButtonBox QPushButton:hover { background: #1976d2; }
+            QDialogButtonBox QPushButton[text='Отмена'] {
+                background: #1e3a5f; color: #8eb3d4;
+            }
+        """)
+
+        self._on_kind_changed()
+
+    def _fill_period_combo(self):
+        self.cb_period.clear()
+        for r in reversed(self._periods):   # новые сверху
+            pf = r.get("date_from", "")
+            pt = r.get("date_to", "")
+            try:
+                from datetime import datetime as _dt
+                pf_label = _dt.strptime(pf, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                pf_label = pf
+            try:
+                from datetime import datetime as _dt
+                pt_label = _dt.strptime(pt, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                pt_label = pt or "открытый"
+            self.cb_period.addItem(f"{pf_label} — {pt_label}", pf)
+        if not self._periods:
+            self.cb_period.addItem("Нет периодов", "")
+
+    def _on_kind_changed(self):
+        kind = self.cb_kind.currentData()
+        is_payment = (kind == "payment_manual")
+        self.cb_period.setEnabled(not is_payment)
+        if kind == "payment_manual":
+            self.inp_amount.setEnabled(True)
+            self.inp_amount.setPlaceholderText("например: 5000")
+        elif kind == "charge_override":
+            self.inp_amount.setEnabled(True)
+            self.inp_amount.setPlaceholderText("новая сумма за период, ₽")
+        else:  # exempt_period
+            self.inp_amount.setEnabled(False)
+            self.inp_amount.setText("0")
+
+    def _on_accept(self):
+        kind = self.cb_kind.currentData()
+        result = {
+            "date": self.inp_date.date().toString("yyyy-MM-dd"),
+            "kind": kind,
+            "note": self.inp_note.text().strip(),
+        }
+        if kind in ("charge_override", "exempt_period"):
+            result["period_from"] = self.cb_period.currentData() or ""
+
+        if kind == "exempt_period":
+            result["amount"] = "0"
+        else:
+            raw = self.inp_amount.text().strip().replace(",", ".")
+            try:
+                v = float(raw)
+                if v < 0:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Ошибка",
+                                    "Сумма должна быть неотрицательным числом")
+                return
+            result["amount"] = f"{v:g}"
+
+        self._result = result
+        self.accept()
+
+    def get_result(self) -> dict | None:
+        return self._result
+
+
+class VznosyCardDialog(QDialog):
+    """Карточка участка по членским взносам: годы, начисления, платежи, корректировки."""
+
+    def __init__(self, plot: str, df, parent=None, as_of: date | None = None):
+        super().__init__(parent)
+        self._plot = str(plot)
+        self._df = df
+        self._as_of = as_of or date.today()
+        self.setWindowTitle(f"Участок {plot} — карточка ЧВ")
+        self.setMinimumSize(1010, 640)
+        self.setModal(False)
+        self._rebuilding = False   # защита от рекурсии при установке чекбоксов
+
+        self._setup_ui()
+        self._rebuild()
+
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 18, 18, 16)
+        lay.setSpacing(10)
+
+        from core import vznosy
+        owners = energy.owners_map().get(self._plot, [])
+        owners_text = ", ".join(owners) if owners else "владельцы не указаны"
+        area = vznosy.plot_area_map().get(self._plot)
+        area_text = f"{area:g} м²" if area is not None else "площадь не указана"
+
+        self.head = QLabel(
+            f"<b>Участок {self._plot}</b>  ·  {owners_text}  ·  {area_text}"
+        )
+        self.head.setStyleSheet("font-size:14px;color:#e8f4fd;background:transparent;")
+        lay.addWidget(self.head)
+
+        self.summary_lbl = QLabel("")
+        self.summary_lbl.setStyleSheet("color:#7a9bb8;background:transparent;font-size:12px;")
+        lay.addWidget(self.summary_lbl)
+
+        self.warning_lbl = QLabel("")
+        self.warning_lbl.setStyleSheet(
+            "color:#ef9a9a;background:#2a1318;border:1px solid #6e2a30;"
+            "border-radius:6px;padding:8px 12px;font-size:12px;"
+        )
+        self.warning_lbl.setVisible(False)
+        lay.addWidget(self.warning_lbl)
+
+        # ── Главная таблица: разбивка по периодам ──────────────────────
+        years_lbl = QLabel("Разбивка по периодам", objectName="filterLabel")
+        years_lbl.setStyleSheet("color:#64b5f6;background:transparent;font-size:12px;margin-top:4px;")
+        lay.addWidget(years_lbl)
+
+        self.table = QTableWidget(objectName="summaryTable")
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels([
+            "Период", "Тариф", "Начислено", "Оплачено за период",
+            "Корректировка", "Баланс нараст.", "Не учитывать",
+        ])
+        hdr = self.table.horizontalHeader()
+        for c, w in enumerate([200, 240, 120, 140, 190, 130, 100]):
+            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+            self.table.setColumnWidth(c, w)
+        hdr.setStretchLastSection(False)
+        lay.addWidget(self.table, 1)
+
+        # ── Список ручных операций и корректировок ────────────────
+        adj_lbl = QLabel("Ручные операции и корректировки")
+        adj_lbl.setStyleSheet("color:#64b5f6;background:transparent;font-size:12px;margin-top:8px;")
+        lay.addWidget(adj_lbl)
+
+        self.adj_table = QTableWidget(objectName="summaryTable")
+        self.adj_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.adj_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.adj_table.verticalHeader().setVisible(False)
+        self.adj_table.setColumnCount(6)
+        self.adj_table.setHorizontalHeaderLabels([
+            "Дата", "Тип", "Период", "Сумма", "Примечание", "",
+        ])
+        ahdr = self.adj_table.horizontalHeader()
+        for c, w in enumerate([110, 200, 80, 120, 380, 40]):
+            ahdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+            self.adj_table.setColumnWidth(c, w)
+        ahdr.setStretchLastSection(False)
+        self.adj_table.setMaximumHeight(180)
+        lay.addWidget(self.adj_table)
+
+        # ── Кнопки внизу ──────────────────────────────────────────
+        bottom = QHBoxLayout()
+        btn_pay = QPushButton("➕  Ручной платёж", objectName="btnSecondary")
+        btn_pay.clicked.connect(lambda: self._add_adjustment("payment_manual"))
+        bottom.addWidget(btn_pay)
+
+        btn_over = QPushButton("🛠️  Переопределить начисление за период",
+                               objectName="btnSecondary")
+        btn_over.clicked.connect(lambda: self._add_adjustment("charge_override"))
+        bottom.addWidget(btn_over)
+
+        btn_pdf = QPushButton("📄  Сохранить PDF-квитанцию", objectName="btnSecondary")
+        btn_pdf.clicked.connect(self._on_pdf)
+        bottom.addWidget(btn_pdf)
+
+        bottom.addStretch()
+        btn_close = QPushButton("Закрыть", objectName="btnPrimary")
+        btn_close.clicked.connect(self.accept)
+        bottom.addWidget(btn_close)
+        lay.addLayout(bottom)
+
+        self.setStyleSheet("""
+            QDialog { background: #111e2b; color: #cdd9e5; }
+            QLabel  { background: transparent; }
+            QPushButton#btnPrimary {
+                background: #1565c0; color: white; border: none; border-radius: 6px;
+                padding: 8px 18px; font-size: 13px; font-weight: 600;
+            }
+            QPushButton#btnPrimary:hover  { background: #1976d2; }
+            QPushButton#btnSecondary {
+                background: #1e3a5f; color: #8eb3d4; border: 1px solid #2a4a6b;
+                border-radius: 6px; padding: 7px 14px; font-size: 13px;
+            }
+            QPushButton#btnSecondary:hover { background: #243f63; color: #cdd9e5; }
+            QTableWidget#summaryTable {
+                background: #0d1b2a; border: 1px solid #1e3a5f; border-radius: 8px;
+                gridline-color: #1a2733; color: #cdd9e5; font-size: 12px;
+                selection-background-color: #1a3a5a; selection-color: #e8f4fd;
+            }
+            QTableWidget#summaryTable QHeaderView::section {
+                background: #0a1520; color: #64b5f6; border: none;
+                border-right: 1px solid #1e3a5f; border-bottom: 2px solid #1976d2;
+                padding: 6px 8px; font-size: 12px; font-weight: 600;
+            }
+        """)
+
+    def _rebuild(self):
+        from core import vznosy
+        rates = vznosy.load_rates()
+        adj = vznosy.load_adjustments()
+        area = vznosy.plot_area_map().get(self._plot)
+        periods = vznosy.build_periods(rates)
+        bal = vznosy.balance_for_plot(self._plot, area, self._as_of,
+                                       rates, adj, self._df)
+        py = vznosy.paid_by_period(self._plot, self._df, self._as_of, periods, adj)
+
+        # Обновить заголовок (площадь могла измениться)
+        owners = energy.owners_map().get(self._plot, [])
+        owners_text = ", ".join(owners) if owners else "владельцы не указаны"
+        area_text = f"{area:g} м²" if area is not None else "площадь не указана"
+        self.head.setText(
+            f"<b>Участок {self._plot}</b>  ·  {owners_text}  ·  {area_text}"
+        )
+
+        # Баннер о площади
+        if bal.area_missing_warning:
+            self.warning_lbl.setText(
+                "⚠ Для этого участка не указана площадь — тариф «за м²» не применён. "
+                "Откройте вкладку «Участки» и укажите площадь."
+            )
+            self.warning_lbl.setVisible(True)
+        else:
+            self.warning_lbl.setVisible(False)
+
+        # Главная таблица периодов
+        self.table.setRowCount(len(bal.breakdown))
+        self._rebuilding = True
+        try:
+            cum = 0.0
+            for r, y in enumerate(bal.breakdown):
+                # Метка периода
+                if y.period_to:
+                    period_label = (f"{y.period_from.strftime('%d.%m.%Y')}"
+                                    f"—{y.period_to.strftime('%d.%m.%Y')}")
+                else:
+                    period_label = f"{y.period_from.strftime('%d.%m.%Y')}—..."
+
+                # Тариф
+                if y.tariff is None:
+                    tariff_text = "—"
+                    tariff_color = "#7a9bb8"
+                elif y.tariff.get("per_sqm"):
+                    rate = y.tariff.get("rate_sqm", "?")
+                    if y.area_missing:
+                        tariff_text = f"{rate} ₽/м²  (площадь не указана)"
+                        tariff_color = "#ef9a9a"
+                    else:
+                        tariff_text = f"{rate} ₽/м² · {area:g} м² → {self._fmt_money(y.amount)}"
+                        tariff_color = "#cdd9e5"
+                else:
+                    tariff_text = f"{y.tariff.get('amount', '?')} ₽"
+                    tariff_color = "#cdd9e5"
+
+                # Начислено
+                if y.ignored:
+                    amount_text = "—"
+                    amount_color = "#7a9bb8"
+                elif y.amount is None:
+                    amount_text = "—"
+                    amount_color = "#ef9a9a" if y.area_missing else "#7a9bb8"
+                else:
+                    amount_text = self._fmt_money(y.amount)
+                    amount_color = "#f9a825" if y.amount > 0 else "#7a9bb8"
+
+                # Оплачено за период
+                period_key = y.period_from.isoformat()
+                paid_period = py.get(period_key, 0.0)
+                paid_text = self._fmt_money(paid_period) if paid_period else "—"
+                paid_color = "#81d4a0" if paid_period else "#7a9bb8"
+
+                # Корректировка
+                note_text = "—"
+                note_color = "#7a9bb8"
+                if y.ignored:
+                    note_text = "не учитывается"
+                    note_color = "#546e7a"
+                elif y.overridden:
+                    ov = vznosy._period_override(self._plot, period_key,
+                                                 y.period_from.year, adj)
+                    kind = ov.get("kind", "") if ov else ""
+                    kind_label = "освобождён" if kind in ("exempt_period", "exempt_year") else "переопределено"
+                    if ov and ov.get("note"):
+                        note_text = f"{kind_label}: {ov['note']}"
+                    else:
+                        note_text = kind_label
+                    note_color = "#ffd54f"
+
+                # Накопительный баланс
+                if not y.ignored:
+                    if y.amount is not None:
+                        cum += y.amount
+                    cum -= paid_period
+                cum_text = self._fmt_money(cum) if not y.ignored else "—"
+                cum_color = "#ef9a9a" if cum > 0 else ("#81d4a0" if cum < 0 else None)
+
+                self._set_year_row(r, [
+                    (period_label, None),
+                    (tariff_text, tariff_color),
+                    (amount_text, amount_color),
+                    (paid_text, paid_color),
+                    (note_text, note_color),
+                    (cum_text, cum_color),
+                ], ignored=y.ignored)
+
+                # Чекбокс «Не учитывать»
+                cb_widget = QWidget()
+                cb_widget.setStyleSheet("background: transparent;")
+                cb_layout = QHBoxLayout(cb_widget)
+                cb_layout.setContentsMargins(0, 0, 0, 0)
+                cb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                cb = QCheckBox()
+                cb.setChecked(y.ignored)
+                cb.setToolTip(
+                    "Снять флаг — период снова учитывается" if y.ignored
+                    else "Поставить флаг — период будет исключён из расчёта"
+                )
+                cb.setStyleSheet("""
+                    QCheckBox::indicator { width: 16px; height: 16px; }
+                    QCheckBox::indicator:unchecked {
+                        border: 2px solid #2a4a6b; border-radius: 3px;
+                        background: #0d1b2a;
+                    }
+                    QCheckBox::indicator:checked {
+                        border: 2px solid #ef9a9a; border-radius: 3px;
+                        background: #4a1a22;
+                    }
+                """)
+                cb.toggled.connect(
+                    lambda checked, pk=period_key: self._toggle_ignore_period(pk, checked)
+                )
+                cb_layout.addWidget(cb)
+                self.table.setCellWidget(r, 6, cb_widget)
+        finally:
+            self._rebuilding = False
+
+        # Таблица корректировок
+        plot_adjs = list(adj.get(self._plot, []) or [])
+        plot_adjs_idx = list(enumerate(plot_adjs))
+        plot_adjs_idx.sort(key=lambda t: t[1].get("date", ""))
+        self.adj_table.setRowCount(len(plot_adjs_idx))
+        for r, (orig_idx, a) in enumerate(plot_adjs_idx):
+            kind = a.get("kind", "")
+            kind_label = {
+                "payment_manual": "Ручной платёж",
+                "charge_override": "Переопр. начисления",
+                "exempt_period": "Освобождение",
+                "exempt_year": "Освобождение",
+                "ignore_period": "Не учитывать",
+                "ignore_year": "Не учитывать",
+            }.get(kind, kind)
+            date_text = a.get("date", "")
+            try:
+                from datetime import datetime as _dt
+                date_text = _dt.strptime(date_text, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                pass
+            # Период: period_from (новый формат) или year (старый)
+            pf = a.get("period_from", "")
+            if pf:
+                try:
+                    from datetime import datetime as _dt
+                    period_text = _dt.strptime(pf, "%Y-%m-%d").strftime("%d.%m.%Y")
+                except Exception:
+                    period_text = pf
+            elif a.get("year"):
+                period_text = str(a["year"])
+            else:
+                period_text = "—"
+            amount_v = energy._to_float(a.get("amount")) or 0.0
+            amount_text = self._fmt_money(amount_v)
+            note_text = a.get("note", "")
+
+            for c, text in enumerate([date_text, kind_label, period_text,
+                                       amount_text, note_text]):
+                it = QTableWidgetItem(text)
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                if c in (0, 2, 3):
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+                self.adj_table.setItem(r, c, it)
+
+            btn = QPushButton("✕")
+            btn.setFixedSize(26, 22)
+            btn.setToolTip("Удалить корректировку")
+            btn.setStyleSheet(
+                "QPushButton{background:#2a1318;color:#ef9a9a;border:1px solid #6e2a30;"
+                "border-radius:4px;font-size:12px;font-weight:bold;}"
+                "QPushButton:hover{background:#4a1a22;color:#ffcccc;}"
+            )
+            btn.clicked.connect(lambda _, i=orig_idx: self._delete_adjustment(i))
+            self.adj_table.setCellWidget(r, 5, btn)
+            self.adj_table.setRowHeight(r, 28)
+
+        # Сводка
+        self.summary_lbl.setText(
+            f"Начислено: {self._fmt_money(bal.charged)}  ·  "
+            f"оплачено: {self._fmt_money(bal.paid)}  ·  "
+            f"баланс: {self._fmt_money(bal.debt)}  ·  "
+            f"на {self._as_of.strftime('%d.%m.%Y')}"
+        )
+
+    def _set_year_row(self, r: int, cells: list, *, ignored: bool = False):
+        dim_color = QColor("#3a4a56")   # приглушённый цвет для игнорируемых строк
+        for c, (text, color) in enumerate(cells):
+            it = QTableWidgetItem(text)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            if ignored:
+                it.setForeground(dim_color)
+            elif color:
+                it.setForeground(QColor(color))
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            self.table.setItem(r, c, it)
+        self.table.setRowHeight(r, 28)
+
+    @staticmethod
+    def _fmt_money(v: float | None) -> str:
+        if v is None:
+            return "—"
+        sign = "-" if v < 0 else ""
+        return f"{sign}{abs(v):,.2f} ₽".replace(",", " ")
+
+    def _add_adjustment(self, kind: str):
+        dlg = VznosyAdjustmentDialog(self._plot, self, default_kind=kind)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        result = dlg.get_result()
+        if not result:
+            return
+        from core import vznosy
+        adj = vznosy.load_adjustments()
+        adj.setdefault(self._plot, []).append(result)
+        vznosy.save_adjustments(adj)
+        self._rebuild()
+
+    def _delete_adjustment(self, idx: int):
+        from core import vznosy
+        adj = vznosy.load_adjustments()
+        items = adj.get(self._plot, [])
+        if 0 <= idx < len(items):
+            reply = QMessageBox.question(
+                self, "Удалить корректировку",
+                "Удалить эту корректировку?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            items.pop(idx)
+            if items:
+                adj[self._plot] = items
+            else:
+                adj.pop(self._plot, None)
+            vznosy.save_adjustments(adj)
+            self._rebuild()
+
+    def _toggle_ignore_period(self, period_from: str, ignore: bool):
+        """Устанавливает или снимает флаг «Не учитывать» для периода.
+
+        Удаляет как новые (ignore_period + period_from) так и старые
+        (ignore_year + year) записи, чтобы снятие галки работало
+        при загрузке проекта, сохранённого в старом формате.
+        """
+        if self._rebuilding:
+            return
+        from core import vznosy
+        try:
+            from datetime import datetime as _dt
+            period_year = _dt.strptime(period_from, "%Y-%m-%d").year
+        except Exception:
+            period_year = None
+
+        adj = vznosy.load_adjustments()
+        items = adj.setdefault(self._plot, [])
+
+        def _is_ignore_for_this_period(a: dict) -> bool:
+            kind = a.get("kind")
+            if kind == vznosy.KIND_IGNORE_PERIOD:
+                return a.get("period_from") == period_from
+            if kind == vznosy.KIND_IGNORE_YEAR and period_year is not None:
+                try:
+                    return int(a.get("year", 0)) == period_year
+                except (TypeError, ValueError):
+                    pass
+            return False
+
+        adj[self._plot] = [a for a in items if not _is_ignore_for_this_period(a)]
+        if ignore:
+            adj[self._plot].append({
+                "kind": vznosy.KIND_IGNORE_PERIOD,
+                "period_from": period_from,
+                "date": date.today().isoformat(),
+                "amount": None,
+                "note": "Не учитывать",
+            })
+        if not adj[self._plot]:
+            adj.pop(self._plot, None)
+        vznosy.save_adjustments(adj)
+        self._rebuild()
+
+    def _on_pdf(self):
+        try:
+            from core import receipt
+        except ImportError:
+            QMessageBox.information(self, "Квитанции",
+                                    "Модуль квитанций ещё не подключён.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить квитанцию",
+            f"Уч_{self._plot}_ЧВ_{self._as_of.isoformat()}.pdf",
+            "PDF (*.pdf)"
+        )
+        if not path:
+            return
+        try:
+            receipt.save_vznosy_receipt_pdf(self._plot, self._df, path,
+                                            as_of=self._as_of)
+            QMessageBox.information(self, "Квитанция", f"Сохранено:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+
+
 class EnergyDebtWidget(QWidget):
     """Вкладка контроля долгов по электроэнергии."""
 
@@ -3587,6 +4027,311 @@ class EnergyDebtWidget(QWidget):
         return f"{sign}{abs(v):,.2f} ₽".replace(",", " ")
 
 
+class VznosyDebtWidget(QWidget):
+    """Вкладка контроля долгов по членским взносам."""
+
+    def __init__(self):
+        super().__init__()
+        self._df = None
+        self._last_debts: dict = {}
+        self._setup_ui()
+        self._rebuild()
+
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(12)
+
+        top = QHBoxLayout()
+        title = QLabel("Долги по членским взносам", objectName="pageTitle")
+        top.addWidget(title)
+        top.addStretch()
+
+        top.addWidget(QLabel("на дату:", objectName="filterLabel"))
+        self.date_as_of = QDateEdit(calendarPopup=True, objectName="datePicker",
+                                    displayFormat="dd.MM.yyyy")
+        self.date_as_of.setDate(QDate.currentDate())
+        self.date_as_of.dateChanged.connect(self._rebuild)
+        top.addWidget(self.date_as_of)
+
+        self.search = QLineEdit(objectName="searchInput")
+        self.search.setPlaceholderText("🔍  Поиск по № участка или ФИО")
+        self.search.setFixedWidth(280)
+        self.search.textChanged.connect(self._apply_filter)
+        top.addWidget(self.search)
+
+        self.cb_only_debt = QComboBox(objectName="filterCombo")
+        self.cb_only_debt.addItems(["Все участки", "Только должники", "Только оплачено/аванс"])
+        self.cb_only_debt.currentIndexChanged.connect(self._apply_filter)
+        top.addWidget(self.cb_only_debt)
+
+        btn = QPushButton("🔄  Пересчитать", objectName="btnPrimary")
+        btn.clicked.connect(self._rebuild)
+        top.addWidget(btn)
+
+        self.btn_mass_pdf = QPushButton("📄  Квитанции должникам", objectName="btnSecondary")
+        self.btn_mass_pdf.clicked.connect(self._export_debtor_receipts)
+        top.addWidget(self.btn_mass_pdf)
+
+        btn_rates = QPushButton("📅  Периоды", objectName="btnSecondary")
+        btn_rates.clicked.connect(self._open_rates_dialog)
+        top.addWidget(btn_rates)
+
+        lay.addLayout(top)
+
+        # Легенда
+        legend = QHBoxLayout()
+        legend.setSpacing(20)
+        for color, text in [
+            ("#81d4a0", "■  без долга / аванс"),
+            ("#f9a825", "■  небольшой долг"),
+            ("#ef6c00", "■  средний"),
+            ("#c62828", "■  крупный"),
+        ]:
+            lb = QLabel(text)
+            lb.setStyleSheet(
+                f"color:{color};background:transparent;font-size:11px;"
+            )
+            legend.addWidget(lb)
+        legend.addStretch()
+        lay.addLayout(legend)
+
+        self.table = QTableWidget(objectName="summaryTable")
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSortingEnabled(True)
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels([
+            "Участок", "Владелец", "Площадь, м²",
+            "Начислено", "Оплачено", "Долг / Аванс", "Лет без оплаты",
+        ])
+        hdr = self.table.horizontalHeader()
+        for c, w in enumerate([85, 280, 100, 130, 130, 140, 110]):
+            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+            self.table.setColumnWidth(c, w)
+        hdr.setStretchLastSection(True)
+        self.table.cellDoubleClicked.connect(self._open_card)
+        lay.addWidget(self.table, 1)
+
+        self.status_lbl = QLabel("Загрузите выписку на вкладке «Детализация»",
+                                  objectName="statusLabel")
+        lay.addWidget(self.status_lbl)
+
+        self.rates = VznosyRatesWidget()
+
+    def _open_rates_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Периоды членских взносов")
+        dlg.resize(720, 500)
+        dlg_lay = QVBoxLayout(dlg)
+        dlg_lay.setContentsMargins(0, 0, 0, 0)
+        dlg_lay.addWidget(self.rates)
+        dlg.exec()
+        dlg_lay.removeWidget(self.rates)
+        self.rates.setParent(self)  # type: ignore[arg-type]
+        # Тарифы могли поменяться — пересчитаем
+        self._rebuild()
+
+    def refresh(self, df):
+        self._df = df
+        self._rebuild()
+
+    def _plot_list(self) -> list[str]:
+        plots = energy.load_plots()
+        nums = [str(p.get("num", "")) for p in plots if p.get("num")]
+        def _key(s):
+            try:
+                return (0, int(s))
+            except ValueError:
+                return (1, s)
+        return sorted(set(nums), key=_key)
+
+    def _rebuild(self):
+        from core import vznosy
+        as_of = self.date_as_of.date().toPyDate()
+        rates = vznosy.load_rates()
+        adj = vznosy.load_adjustments()
+        areas = vznosy.plot_area_map()
+        owners = energy.owners_map()
+        plots = self._plot_list()
+
+        # средняя годовая сумма по тарифу — для подсветки уровня долга
+        annual_avg = 0.0
+        if rates:
+            sums = []
+            for r in rates:
+                v = energy._to_float(r.get("amount"))
+                if v is not None:
+                    sums.append(v)
+            if sums:
+                annual_avg = sum(sums) / len(sums)
+
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(plots))
+
+        total_debt = 0.0
+        total_charged = 0.0
+        total_paid = 0.0
+        debt_count = 0
+        debts_map: dict[str, dict] = {}
+
+        for r, plot in enumerate(plots):
+            area = areas.get(plot)
+            bal = vznosy.balance_for_plot(plot, area, as_of, rates, adj, self._df)
+            owner = ", ".join(owners.get(plot, [])) or "—"
+
+            area_text = f"{area:g}" if area is not None else "—"
+            area_color = "#ef9a9a" if bal.area_missing_warning else (
+                "#cdd9e5" if area is not None else "#7a9bb8"
+            )
+            area_tip = ("Не указана площадь — начисление по тарифу за м² невозможно"
+                        if bal.area_missing_warning else "")
+
+            color = vznosy.debt_color(bal.debt, annual_avg=annual_avg)
+            debts_map[plot] = {"debt": bal.debt, "color": color,
+                                "charged": bal.charged, "paid": bal.paid}
+
+            total_debt += bal.debt
+            total_charged += bal.charged
+            total_paid += bal.paid
+            if bal.debt > 0.5:
+                debt_count += 1
+
+            years_unpaid_text = "—" if bal.years_unpaid is None else str(bal.years_unpaid)
+            years_unpaid_color = "#cdd9e5"
+            if bal.years_unpaid and bal.years_unpaid >= 2:
+                years_unpaid_color = "#ef9a9a" if bal.years_unpaid >= 3 else "#ffd54f"
+
+            cells = [
+                (f"уч. {plot}", plot, None, "#90caf9", True, ""),
+                (owner, owner, None, "#cdd9e5", False, ""),
+                (area_text, area if area is not None else 0.0, None, area_color, False, area_tip),
+                (self._fmt_money(bal.charged), bal.charged, None,
+                 "#f9a825" if bal.charged else "#3a5a7a", False, ""),
+                (self._fmt_money(bal.paid), bal.paid, None,
+                 "#81d4a0" if bal.paid else "#3a5a7a", False, ""),
+                (self._fmt_money(bal.debt), bal.debt, color, "#ffffff", True, ""),
+                (years_unpaid_text, float(bal.years_unpaid or 0), None,
+                 years_unpaid_color, False, ""),
+            ]
+            for c, (text, value, bg, fg, bold, tip) in enumerate(cells):
+                if isinstance(value, (int, float)):
+                    it = _NumItem(text, float(value))
+                else:
+                    it = QTableWidgetItem(text)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+                if bg:
+                    it.setBackground(QColor(bg))
+                if fg:
+                    it.setForeground(QColor(fg))
+                if bold:
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                if tip:
+                    it.setToolTip(tip)
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.table.setItem(r, c, it)
+            self.table.setRowHeight(r, 28)
+
+        self.table.setSortingEnabled(True)
+        self._last_debts = debts_map
+
+        self.status_lbl.setText(
+            f"Участков: {len(plots)}  ·  должников: {debt_count}  ·  "
+            f"начислено всего: {self._fmt_money(total_charged)}  ·  "
+            f"оплачено всего: {self._fmt_money(total_paid)}  ·  "
+            f"общий долг: {self._fmt_money(total_debt)}"
+        )
+
+        self._apply_filter()
+
+    def _apply_filter(self):
+        text = self.search.text().strip().lower()
+        mode = self.cb_only_debt.currentText()
+        for r in range(self.table.rowCount()):
+            plot_item = self.table.item(r, 0)
+            owner_item = self.table.item(r, 1)
+            debt_item = self.table.item(r, 5)
+            if not plot_item or not debt_item:
+                continue
+            visible = True
+            if text:
+                hay = (plot_item.text() + " " + (owner_item.text() if owner_item else "")).lower()
+                visible = text in hay
+            if visible and mode == "Только должники":
+                visible = isinstance(debt_item, _NumItem) and debt_item._value > 0.5
+            elif visible and mode == "Только оплачено/аванс":
+                visible = isinstance(debt_item, _NumItem) and debt_item._value <= 0.5
+            self.table.setRowHidden(r, not visible)
+
+    def _open_card(self, row: int, _col: int):
+        plot_item = self.table.item(row, 0)
+        if not plot_item:
+            return
+        plot = plot_item.text().replace("уч. ", "").strip()
+        as_of = self.date_as_of.date().toPyDate()
+        dlg = VznosyCardDialog(plot, self._df, self, as_of=as_of)
+        dlg.exec()
+        self._rebuild()
+
+    def _export_debtor_receipts(self):
+        if not self._last_debts:
+            QMessageBox.information(self, "Квитанции", "Сначала загрузите выписку.")
+            return
+        debtors = [(p, info) for p, info in self._last_debts.items()
+                   if info["debt"] > 0.5]
+        if not debtors:
+            QMessageBox.information(self, "Квитанции", "Должников нет — квитанции не нужны.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Папка для квитанций")
+        if not folder:
+            return
+        try:
+            from core import receipt
+        except ImportError as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось импортировать модуль квитанций:\n{e}")
+            return
+
+        owners = energy.owners_map()
+        as_of = self.date_as_of.date().toPyDate()
+        ok = 0
+        errors = []
+        for plot, _info in debtors:
+            owner = (owners.get(plot, [""])[0] or "").split()
+            surname = owner[0] if owner else ""
+            fname = f"Уч_{plot}_ЧВ"
+            if surname:
+                safe_surname = re.sub(r"[^\w\-]", "_", surname)
+                fname += f"_{safe_surname}"
+            fname += f"_{as_of.isoformat()}.pdf"
+            fname = fname.replace("/", "-")
+            path = os.path.join(folder, fname)
+            try:
+                receipt.save_vznosy_receipt_pdf(plot, self._df, path, as_of=as_of)
+                ok += 1
+            except Exception as e:
+                errors.append(f"уч. {plot}: {e}")
+        if errors:
+            QMessageBox.warning(
+                self, "Квитанции",
+                f"Создано: {ok}\nОшибки ({len(errors)}):\n" + "\n".join(errors[:10])
+            )
+        else:
+            QMessageBox.information(
+                self, "Квитанции",
+                f"✅  Сформировано {ok} квитанций в:\n{folder}"
+            )
+
+    @staticmethod
+    def _fmt_money(v) -> str:
+        if v is None:
+            return "—"
+        if abs(v) < 0.005:
+            return "0 ₽"
+        sign = "-" if v < 0 else ""
+        return f"{sign}{abs(v):,.2f} ₽".replace(",", " ")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -3653,13 +4398,13 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget(objectName="contentArea")
         self.detail      = DetailWidget()
-        self.sum_vznosy  = SummaryWidget(mode="vznosy")
+        self.vznosy_debt = VznosyDebtWidget()
         self.plots       = PlotsWidget()
         self.docs        = DocsWidget()
         self.map_tab     = MapWidget()
         self.energy_debt = EnergyDebtWidget()
         self.stack.addWidget(self.detail)       # 0
-        self.stack.addWidget(self.sum_vznosy)   # 1
+        self.stack.addWidget(self.vznosy_debt)  # 1
         self.stack.addWidget(self.plots)        # 2
         self.stack.addWidget(self.docs)         # 3
         self.stack.addWidget(self.map_tab)      # 4
@@ -3667,8 +4412,12 @@ class MainWindow(QMainWindow):
         root.addWidget(self.stack, stretch=1)
 
         # Подписки на загрузку выписки
-        self.detail.dataLoaded.connect(self.sum_vznosy.refresh)
+        self.detail.dataLoaded.connect(self.vznosy_debt.refresh)
         self.detail.dataLoaded.connect(self.energy_debt.refresh)
+        # При изменении списка участков (в т.ч. площади) пересчитать ЧВ
+        self.plots.plotsUpdated.connect(
+            lambda: self.vznosy_debt.refresh(self.detail.df_full)
+        )
 
         # При изменении данных вкладки «Участки» — обновить все зависимые вкладки
         self.plots.plotsUpdated.connect(self.detail.refresh_plot_column)
@@ -3681,7 +4430,7 @@ class MainWindow(QMainWindow):
             idx = self.nav_indices[row]
             self.stack.setCurrentIndex(idx)
             if idx == 1:
-                self.sum_vznosy.refresh(self.detail.df_full)
+                self.vznosy_debt.refresh(self.detail.df_full)
             elif idx == 4:
                 # карта подхватывает актуальные долги
                 self.map_tab.set_debts(self.energy_debt.get_debts())
@@ -3691,7 +4440,8 @@ class MainWindow(QMainWindow):
     # ── Сохранение / загрузка проекта ────────────────────────────────────
 
     _PROJECT_JSON_FILES = [
-        "snt_plots.json", "snt_plan.json", "snt_rates.json",
+        "snt_plots.json", "snt_rates.json",
+        "snt_vznosy_rates.json", "snt_vznosy_adjustments.json",
         "snt_map_plots.json", "snt_map_image.json",
         "snt_meters.json", "snt_meters_years.json",
         "snt_meter_replacements.json", "snt_energy_baseline.json",
@@ -3803,6 +4553,7 @@ class MainWindow(QMainWindow):
         # перезагружаем все виджеты из новых файлов
         self.plots.reload()   # также эмитит plotsUpdated → docs обновят списки
         self.energy_debt.rates.reload()
+        self.vznosy_debt.rates.reload()
         self.docs.reload()
         self.map_tab.reload_map()
 
@@ -3810,6 +4561,7 @@ class MainWindow(QMainWindow):
             self.detail.load_dataframe(detail_df)
         else:
             self.energy_debt.refresh(self.detail.df_full)
+            self.vznosy_debt.refresh(self.detail.df_full)
 
         QMessageBox.information(self, "Загружено", "Проект успешно загружен.")
 
