@@ -4281,6 +4281,85 @@ class VznosyDebtWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка экспорта", str(e))
 
+class _TitleBar(QWidget):
+    """Custom frameless-window title bar: title text + min/max/close buttons."""
+
+    def __init__(self, window: "MainWindow"):
+        super().__init__(window)
+        self._window = window
+        self._drag_pos = None
+        self.setObjectName("titleBar")
+        self.setFixedHeight(40)
+
+        lyt = QHBoxLayout(self)
+        lyt.setContentsMargins(16, 0, 0, 0)
+        lyt.setSpacing(0)
+
+        title_lbl = QLabel("СНТ — Финансовый учёт", objectName="titleBarText")
+        lyt.addWidget(title_lbl)
+        lyt.addStretch()
+
+        icon_font = QFont("Material Icons")
+        icon_font.setPixelSize(18)
+
+        for obj_name, char, slot in [
+            ("btnWinMin",   "", self._minimize),
+            ("btnWinMax",   "", self._toggle_max),
+            ("btnWinClose", "", window.close),
+        ]:
+            btn = QPushButton(char, objectName=obj_name)
+            btn.setFixedSize(46, 40)
+            btn.setFont(icon_font)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(slot)
+            lyt.addWidget(btn)
+
+        self._btn_max = self.findChild(QPushButton, "btnWinMax")
+
+    def paintEvent(self, event):
+        opt = QStyleOption()
+        opt.initFrom(self)
+        p = QPainter(self)
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, p, self)
+
+    def _minimize(self):
+        self._window.showMinimized()
+
+    def _toggle_max(self):
+        if self._window.isMaximized():
+            self._window.showNormal()
+            if self._btn_max:
+                self._btn_max.setText("")
+        else:
+            self._window.showMaximized()
+            if self._btn_max:
+                self._btn_max.setText("")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self._window.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
+            if self._window.isMaximized():
+                self._window.showNormal()
+                if self._btn_max:
+                    self._btn_max.setText("")
+                self._drag_pos = QPoint(self._window.width() // 3, self.height() // 2)
+            self._window.move(event.globalPosition().toPoint() - self._drag_pos)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._toggle_max()
+        super().mouseDoubleClickEvent(event)
+
+
 class _NavButton(QWidget):
     """Sidebar nav item: Material Icon glyph + Roboto Slab label."""
     nav_clicked = pyqtSignal(int)
@@ -4333,17 +4412,107 @@ class _NavButton(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window
+        )
         self.setWindowTitle("СНТ — Финансовый учёт")
         self.setMinimumSize(1280, 720)
         self.resize(1500, 860)
         self._setup_ui()
         self._apply_styles()
 
+    # ── Native resize support on Windows ─────────────────────────────────
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if sys.platform == "win32":
+            self._restore_win_resize()
+
+    def _restore_win_resize(self):
+        """Re-add WS_THICKFRAME so Windows provides native resize handles."""
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            GWL_STYLE = -16
+            WS_THICKFRAME = 0x00040000
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style | WS_THICKFRAME)
+            SWP_FLAGS = 0x0020 | 0x0002 | 0x0001 | 0x0004  # FRAMECHANGED|NOMOVE|NOSIZE|NOZORDER
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FLAGS)
+        except Exception:
+            pass
+
+    def nativeEvent(self, event_type, message):
+        """Handle WM_NCHITTEST / WM_NCCALCSIZE for frameless resize support."""
+        if sys.platform == "win32" and event_type == b"windows_generic_MSG":
+            import ctypes
+
+            class _MSG(ctypes.Structure):
+                _fields_ = [
+                    ("hWnd",    ctypes.c_void_p),
+                    ("message", ctypes.c_uint),
+                    ("wParam",  ctypes.c_size_t),
+                    ("lParam",  ctypes.c_ssize_t),
+                    ("time",    ctypes.c_uint),
+                    ("pt_x",    ctypes.c_int),
+                    ("pt_y",    ctypes.c_int),
+                ]
+
+            try:
+                msg = ctypes.cast(int(message), ctypes.POINTER(_MSG)).contents
+            except Exception:
+                return False, 0
+
+            WM_NCCALCSIZE = 0x0083
+            WM_NCHITTEST  = 0x0084
+
+            if msg.message == WM_NCCALCSIZE and msg.wParam:
+                # Remove all non-client area (prevent frame padding)
+                return True, 0
+
+            if msg.message == WM_NCHITTEST:
+                HTLEFT = 10; HTRIGHT = 11; HTTOP = 12; HTTOPLEFT = 13
+                HTTOPRIGHT = 14; HTBOTTOM = 15; HTBOTTOMLEFT = 16; HTBOTTOMRIGHT = 17
+
+                x = ctypes.c_int16(msg.lParam & 0xFFFF).value
+                y = ctypes.c_int16((msg.lParam >> 16) & 0xFFFF).value
+                pos = self.mapFromGlobal(QPoint(x, y))
+                px, py = pos.x(), pos.y()
+                w, h = self.width(), self.height()
+                m = 6  # resize margin in pixels
+
+                on_l = px < m;      on_r = px > w - m - 1
+                on_t = py < m;      on_b = py > h - m - 1
+
+                if on_t and on_l:  return True, HTTOPLEFT
+                if on_t and on_r:  return True, HTTOPRIGHT
+                if on_b and on_l:  return True, HTBOTTOMLEFT
+                if on_b and on_r:  return True, HTBOTTOMRIGHT
+                if on_l:           return True, HTLEFT
+                if on_r:           return True, HTRIGHT
+                if on_t:           return True, HTTOP
+                if on_b:           return True, HTBOTTOM
+
+        return False, 0
+
     def _setup_ui(self):
         central = QWidget()
         central.setAutoFillBackground(True)
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
+
+        # Outer vertical layout: custom title bar on top, then sidebar + content
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._title_bar = _TitleBar(self)
+        outer.addWidget(self._title_bar)
+
+        content_w = QWidget()
+        content_w.setAutoFillBackground(True)
+        outer.addWidget(content_w, stretch=1)
+
+        root = QHBoxLayout(content_w)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
@@ -4590,6 +4759,28 @@ class MainWindow(QMainWindow):
         self.setStyleSheet("""
             /* ── Global ───────────────────────────────────────── */
             QMainWindow { background: #FFFFFF; }
+
+            /* ── Custom title bar ────────────────────────────── */
+            QWidget#titleBar {
+                background: #FFFFFF;
+                border-bottom: 1px solid #E5E7EB;
+            }
+            QLabel#titleBarText {
+                color: #6B7280;
+                font-size: 12px;
+                background: transparent;
+            }
+            QPushButton#btnWinMin, QPushButton#btnWinMax {
+                background: transparent; border: none;
+                color: #9CA3AF;
+            }
+            QPushButton#btnWinMin:hover { background: #F3F4F6; color: #374151; }
+            QPushButton#btnWinMax:hover { background: #F3F4F6; color: #374151; }
+            QPushButton#btnWinClose {
+                background: transparent; border: none;
+                color: #9CA3AF;
+            }
+            QPushButton#btnWinClose:hover { background: #FEE2E2; color: #DC2626; }
 
             /* ── Sidebar ──────────────────────────────────────── */
             QWidget#leftPanel {
