@@ -10,19 +10,11 @@ from PyQt6.QtGui import QPageLayout, QPageSize, QTextDocument
 from PyQt6.QtPrintSupport import QPrinter
 
 from core import energy
+from core.utils import fmt_money
 
 
 _MONTHS = ["янв", "фев", "мар", "апр", "май", "июн",
            "июл", "авг", "сен", "окт", "ноя", "дек"]
-
-
-def _fmt_money(v: float | None) -> str:
-    if v is None:
-        return "—"
-    if abs(v) < 0.005:
-        return "0,00 ₽"
-    sign = "−" if v < 0 else ""
-    return f"{sign}{abs(v):,.2f} ₽".replace(",", " ").replace(".", ",")
 
 
 def _fmt_kwh(v: float | None) -> str:

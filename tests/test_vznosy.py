@@ -79,11 +79,11 @@ class TariffAmountForYearTests(unittest.TestCase):
 
 class ChargedBreakdownTests(unittest.TestCase):
     def test_three_years_mixed(self):
-        items = vznosy.charged_years_breakdown(
+        items = vznosy.charged_periods_breakdown(
             "15", area=600.0, as_of=date(2026, 6, 1),
             rates=RATES_MIXED, adjustments={},
         )
-        self.assertEqual([y.year for y in items], [2024, 2025, 2026])
+        self.assertEqual([y.period_from.year for y in items], [2024, 2025, 2026])
         self.assertEqual(items[0].amount, 10000)
         self.assertEqual(items[1].amount, 12000)
         self.assertAlmostEqual(items[2].amount, 9000.0)
@@ -92,7 +92,7 @@ class ChargedBreakdownTests(unittest.TestCase):
         self.assertAlmostEqual(total, 31000.0)
 
     def test_area_missing_for_per_sqm(self):
-        items = vznosy.charged_years_breakdown(
+        items = vznosy.charged_periods_breakdown(
             "15", area=None, as_of=date(2026, 6, 1),
             rates=RATES_MIXED, adjustments={},
         )
@@ -105,7 +105,7 @@ class ChargedBreakdownTests(unittest.TestCase):
     def test_charge_override(self):
         adj = {"15": [{"date": "2025-01-01", "kind": "charge_override",
                        "year": 2025, "amount": "5000", "note": ""}]}
-        items = vznosy.charged_years_breakdown(
+        items = vznosy.charged_periods_breakdown(
             "15", area=600.0, as_of=date(2025, 12, 31),
             rates=RATES_FIXED, adjustments=adj,
         )
@@ -115,7 +115,7 @@ class ChargedBreakdownTests(unittest.TestCase):
     def test_exempt_year(self):
         adj = {"15": [{"date": "2024-01-01", "kind": "exempt_year",
                        "year": 2024, "amount": "", "note": ""}]}
-        items = vznosy.charged_years_breakdown(
+        items = vznosy.charged_periods_breakdown(
             "15", area=None, as_of=date(2024, 12, 31),
             rates=RATES_FIXED, adjustments=adj,
         )
@@ -126,7 +126,7 @@ class ChargedBreakdownTests(unittest.TestCase):
 class PaymentsTests(unittest.TestCase):
     def test_simple_payment(self):
         df = _make_df([
-            {"Дата": "2024-06-15", "Поступление": 10000, "Списание": 0,
+            {"Дата": "2024-06-15", "Сумма": 10000, "Списание": 0,
              "Категория": "Членские взносы", "Участок": "15", "Назначение": ""},
         ])
         self.assertEqual(vznosy.paid_for_plot("15", df, date(2024, 12, 31), {}), 10000)
@@ -134,14 +134,14 @@ class PaymentsTests(unittest.TestCase):
 
     def test_mixed_halved(self):
         df = _make_df([
-            {"Дата": "2024-06-15", "Поступление": 8000, "Списание": 0,
+            {"Дата": "2024-06-15", "Сумма": 8000, "Списание": 0,
              "Категория": "Членские взносы + Электроэнергия", "Участок": "15", "Назначение": ""},
         ])
         self.assertEqual(vznosy.paid_for_plot("15", df, date(2024, 12, 31), {}), 4000)
 
     def test_comma_split(self):
         df = _make_df([
-            {"Дата": "2024-06-15", "Поступление": 8000, "Списание": 0,
+            {"Дата": "2024-06-15", "Сумма": 8000, "Списание": 0,
              "Категория": "Членские взносы + Электроэнергия", "Участок": "15, 16",
              "Назначение": ""},
         ])
@@ -151,7 +151,7 @@ class PaymentsTests(unittest.TestCase):
 
     def test_manual_payment_included(self):
         df = _make_df([
-            {"Дата": "2024-06-15", "Поступление": 5000, "Списание": 0,
+            {"Дата": "2024-06-15", "Сумма": 5000, "Списание": 0,
              "Категория": "Членские взносы", "Участок": "15", "Назначение": ""},
         ])
         adj = {"15": [{"date": "2024-08-01", "kind": "payment_manual",
@@ -160,9 +160,9 @@ class PaymentsTests(unittest.TestCase):
 
     def test_payments_breakdown_order(self):
         df = _make_df([
-            {"Дата": "2024-12-01", "Поступление": 1000, "Списание": 0,
+            {"Дата": "2024-12-01", "Сумма": 1000, "Списание": 0,
              "Категория": "Членские взносы", "Участок": "15", "Назначение": "a"},
-            {"Дата": "2024-06-01", "Поступление": 2000, "Списание": 0,
+            {"Дата": "2024-06-01", "Сумма": 2000, "Списание": 0,
              "Категория": "Членские взносы", "Участок": "15", "Назначение": "b"},
         ])
         items = vznosy.payments_breakdown("15", df, {})
@@ -172,7 +172,7 @@ class PaymentsTests(unittest.TestCase):
 class BalanceTests(unittest.TestCase):
     def test_full_picture(self):
         df = _make_df([
-            {"Дата": "2024-06-15", "Поступление": 10000, "Списание": 0,
+            {"Дата": "2024-06-15", "Сумма": 10000, "Списание": 0,
              "Категория": "Членские взносы", "Участок": "15", "Назначение": ""},
         ])
         bal = vznosy.balance_for_plot("15", 600.0, date(2026, 6, 1),

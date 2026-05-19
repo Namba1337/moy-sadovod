@@ -15,6 +15,8 @@ from typing import Optional
 
 import pandas as pd
 
+from core.utils import _read_json, _ensure_df
+
 DATA_DIR = "data"
 METERS_FILE = os.path.join(DATA_DIR, "snt_meters.json")
 RATES_FILE = os.path.join(DATA_DIR, "snt_rates.json")
@@ -30,16 +32,6 @@ CATS_ELECTRO_INCOME = {CAT_ELECTRO_FROM_OWNERS, CAT_MIXED}
 
 
 # ── загрузка данных ───────────────────────────────────────────────────
-
-def _read_json(path: str, default):
-    try:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return default
-
 
 def load_meters() -> dict:
     """{"plot:year:month": "значение"}"""
@@ -82,12 +74,6 @@ def save_baseline(data: dict) -> None:
 def load_common_meter() -> dict:
     """{"YYYY:M": "значение общего счётчика СНТ на конец месяца"}"""
     return _read_json(COMMON_METER_FILE, {})
-
-
-def save_common_meter(data: dict) -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(COMMON_METER_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def load_plots() -> list:
@@ -269,21 +255,12 @@ def all_charges(plot: str, meters: dict, rates: list, replacements: dict,
 
 # ── платежи из выписки ────────────────────────────────────────────────
 
-def _ensure_df(df) -> Optional[pd.DataFrame]:
-    if df is None or len(df) == 0:
-        return None
-    needed = {"Дата", "Поступление", "Категория", "Участок"}
-    if not needed.issubset(df.columns):
-        return None
-    return df
-
-
 def _row_amount_for_plot(row: pd.Series, plot: str) -> float:
     plots = [p.strip() for p in str(row.get("Участок", "")).split(",") if p.strip()]
     if plot not in plots:
         return 0.0
-    amount = _to_float(row.get("Поступление"))
-    if amount is None:
+    amount = _to_float(row.get("Сумма"))
+    if amount is None or amount <= 0:
         return 0.0
     if row.get("Категория") == CAT_MIXED:
         amount /= 2
@@ -500,7 +477,9 @@ def reconcile(date_from: date, date_to: date, plots: list[str],
             dates = sub["Дата"].dt.date
             sub = sub[(dates >= date_from) & (dates <= date_to)]
             for _, row in sub.iterrows():
-                amount = _to_float(row.get("Поступление")) or 0.0
+                amount = _to_float(row.get("Сумма")) or 0.0
+                if amount <= 0:
+                    continue
                 if row.get("Категория") == CAT_MIXED:
                     amount /= 2
                 collected_total += amount
@@ -513,8 +492,8 @@ def reconcile(date_from: date, date_to: date, plots: list[str],
             dates = sub["Дата"].dt.date
             sub = sub[(dates >= date_from) & (dates <= date_to)]
             for _, row in sub.iterrows():
-                amount = _to_float(row.get("Списание")) or 0.0
-                paid_to_supplier += amount
+                amount = _to_float(row.get("Сумма")) or 0.0
+                paid_to_supplier += abs(amount)
 
     # Общий счётчик
     common_kwh: Optional[float] = None
