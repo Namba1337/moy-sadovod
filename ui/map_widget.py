@@ -27,7 +27,7 @@ class _PlotMarker(QGraphicsEllipseItem):
         self._plot_num = plot_num
         self._owners   = owners
         self._on_click = on_click
-        self._base_color = QColor(color) if color else QColor("#1565c0")
+        self._base_color = QColor(color) if color else QColor("#4F46E5")
         self._hover_color = self._lighten(self._base_color)
         self._debt = debt
         self.setBrush(self._base_color)
@@ -85,7 +85,7 @@ class _MapView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setStyleSheet("background:#0f1923; border:none;")
+        self.setStyleSheet("background:#F3F4F6; border:none;")
 
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
@@ -168,7 +168,7 @@ class MapWidget(QWidget):
         lay.setSpacing(0)
 
         bar = QWidget()
-        bar.setStyleSheet("background:#0d1b2a; border-bottom:1px solid #1e3a5f;")
+        bar.setStyleSheet("background:#F8F9FA; border-bottom:1px solid #E5E7EB;")
         bar_lay = QHBoxLayout(bar)
         bar_lay.setContentsMargins(20, 8, 20, 8)
         bar_lay.setSpacing(10)
@@ -178,21 +178,21 @@ class MapWidget(QWidget):
         bar_lay.addStretch()
 
         self._hint_lbl = QLabel("")
-        self._hint_lbl.setStyleSheet("color:#5a8ab0; font-size:12px;")
+        self._hint_lbl.setStyleSheet("color:#9CA3AF; font-size:12px;")
         bar_lay.addWidget(self._hint_lbl)
 
-        btn_load = QPushButton("🖼  Загрузить схему")
+        btn_load = QPushButton("Загрузить схему")
         btn_load.setObjectName("btnSecondary")
         btn_load.clicked.connect(self._pick_image)
         bar_lay.addWidget(btn_load)
 
-        self._btn_place = QPushButton("📍  Расставить участки")
+        self._btn_place = QPushButton("Расставить участки")
         self._btn_place.setObjectName("btnSecondary")
         self._btn_place.setCheckable(True)
         self._btn_place.toggled.connect(self._toggle_place_mode)
         bar_lay.addWidget(self._btn_place)
 
-        self._btn_color = QPushButton("🎨  По долгу")
+        self._btn_color = QPushButton("По долгу")
         self._btn_color.setObjectName("btnSecondary")
         self._btn_color.setCheckable(True)
         self._btn_color.setChecked(True)
@@ -202,7 +202,7 @@ class MapWidget(QWidget):
         lay.addWidget(bar)
 
         legend = QWidget()
-        legend.setStyleSheet("background:#0d1b2a;border-bottom:1px solid #1e3a5f;")
+        legend.setStyleSheet("background:#F8F9FA;border-bottom:1px solid #E5E7EB;")
         legend_lay = QHBoxLayout(legend)
         legend_lay.setContentsMargins(20, 4, 20, 4)
         legend_lay.setSpacing(20)
@@ -210,7 +210,7 @@ class MapWidget(QWidget):
             ("#2e7d32", "■  без долга / аванс"),
             ("#f9a825", "■  небольшой"),
             ("#ef6c00", "■  средний"),
-            ("#c62828", "■  крупный"),
+            ("#DC2626", "■  крупный"),
         ]:
             lb = QLabel(text)
             lb.setStyleSheet(f"color:{color};background:transparent;font-size:11px;")
@@ -226,8 +226,8 @@ class MapWidget(QWidget):
         self._info = QLabel("Кликните на участок чтобы увидеть информацию")
         self._info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._info.setStyleSheet(
-            "background:#0d1b2a; color:#cdd9e5; font-size:13px;"
-            "padding:8px; border-top:1px solid #1e3a5f;"
+            "background:#F8F9FA; color:#374151; font-size:13px;"
+            "padding:8px; border-top:1px solid #E5E7EB;"
         )
         lay.addWidget(self._info)
 
@@ -302,7 +302,7 @@ class MapWidget(QWidget):
             self._scene.addRect(
                 QRectF(0, 0, w, h),
                 QPen(Qt.PenStyle.NoPen),
-                QColor("#0a1520")
+                QColor("#F9FAFB")
             )
             t = self._scene.addText(
                 "Загрузите схему карты СНТ\n\n"

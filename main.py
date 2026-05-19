@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import re
 import json
 import os
@@ -21,15 +21,45 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem,
     QFormLayout, QDialogButtonBox, QScrollArea, QSizePolicy,
+    QStyleOption, QStyle,
 )
 from PyQt6.QtCore import Qt, QDate, QPoint, QRectF, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QAction, QPainter, QPixmap, QPen
+from PyQt6.QtGui import QFont, QColor, QAction, QPainter, QPixmap, QPen, QFontDatabase, QPalette
 
 
 from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, categorize_row, apply_categorization
 
 
 from ui.plot_detection import get_plot, apply_plot_column, _PLOTS_FILE
+
+
+def _ensure_fonts():
+    """Download Material Icons and Roboto Slab from GitHub if not present."""
+    import urllib.request
+    fonts_dir = Path(__file__).parent / "resources" / "fonts"
+    fonts_dir.mkdir(parents=True, exist_ok=True)
+    fonts = {
+        "MaterialIcons-Regular.ttf": (
+            "https://github.com/google/material-design-icons"
+            "/raw/master/font/MaterialIcons-Regular.ttf"
+        ),
+        "RobotoSlab-Regular.ttf": (
+            "https://github.com/googlefonts/robotoslab"
+            "/raw/main/fonts/ttf/RobotoSlab-Regular.ttf"
+        ),
+        "RobotoSlab-Bold.ttf": (
+            "https://github.com/googlefonts/robotoslab"
+            "/raw/main/fonts/ttf/RobotoSlab-Bold.ttf"
+        ),
+    }
+    for filename, url in fonts.items():
+        dest = fonts_dir / filename
+        if not dest.exists():
+            try:
+                urllib.request.urlretrieve(url, str(dest))
+            except Exception:
+                pass
+
 
 # ======================================================================= #
 #  ВКЛАДКА ДЕТАЛИЗАЦИЯ
@@ -85,45 +115,45 @@ class LoadSettingsDialog(QDialog):
     """Диалог настроек перед загрузкой файла выписки."""
 
     _STYLE = """
-        QDialog { background: #111e2b; color: #cdd9e5; }
+        QDialog { background: #FFFFFF; color: #374151; }
         QLabel  { background: transparent; }
         QLabel#sectionLabel {
-            color: #7a9bb8; font-size: 11px; font-weight: 600;
+            color: #9CA3AF; font-size: 11px; font-weight: 600;
             letter-spacing: 0.5px; text-transform: uppercase;
         }
         QPushButton#fmtActive {
-            background: #1565c0; color: #ffffff; border: none;
+            background: #4F46E5; color: #ffffff; border: none;
             border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
         }
         QPushButton#fmtInactive {
-            background: #1e3a5f; color: #8eb3d4; border: 1px solid #2a4a6b;
+            background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
             border-radius: 6px; padding: 8px 20px; font-size: 13px;
         }
-        QPushButton#fmtInactive:hover { background: #243f63; color: #cdd9e5; }
+        QPushButton#fmtInactive:hover { background: #E5E7EB; color: #374151; }
         QPushButton#btnPrimary {
-            background: #1565c0; color: white; border: none;
+            background: #4F46E5; color: white; border: none;
             border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
         }
-        QPushButton#btnPrimary:hover  { background: #1976d2; }
-        QPushButton#btnPrimary:pressed { background: #0d47a1; }
+        QPushButton#btnPrimary:hover  { background: #6366F1; }
+        QPushButton#btnPrimary:pressed { background: #4338CA; }
         QPushButton#btnSecondary {
-            background: #1e3a5f; color: #8eb3d4; border: 1px solid #2a4a6b;
+            background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
             border-radius: 6px; padding: 7px 16px; font-size: 13px;
         }
-        QPushButton#btnSecondary:hover { background: #243f63; color: #cdd9e5; }
+        QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
         QCheckBox {
-            color: #cdd9e5; background: transparent; font-size: 13px; spacing: 8px;
+            color: #374151; background: transparent; font-size: 13px; spacing: 8px;
         }
         QCheckBox::indicator {
             width: 16px; height: 16px; border-radius: 4px;
-            border: 1px solid #2a4a6b; background: #0d1b2a;
+            border: 1px solid #D1D5DB; background: #F8F9FA;
         }
         QCheckBox::indicator:checked {
-            background: #1565c0; border-color: #1565c0;
+            background: #4F46E5; border-color: #4F46E5;
             image: url(none);
         }
-        QCheckBox::indicator:hover { border-color: #4a8ac4; }
-        QFrame#divider { background: #1e3a5f; max-height: 1px; }
+        QCheckBox::indicator:hover { border-color: #818CF8; }
+        QFrame#divider { background: #E5E7EB; max-height: 1px; }
     """
 
     def __init__(self, parent=None):
@@ -142,7 +172,7 @@ class LoadSettingsDialog(QDialog):
 
         # Заголовок
         title = QLabel("Загрузка детализации")
-        title.setStyleSheet("font-size:15px; font-weight:700; color:#e8f4fd;")
+        title.setStyleSheet("font-size:15px; font-weight:700; color:#111827;")
         lay.addWidget(title)
 
         div0 = QFrame(objectName="divider")
@@ -168,7 +198,7 @@ class LoadSettingsDialog(QDialog):
         # Подсказка под кнопками формата
         self._fmt_hint = QLabel()
         self._fmt_hint.setWordWrap(True)
-        self._fmt_hint.setStyleSheet("color:#5a7fa0; font-size:11px; background:transparent;")
+        self._fmt_hint.setStyleSheet("color:#9CA3AF; font-size:11px; background:transparent;")
         lay.addWidget(self._fmt_hint)
         self._update_hint()
 
@@ -194,7 +224,7 @@ class LoadSettingsDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
         btn_cancel = QPushButton("Отмена",           objectName="btnSecondary")
-        btn_ok     = QPushButton("📂  Выбрать файл", objectName="btnPrimary")
+        btn_ok     = QPushButton("Выбрать файл", objectName="btnPrimary")
         btn_cancel.clicked.connect(self.reject)
         btn_ok    .clicked.connect(self.accept)
         btn_row.addStretch()
@@ -238,6 +268,7 @@ class DetailWidget(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setAutoFillBackground(True)
         self.df_full = None
         self._setup_ui()
 
@@ -252,12 +283,12 @@ class DetailWidget(QWidget):
         title.setObjectName("pageTitle")
         top_bar.addWidget(title)
         top_bar.addStretch()
-        self.btn_load = QPushButton("📂  Загрузить файл")
+        self.btn_load = QPushButton("Загрузить файл")
         self.btn_load.setObjectName("btnPrimary")
         self.btn_load.clicked.connect(self.load_file)
         top_bar.addWidget(self.btn_load)
 
-        btn_excel = QPushButton("📊  Экспорт в Excel", objectName="btnSecondary")
+        btn_excel = QPushButton("Экспорт в Excel", objectName="btnSecondary")
         btn_excel.clicked.connect(self._export_excel)
         top_bar.addWidget(btn_excel)
 
@@ -271,7 +302,7 @@ class DetailWidget(QWidget):
         fl.setSpacing(10)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("🔍  Поиск по контрагенту или назначению...")
+        self.search_input.setPlaceholderText("Поиск по контрагенту или назначению...")
         self.search_input.setObjectName("searchInput")
         self.search_input.textChanged.connect(self.apply_filters)
         fl.addWidget(self.search_input, stretch=3)
@@ -578,13 +609,13 @@ class DetailWidget(QWidget):
                     num = pd.to_numeric(val, errors="coerce")
                     if pd.notna(num) and num > 0:
                         text = f"{num:,.2f} ₽".replace(",", " ")
-                        fg   = QColor("#81d4a0")
+                        fg   = QColor("#059669")
                     elif pd.notna(num) and num < 0:
                         text = f"−{abs(num):,.2f} ₽".replace(",", " ")
-                        fg   = QColor("#ef9a9a")
+                        fg   = QColor("#DC2626")
                     else:
                         text = ""
-                        fg   = QColor("#cdd9e5")
+                        fg   = QColor("#374151")
                     item = _SortItem(text)
                     item.setForeground(fg)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
@@ -636,9 +667,9 @@ class DetailWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
-                background: #0d1b2a;
-                border: 1px solid #2a4a6b;
-                color: #cdd9e5;
+                background: #F8F9FA;
+                border: 1px solid #D1D5DB;
+                color: #374151;
                 font-size: 13px;
                 padding: 4px;
             }
@@ -647,23 +678,23 @@ class DetailWidget(QWidget):
                 border-radius: 4px;
             }
             QMenu::item:selected {
-                background: #1a2e45;
-                color: #64b5f6;
+                background: #EEF2FF;
+                color: #6366F1;
             }
             QMenu::separator {
                 height: 1px;
-                background: #1e3a5f;
+                background: #E5E7EB;
                 margin: 4px 8px;
             }
         """)
 
-        act_dup = QAction("📋  Дублировать строку", self)
+        act_dup = QAction("Дублировать строку", self)
         act_dup.triggered.connect(lambda: self._duplicate_row(row))
         menu.addAction(act_dup)
 
         menu.addSeparator()
 
-        act_del = QAction("🗑️  Удалить строку", self)
+        act_del = QAction("Удалить строку", self)
         act_del.triggered.connect(lambda: self._delete_row(row))
         menu.addAction(act_del)
 
@@ -757,9 +788,9 @@ class DetailWidget(QWidget):
             raw_num = item.text().replace(" ", "").replace("−", "-").replace("₽", "").replace(",", ".")
             try:
                 num_val = float(raw_num)
-                item.setForeground(QColor("#81d4a0") if num_val > 0 else QColor("#ef9a9a"))
+                item.setForeground(QColor("#059669") if num_val > 0 else QColor("#DC2626"))
             except ValueError:
-                item.setForeground(QColor("#cdd9e5"))
+                item.setForeground(QColor("#374151"))
 
         self.table.blockSignals(False)
 
@@ -897,7 +928,7 @@ class RatesWidget(QWidget):
             "ПКМ по строке — удалить.  "
             "Записи отсортированы по дате (новые сверху)."
         )
-        hint.setStyleSheet("color: #5a7fa0; background: transparent; font-size: 11px;")
+        hint.setStyleSheet("color: #9CA3AF; background: transparent; font-size: 11px;")
         lay.addWidget(hint)
 
         # Форма добавления (скрыта по умолчанию)
@@ -929,7 +960,7 @@ class RatesWidget(QWidget):
         self.inp_note.setPlaceholderText("необязательно")
         form_lay.addWidget(self.inp_note, stretch=1)
 
-        btn_ok = QPushButton("✓  Добавить")
+        btn_ok = QPushButton("Добавить")
         btn_ok.setObjectName("btnPrimary")
         btn_ok.clicked.connect(self._confirm_add)
         form_lay.addWidget(btn_ok)
@@ -983,13 +1014,13 @@ class RatesWidget(QWidget):
 
             # Цвет: первая строка (самый актуальный тариф) — выделена
             is_current = (r_idx == 0)
-            bg = "#0d2a0d" if is_current else "#0a1520"
-            fg_date = "#81d4a0" if is_current else "#cdd9e5"
+            bg = "#0d2a0d" if is_current else "#F9FAFB"
+            fg_date = "#059669" if is_current else "#374151"
 
             for c_idx, (text, fg) in enumerate([
                 (display_date,           fg_date),
-                (entry.get("rate", ""), "#64b5f6" if is_current else "#cdd9e5"),
-                (entry.get("note", ""), "#7a9bb8"),
+                (entry.get("rate", ""), "#6366F1" if is_current else "#374151"),
+                (entry.get("note", ""), "#9CA3AF"),
             ]):
                 it = QTableWidgetItem(text)
                 it.setBackground(QColor(bg))
@@ -1027,7 +1058,7 @@ class RatesWidget(QWidget):
         try:
             float(rate_text)
         except ValueError:
-            self.inp_rate.setStyleSheet(self.inp_rate.styleSheet() + "border:1px solid #c62828;")
+            self.inp_rate.setStyleSheet(self.inp_rate.styleSheet() + "border:1px solid #DC2626;")
             return
 
         date_str = self.inp_date.date().toString("yyyy-MM-dd")
@@ -1067,12 +1098,12 @@ class RatesWidget(QWidget):
             return
         menu = QMenu(self)
         menu.setStyleSheet("""
-            QMenu{background:#0d1b2a;border:1px solid #2a4a6b;color:#cdd9e5;
+            QMenu{background:#F8F9FA;border:1px solid #D1D5DB;color:#374151;
                   font-size:13px;padding:4px;}
             QMenu::item{padding:8px 20px;border-radius:4px;}
-            QMenu::item:selected{background:#1a2e45;color:#ef9a9a;}
+            QMenu::item:selected{background:#EEF2FF;color:#DC2626;}
         """)
-        act_del = QAction("🗑️  Удалить запись", self)
+        act_del = QAction("удалить запись", self)
         act_del.triggered.connect(lambda: self._delete_rate(row))
         menu.addAction(act_del)
         menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -1159,7 +1190,7 @@ class VznosyRatesWidget(QWidget):
             "ПКМ по строке — удалить.  "
             "Двойной клик по сумме — редактировать."
         )
-        hint.setStyleSheet("color: #5a7fa0; background: transparent; font-size: 11px;")
+        hint.setStyleSheet("color: #9CA3AF; background: transparent; font-size: 11px;")
         lay.addWidget(hint)
 
         # ── Форма добавления периода ──────────────────────────────
@@ -1191,7 +1222,7 @@ class VznosyRatesWidget(QWidget):
         self.chk_open_end = QCheckBox("Открытый")
         self.chk_open_end.setToolTip("Не указывать конечную дату (последний активный период)")
         self.chk_open_end.setStyleSheet(
-            "QCheckBox{color:#cdd9e5;background:transparent;font-size:12px;}"
+            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
             "QCheckBox::indicator{width:15px;height:15px;}"
         )
         self.chk_open_end.stateChanged.connect(
@@ -1209,7 +1240,7 @@ class VznosyRatesWidget(QWidget):
         self.chk_per_sqm = QCheckBox("₽/м²")
         self.chk_per_sqm.setToolTip("Сумма указана в рублях за м²")
         self.chk_per_sqm.setStyleSheet(
-            "QCheckBox{color:#cdd9e5;background:transparent;font-size:12px;}"
+            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
             "QCheckBox::indicator{width:15px;height:15px;}"
         )
         self.chk_per_sqm.stateChanged.connect(self._on_toggle_per_sqm)
@@ -1229,7 +1260,7 @@ class VznosyRatesWidget(QWidget):
         self.inp_note.setPlaceholderText("необязательно")
         form_lay.addWidget(self.inp_note, stretch=1)
 
-        btn_ok = QPushButton("✓  Сохранить")
+        btn_ok = QPushButton("Сохранить")
         btn_ok.setObjectName("btnPrimary")
         btn_ok.clicked.connect(self._confirm_add)
         form_lay.addWidget(btn_ok)
@@ -1294,9 +1325,9 @@ class VznosyRatesWidget(QWidget):
             date_to = entry.get("date_to", "")
             is_current = (r_idx == 0)
             is_per_sqm = bool(entry.get("per_sqm"))
-            bg = "#0d2a0d" if is_current else "#0a1520"
-            fg_date = "#81d4a0" if is_current else "#cdd9e5"
-            fg_value = "#64b5f6" if is_current else "#cdd9e5"
+            bg = "#0d2a0d" if is_current else "#F9FAFB"
+            fg_date = "#059669" if is_current else "#374151"
+            fg_value = "#6366F1" if is_current else "#374151"
 
             amount_text = "—" if is_per_sqm else str(entry.get("amount", ""))
             rate_sqm_text = str(entry.get("rate_sqm", "")) if is_per_sqm else "—"
@@ -1307,7 +1338,7 @@ class VznosyRatesWidget(QWidget):
                 (date_to_text,             fg_date,  True),   # read-only
                 (amount_text,              fg_value, is_per_sqm),
                 (rate_sqm_text,            fg_value, not is_per_sqm),
-                (entry.get("note", ""),    "#7a9bb8", False),
+                (entry.get("note", ""),    "#9CA3AF", False),
             ]
             for c_idx, (text, fg, read_only) in enumerate(cells):
                 it = QTableWidgetItem(text)
@@ -1366,7 +1397,7 @@ class VznosyRatesWidget(QWidget):
             if v <= 0:
                 raise ValueError
         except ValueError:
-            target.setStyleSheet(target.styleSheet() + "border:1px solid #c62828;")
+            target.setStyleSheet(target.styleSheet() + "border:1px solid #DC2626;")
             return
 
         date_from_str = self.inp_date_from.date().toString("yyyy-MM-dd")
@@ -1413,12 +1444,12 @@ class VznosyRatesWidget(QWidget):
             return
         menu = QMenu(self)
         menu.setStyleSheet("""
-            QMenu{background:#0d1b2a;border:1px solid #2a4a6b;color:#cdd9e5;
+            QMenu{background:#F8F9FA;border:1px solid #D1D5DB;color:#374151;
                   font-size:13px;padding:4px;}
             QMenu::item{padding:8px 20px;border-radius:4px;}
-            QMenu::item:selected{background:#1a2e45;color:#ef9a9a;}
+            QMenu::item:selected{background:#EEF2FF;color:#DC2626;}
         """)
-        act_del = QAction("🗑️  Удалить период", self)
+        act_del = QAction("Удалить период", self)
         act_del.triggered.connect(lambda: self._delete_rate(row))
         menu.addAction(act_del)
         menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -1458,6 +1489,7 @@ class PlotsWidget(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setAutoFillBackground(True)
         self._plots: list = self._load()  # [{"num": "15", "owners": ["Иван Петров", ...]}, ...]
         self._setup_ui()
         self._rebuild_table()
@@ -1532,7 +1564,7 @@ class PlotsWidget(QWidget):
         for r_idx, plot in enumerate(plots_sorted):
             num_item = QTableWidgetItem(f"уч. {plot.get('num', '?')}")
             num_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            num_item.setForeground(QColor("#90caf9"))
+            num_item.setForeground(QColor("#6366F1"))
             f = num_item.font(); f.setBold(True); num_item.setFont(f)
             self.table.setItem(r_idx, 0, num_item)
 
@@ -1547,7 +1579,7 @@ class PlotsWidget(QWidget):
             area_item = QTableWidgetItem(f"{area_v:g}" if area_v is not None else "—")
             area_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             area_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            area_item.setForeground(QColor("#cdd9e5" if area_v is not None else "#7a9bb8"))
+            area_item.setForeground(QColor("#374151" if area_v is not None else "#9CA3AF"))
             self.table.setItem(r_idx, 2, area_item)
 
             self.table.setRowHeight(r_idx, 28)
@@ -1571,7 +1603,7 @@ class PlotsWidget(QWidget):
         if owners:
             first_owner = owners[0]
             first_label = QLabel(first_owner)
-            first_label.setStyleSheet("color:#cdd9e5;font-size:13px;")
+            first_label.setStyleSheet("color:#374151;font-size:13px;")
             first_label.setToolTip("\n".join(owners))
             layout.addWidget(first_label, 1)
 
@@ -1588,7 +1620,7 @@ class PlotsWidget(QWidget):
                 layout.addWidget(btn_more, 0, Qt.AlignmentFlag.AlignRight)
         else:
             label = QLabel("—")
-            label.setStyleSheet("color:#7a9bb8;font-size:13px;")
+            label.setStyleSheet("color:#9CA3AF;font-size:13px;")
             layout.addWidget(label)
 
         return container
@@ -1737,17 +1769,17 @@ class PlotsWidget(QWidget):
         plot = plots_sorted[row]
         menu = QMenu(self)
         menu.setStyleSheet("""
-            QMenu{background:#0d1b2a;border:1px solid #2a4a6b;color:#cdd9e5;
+            QMenu{background:#F8F9FA;border:1px solid #D1D5DB;color:#374151;
                   font-size:13px;padding:4px;}
             QMenu::item{padding:8px 20px;border-radius:4px;}
-            QMenu::item:selected{background:#1a2e45;color:#ef9a9a;}
+            QMenu::item:selected{background:#EEF2FF;color:#DC2626;}
         """)
         
         act_edit = QAction("✏️  Редактировать", self)
         act_edit.triggered.connect(lambda: self._edit_plot(row, plot))
         menu.addAction(act_edit)
         
-        act_del = QAction("🗑️  Удалить", self)
+        act_del = QAction("Удалить", self)
         act_del.triggered.connect(lambda: self._delete_plot(row, plot))
         menu.addAction(act_del)
         
@@ -1800,7 +1832,7 @@ class OwnersPopup(QDialog):
         lay.setSpacing(10)
 
         title = QLabel("Список собственников")
-        title.setStyleSheet("font-size:14px;font-weight:700;color:#e8f4fd;")
+        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
         lay.addWidget(title)
 
         # Прокручиваемая область с полями
@@ -1813,7 +1845,7 @@ class OwnersPopup(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._scroll_widget)
         scroll.setStyleSheet(
-            "QScrollArea{background:#0d1b2a;border:1px solid #1e3a5f;border-radius:6px;}"
+            "QScrollArea{background:#F8F9FA;border:1px solid #E5E7EB;border-radius:6px;}"
         )
         scroll.setMinimumHeight(140)
         scroll.setMaximumHeight(300)
@@ -1834,10 +1866,10 @@ class OwnersPopup(QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         btns.setStyleSheet(
-            "QPushButton{background:#1565c0;color:white;border:none;border-radius:6px;"
+            "QPushButton{background:#4F46E5;color:white;border:none;border-radius:6px;"
             "padding:7px 18px;font-size:13px;font-weight:600;}"
-            "QPushButton:hover{background:#1976d2;}"
-            "QPushButton[text='Cancel']{background:#1e3a5f;color:#8eb3d4;}"
+            "QPushButton:hover{background:#6366F1;}"
+            "QPushButton[text='Cancel']{background:#E5E7EB;color:#6B7280;}"
         )
         lay.addWidget(btns)
 
@@ -1851,8 +1883,8 @@ class OwnersPopup(QDialog):
         inp = QLineEdit(name)
         inp.setPlaceholderText("Фамилия Имя Отчество")
         inp.setStyleSheet(
-            "background:#0d1b2a;border:1px solid #2a4a6b;border-radius:5px;"
-            "color:#cdd9e5;padding:6px 10px;font-size:13px;"
+            "background:#F8F9FA;border:1px solid #D1D5DB;border-radius:5px;"
+            "color:#374151;padding:6px 10px;font-size:13px;"
         )
         self._inputs.append(inp)
         rlay.addWidget(inp, stretch=1)
@@ -1861,7 +1893,7 @@ class OwnersPopup(QDialog):
         btn_del.setFixedSize(28, 28)
         btn_del.setStyleSheet(
             "QPushButton{background:#2a1a1a;border:1px solid #5a2a2a;"
-            "border-radius:5px;color:#ef9a9a;font-size:13px;}"
+            "border-radius:5px;color:#DC2626;font-size:13px;}"
             "QPushButton:hover{background:#3a2020;}"
         )
         btn_del.clicked.connect(lambda _, w=row_widget, i=inp: self._remove_row(w, i))
@@ -1880,8 +1912,8 @@ class OwnersPopup(QDialog):
 
     def _apply_styles(self):
         self.setStyleSheet(
-            "QDialog{background:#111e2b;color:#cdd9e5;}"
-            "QLabel{background:transparent;color:#cdd9e5;}"
+            "QDialog{background:#FFFFFF;color:#374151;}"
+            "QLabel{background:transparent;color:#374151;}"
         )
 
 
@@ -1914,8 +1946,8 @@ class PlotEditDialog(QDialog):
         if self._is_edit:
             self.inp_num.setReadOnly(True)
             self.inp_num.setStyleSheet(
-                "background:#080f18;border:1px solid #1e3a5f;"
-                "border-radius:5px;color:#7a9bb8;padding:7px 10px;"
+                "background:#F3F4F6;border:1px solid #E5E7EB;"
+                "border-radius:5px;color:#9CA3AF;padding:7px 10px;"
             )
         form.addRow("Номер участка:", self.inp_num)
 
@@ -1934,7 +1966,7 @@ class PlotEditDialog(QDialog):
 
         # Собственники
         own_label = QLabel("Собственники:")
-        own_label.setStyleSheet("color:#7a9bb8;")
+        own_label.setStyleSheet("color:#9CA3AF;")
         lay.addWidget(own_label)
 
         self._owners_container = QWidget()
@@ -1959,7 +1991,7 @@ class PlotEditDialog(QDialog):
         # Разделитель
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#1e3a5f;background:#1e3a5f;max-height:1px;")
+        sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
         lay.addWidget(sep)
 
         # Кнопки OK / Cancel
@@ -1989,7 +2021,7 @@ class PlotEditDialog(QDialog):
         btn.setFixedSize(28, 28)
         btn.setStyleSheet(
             "QPushButton{background:#2a1a1a;border:1px solid #5a2a2a;"
-            "border-radius:5px;color:#ef9a9a;font-size:12px;}"
+            "border-radius:5px;color:#DC2626;font-size:12px;}"
             "QPushButton:hover{background:#3a2020;}"
         )
         btn.clicked.connect(lambda _, r=row, i=inp: self._remove_owner_field(r, i))
@@ -2035,25 +2067,25 @@ class PlotEditDialog(QDialog):
 
     def _apply_styles(self):
         self.setStyleSheet("""
-            QDialog { background: #111e2b; color: #cdd9e5; }
-            QLabel  { background: transparent; color: #cdd9e5; font-size: 13px; }
+            QDialog { background: #FFFFFF; color: #374151; }
+            QLabel  { background: transparent; color: #374151; font-size: 13px; }
             QLineEdit {
-                background: #0d1b2a; border: 1px solid #2a4a6b;
-                border-radius: 5px; color: #cdd9e5; padding: 7px 10px; font-size: 13px;
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 7px 10px; font-size: 13px;
             }
-            QLineEdit:focus { border: 1px solid #1976d2; }
+            QLineEdit:focus { border: 1px solid #6366F1; }
             QPushButton#btnSecondary {
-                background: #1e3a5f; color: #8eb3d4; border: 1px solid #2a4a6b;
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
                 border-radius: 6px; padding: 7px 14px; font-size: 13px;
             }
-            QPushButton#btnSecondary:hover { background: #243f63; color: #cdd9e5; }
+            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
             QDialogButtonBox QPushButton {
-                background: #1565c0; color: white; border: none;
+                background: #4F46E5; color: white; border: none;
                 border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
             }
-            QDialogButtonBox QPushButton:hover { background: #1976d2; }
+            QDialogButtonBox QPushButton:hover { background: #6366F1; }
             QDialogButtonBox QPushButton[text='Отмена'] {
-                background: #1e3a5f; color: #8eb3d4;
+                background: #E5E7EB; color: #6B7280;
             }
         """)
 
@@ -2101,8 +2133,8 @@ class DocCell(QWidget):
         has = bool(self._path and os.path.exists(self._path))
         if has:
             self.lbl_status.setText("✔️")
-            self.lbl_status.setStyleSheet("color:#81d4a0;font-size:14px;font-weight:700;")
-            self.btn_attach.setText("🖼")
+            self.lbl_status.setStyleSheet("color:#059669;font-size:14px;font-weight:700;")
+            self.btn_attach.setText("📎")
             self.btn_attach.setStyleSheet(
                 "QPushButton{background:#0d3b1a;border:1px solid #2e7d32;"
                 "border-radius:5px;font-size:13px;}"
@@ -2110,23 +2142,23 @@ class DocCell(QWidget):
             )
             self.btn_open.setEnabled(True)
             self.btn_open.setStyleSheet(
-                "QPushButton{background:#162131;border:1px solid #2a4a6b;"
-                "border-radius:5px;color:#64b5f6;font-size:12px;}"
-                "QPushButton:hover{background:#1e3a5f;}"
+                "QPushButton{background:#F0F2F5;border:1px solid #D1D5DB;"
+                "border-radius:5px;color:#6366F1;font-size:12px;}"
+                "QPushButton:hover{background:#E5E7EB;}"
             )
         else:
             self.lbl_status.setText("—")
-            self.lbl_status.setStyleSheet("color:#3a5a5a;font-size:14px;font-weight:700;")
+            self.lbl_status.setStyleSheet("color:#6B7280;font-size:14px;font-weight:700;")
             self.btn_attach.setText("📎")
             self.btn_attach.setStyleSheet(
-                "QPushButton{background:#162131;border:1px solid #2a4a6b;"
+                "QPushButton{background:#F0F2F5;border:1px solid #D1D5DB;"
                 "border-radius:5px;font-size:13px;}"
-                "QPushButton:hover{background:#1e3a5f;}"
+                "QPushButton:hover{background:#E5E7EB;}"
             )
             self.btn_open.setEnabled(False)
             self.btn_open.setStyleSheet(
                 "QPushButton{background:#0d1720;border:1px solid #1b2a3c;"
-                "border-radius:5px;color:#7a9bb8;font-size:12px;}"
+                "border-radius:5px;color:#9CA3AF;font-size:12px;}"
             )
 
     def _on_attach(self):
@@ -2165,6 +2197,7 @@ class DocsWidget(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setAutoFillBackground(True)
         self._docs = self._load()
         self._cells: dict[tuple[str, str], DocCell] = {}
         self._setup_ui()
@@ -2208,7 +2241,7 @@ class DocsWidget(QWidget):
         top_bar.addWidget(title)
         top_bar.addStretch()
 
-        btn_save = QPushButton("💾  Сохранить")
+        btn_save = QPushButton("Сохранить")
         btn_save.setObjectName("btnPrimary")
         btn_save.clicked.connect(self._save)
         top_bar.addWidget(btn_save)
@@ -2242,7 +2275,7 @@ class DocsWidget(QWidget):
         for r_idx, plot in enumerate(plot_order):
             plot_item = QTableWidgetItem(f"уч. {plot}")
             plot_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            plot_item.setForeground(QColor("#90caf9"))
+            plot_item.setForeground(QColor("#6366F1"))
             f = plot_item.font(); f.setBold(True); plot_item.setFont(f)
             self.table.setItem(r_idx, 0, plot_item)
 
@@ -2316,7 +2349,7 @@ class MeterReplacementDialog(QDialog):
         lay.setSpacing(12)
 
         title = QLabel(f"Замена счётчика на участке {plot}")
-        title.setStyleSheet("font-size:14px;font-weight:700;color:#e8f4fd;")
+        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
         lay.addWidget(title)
 
         form = QFormLayout()
@@ -2353,20 +2386,20 @@ class MeterReplacementDialog(QDialog):
         lay.addWidget(btns)
 
         self.setStyleSheet("""
-            QDialog { background: #111e2b; color: #cdd9e5; }
-            QLabel { background: transparent; color: #cdd9e5; font-size: 13px; }
+            QDialog { background: #FFFFFF; color: #374151; }
+            QLabel { background: transparent; color: #374151; font-size: 13px; }
             QLineEdit, QDateEdit {
-                background: #0d1b2a; border: 1px solid #2a4a6b;
-                border-radius: 5px; color: #cdd9e5; padding: 6px 8px; font-size: 13px;
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
             }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #1976d2; }
+            QLineEdit:focus, QDateEdit:focus { border: 1px solid #6366F1; }
             QDialogButtonBox QPushButton {
-                background: #1565c0; color: white; border: none;
+                background: #4F46E5; color: white; border: none;
                 border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
             }
-            QDialogButtonBox QPushButton:hover { background: #1976d2; }
+            QDialogButtonBox QPushButton:hover { background: #6366F1; }
             QDialogButtonBox QPushButton[text='Отмена'] {
-                background: #1e3a5f; color: #8eb3d4;
+                background: #E5E7EB; color: #6B7280;
             }
         """)
 
@@ -2420,11 +2453,11 @@ class PlotCardDialog(QDialog):
         owners = energy.owners_map().get(self._plot, [])
         owners_text = ", ".join(owners) if owners else "владельцы не указаны"
         head = QLabel(f"<b>Участок {self._plot}</b>  ·  {owners_text}")
-        head.setStyleSheet("font-size:14px;color:#e8f4fd;background:transparent;")
+        head.setStyleSheet("font-size:14px;color:#111827;background:transparent;")
         lay.addWidget(head)
 
         self.summary_lbl = QLabel("")
-        self.summary_lbl.setStyleSheet("color:#7a9bb8;background:transparent;font-size:12px;")
+        self.summary_lbl.setStyleSheet("color:#9CA3AF;background:transparent;font-size:12px;")
         lay.addWidget(self.summary_lbl)
 
         # ── Панель ввода нового показания ──────────────────────────
@@ -2433,8 +2466,8 @@ class PlotCardDialog(QDialog):
         eh.setContentsMargins(12, 8, 12, 8)
         eh.setSpacing(8)
 
-        lbl = QLabel("📡  Передать показание:")
-        lbl.setStyleSheet("color:#8eb3d4;background:transparent;font-size:12px;")
+        lbl = QLabel("Передать показание:")
+        lbl.setStyleSheet("color:#6B7280;background:transparent;font-size:12px;")
         eh.addWidget(lbl)
 
         self.cb_month = QComboBox()
@@ -2461,7 +2494,7 @@ class PlotCardDialog(QDialog):
         self.le_value.returnPressed.connect(self._on_add_reading)
         eh.addWidget(self.le_value)
 
-        btn_add = QPushButton("💾  Сохранить", objectName="btnPrimary")
+        btn_add = QPushButton("Сохранить", objectName="btnPrimary")
         btn_add.clicked.connect(self._on_add_reading)
         eh.addWidget(btn_add)
         eh.addStretch()
@@ -2489,7 +2522,7 @@ class PlotCardDialog(QDialog):
         hint = QHBoxLayout()
         hint.setSpacing(16)
         for color, text in [
-            ("#ef9a9a", "■  показание < предыдущего"),
+            ("#DC2626", "■  показание < предыдущего"),
             ("#ffd54f", "■  аномально большой расход / замена счётчика"),
         ]:
             lb = QLabel(text)
@@ -2500,7 +2533,7 @@ class PlotCardDialog(QDialog):
 
         # ── Кнопки внизу ───────────────────────────────────────────
         bottom = QHBoxLayout()
-        self.btn_replace = QPushButton("🔧  Зарегистрировать замену счётчика")
+        self.btn_replace = QPushButton("Зарегистрировать замену счётчика")
         self.btn_replace.setObjectName("btnSecondary")
         self.btn_replace.clicked.connect(self._on_replace)
         bottom.addWidget(self.btn_replace)
@@ -2519,39 +2552,39 @@ class PlotCardDialog(QDialog):
         lay.addLayout(bottom)
 
         self.setStyleSheet("""
-            QDialog { background: #111e2b; color: #cdd9e5; }
+            QDialog { background: #FFFFFF; color: #374151; }
             QLabel  { background: transparent; }
             QFrame#entryBox {
-                background: #0d1b2a; border: 1px solid #1e3a5f; border-radius: 8px;
+                background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
             }
             QPushButton#btnPrimary {
-                background: #1565c0; color: white; border: none; border-radius: 6px;
+                background: #4F46E5; color: white; border: none; border-radius: 6px;
                 padding: 8px 18px; font-size: 13px; font-weight: 600;
             }
-            QPushButton#btnPrimary:hover  { background: #1976d2; }
+            QPushButton#btnPrimary:hover  { background: #6366F1; }
             QPushButton#btnSecondary {
-                background: #1e3a5f; color: #8eb3d4; border: 1px solid #2a4a6b;
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
                 border-radius: 6px; padding: 7px 14px; font-size: 13px;
             }
-            QPushButton#btnSecondary:hover { background: #243f63; color: #cdd9e5; }
+            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
             QLineEdit#searchInput, QComboBox#filterCombo {
-                background: #0d1b2a; border: 1px solid #2a4a6b; border-radius: 6px;
-                color: #cdd9e5; padding: 6px 10px; font-size: 13px;
+                background: #F8F9FA; border: 1px solid #D1D5DB; border-radius: 6px;
+                color: #374151; padding: 6px 10px; font-size: 13px;
             }
-            QLineEdit#searchInput:focus { border: 1px solid #1976d2; }
+            QLineEdit#searchInput:focus { border: 1px solid #6366F1; }
             QComboBox#filterCombo::drop-down { border: none; width: 18px; }
             QComboBox QAbstractItemView {
-                background: #0d1b2a; border: 1px solid #2a4a6b;
-                color: #cdd9e5; selection-background-color: #1a2e45;
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                color: #374151; selection-background-color: #EEF2FF;
             }
             QTableWidget#summaryTable {
-                background: #0d1b2a; border: 1px solid #1e3a5f; border-radius: 8px;
-                gridline-color: #1a2733; color: #cdd9e5; font-size: 12px;
-                selection-background-color: #1a3a5a; selection-color: #e8f4fd;
+                background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
+                gridline-color: #F3F4F6; color: #374151; font-size: 12px;
+                selection-background-color: #EEF2FF; selection-color: #111827;
             }
             QTableWidget#summaryTable QHeaderView::section {
-                background: #0a1520; color: #64b5f6; border: none;
-                border-right: 1px solid #1e3a5f; border-bottom: 2px solid #1976d2;
+                background: #F9FAFB; color: #6366F1; border: none;
+                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #6366F1;
                 padding: 6px 8px; font-size: 12px; font-weight: 600;
             }
         """)
@@ -2617,7 +2650,7 @@ class PlotCardDialog(QDialog):
             if kind == "charge":
                 c = payload
                 y, m = c["year"], c["month"]
-                label = f"📡  {m:02d}.{y}"
+                label = f"{m:02d}.{y}"
                 kwh_text = f"{c['kwh']:.0f}" if c["kwh"] is not None else "—"
                 rate_text = f"{c['rate']:.2f}" if c["rate"] is not None else "—"
                 amount = c["amount"] or 0.0
@@ -2645,12 +2678,12 @@ class PlotCardDialog(QDialog):
                 if p.get("mixed"):
                     label += " ⅟₂"   # подсказка что платёж пополам с членскими
                 self._set_row(r, [
-                    (label, "#81d4a0"),
+                    (label, "#059669"),
                     ("—", None),
                     ("—", None),
                     ("—", None),
                     ("—", None),
-                    (fmt_money(paid), "#81d4a0"),
+                    (fmt_money(paid), "#059669"),
                     (fmt_money(-paid), None),
                     (fmt_money(cum), self._debt_color(cum)),
                     ("", None),
@@ -2670,7 +2703,7 @@ class PlotCardDialog(QDialog):
                     if old_f is not None and new_i is not None else "—"
                 )
                 self._set_row(r, [
-                    (f"🔧  {evdate.strftime('%d.%m.%Y')}", "#ffd54f"),
+                    (f"[замена] {evdate.strftime('%d.%m.%Y')}", "#ffd54f"),
                     (reading_text, "#ffd54f"),
                     ("—", None), ("—", None), ("—", None), ("—", None), ("—", None),
                     (fmt_money(cum), self._debt_color(cum)),
@@ -2740,7 +2773,7 @@ class PlotCardDialog(QDialog):
         btn.setFixedSize(26, 22)
         btn.setToolTip(f"Удалить показание за {month:02d}.{year}")
         btn.setStyleSheet(
-            "QPushButton{background:#2a1318;color:#ef9a9a;border:1px solid #6e2a30;"
+            "QPushButton{background:#2a1318;color:#DC2626;border:1px solid #6e2a30;"
             "border-radius:4px;font-size:12px;font-weight:bold;}"
             "QPushButton:hover{background:#4a1a22;color:#ffcccc;}"
         )
@@ -2779,13 +2812,13 @@ class PlotCardDialog(QDialog):
     @staticmethod
     def _value_edit_style(anomaly: str | None) -> str:
         if anomaly == "drop":
-            return ("background:#2a0d0d;border:1px solid #c62828;border-radius:3px;"
-                    "color:#ef9a9a;font-size:12px;font-weight:700;padding:3px 6px;")
+            return ("background:#2a0d0d;border:1px solid #DC2626;border-radius:3px;"
+                    "color:#DC2626;font-size:12px;font-weight:700;padding:3px 6px;")
         if anomaly == "spike":
             return ("background:#2a1f0d;border:1px solid #f9a825;border-radius:3px;"
                     "color:#ffd54f;font-size:12px;padding:3px 6px;")
-        return ("background:#162131;border:1px solid #2a4a6b;border-radius:3px;"
-                "color:#cdd9e5;font-size:12px;padding:3px 6px;")
+        return ("background:#F0F2F5;border:1px solid #D1D5DB;border-radius:3px;"
+                "color:#374151;font-size:12px;padding:3px 6px;")
 
     # ── Сохранение ───────────────────────────────────────────────────────
     def _on_add_reading(self):
@@ -2864,9 +2897,9 @@ class PlotCardDialog(QDialog):
     @staticmethod
     def _debt_color(v: float) -> str | None:
         if v > 0:
-            return "#ef9a9a"
+            return "#DC2626"
         if v < 0:
-            return "#81d4a0"
+            return "#059669"
         return None
 
     def _on_replace(self):
@@ -2933,7 +2966,7 @@ class VznosyAdjustmentDialog(QDialog):
         lay.setSpacing(12)
 
         title = QLabel(f"Корректировка ЧВ на участке {plot}")
-        title.setStyleSheet("font-size:14px;font-weight:700;color:#e8f4fd;")
+        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
         lay.addWidget(title)
 
         form = QFormLayout()
@@ -2979,20 +3012,20 @@ class VznosyAdjustmentDialog(QDialog):
         lay.addWidget(btns)
 
         self.setStyleSheet("""
-            QDialog { background: #111e2b; color: #cdd9e5; }
-            QLabel { background: transparent; color: #cdd9e5; font-size: 13px; }
+            QDialog { background: #FFFFFF; color: #374151; }
+            QLabel { background: transparent; color: #374151; font-size: 13px; }
             QLineEdit, QDateEdit, QComboBox, QSpinBox {
-                background: #0d1b2a; border: 1px solid #2a4a6b;
-                border-radius: 5px; color: #cdd9e5; padding: 6px 8px; font-size: 13px;
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
             }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #1976d2; }
+            QLineEdit:focus, QDateEdit:focus { border: 1px solid #6366F1; }
             QDialogButtonBox QPushButton {
-                background: #1565c0; color: white; border: none;
+                background: #4F46E5; color: white; border: none;
                 border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
             }
-            QDialogButtonBox QPushButton:hover { background: #1976d2; }
+            QDialogButtonBox QPushButton:hover { background: #6366F1; }
             QDialogButtonBox QPushButton[text='Отмена'] {
-                background: #1e3a5f; color: #8eb3d4;
+                background: #E5E7EB; color: #6B7280;
             }
         """)
 
@@ -3092,16 +3125,16 @@ class VznosyCardDialog(QDialog):
         self.head = QLabel(
             f"<b>Участок {self._plot}</b>  ·  {owners_text}  ·  {area_text}"
         )
-        self.head.setStyleSheet("font-size:14px;color:#e8f4fd;background:transparent;")
+        self.head.setStyleSheet("font-size:14px;color:#111827;background:transparent;")
         lay.addWidget(self.head)
 
         self.summary_lbl = QLabel("")
-        self.summary_lbl.setStyleSheet("color:#7a9bb8;background:transparent;font-size:12px;")
+        self.summary_lbl.setStyleSheet("color:#9CA3AF;background:transparent;font-size:12px;")
         lay.addWidget(self.summary_lbl)
 
         self.warning_lbl = QLabel("")
         self.warning_lbl.setStyleSheet(
-            "color:#ef9a9a;background:#2a1318;border:1px solid #6e2a30;"
+            "color:#DC2626;background:#2a1318;border:1px solid #6e2a30;"
             "border-radius:6px;padding:8px 12px;font-size:12px;"
         )
         self.warning_lbl.setVisible(False)
@@ -3109,7 +3142,7 @@ class VznosyCardDialog(QDialog):
 
         # ── Главная таблица: разбивка по периодам ──────────────────────
         years_lbl = QLabel("Разбивка по периодам", objectName="filterLabel")
-        years_lbl.setStyleSheet("color:#64b5f6;background:transparent;font-size:12px;margin-top:4px;")
+        years_lbl.setStyleSheet("color:#6366F1;background:transparent;font-size:12px;margin-top:4px;")
         lay.addWidget(years_lbl)
 
         self.table = QTableWidget(objectName="summaryTable")
@@ -3130,7 +3163,7 @@ class VznosyCardDialog(QDialog):
 
         # ── Список ручных операций и корректировок ────────────────
         adj_lbl = QLabel("Ручные операции и корректировки")
-        adj_lbl.setStyleSheet("color:#64b5f6;background:transparent;font-size:12px;margin-top:8px;")
+        adj_lbl.setStyleSheet("color:#6366F1;background:transparent;font-size:12px;margin-top:8px;")
         lay.addWidget(adj_lbl)
 
         self.adj_table = QTableWidget(objectName="summaryTable")
@@ -3151,7 +3184,7 @@ class VznosyCardDialog(QDialog):
 
         # ── Кнопки внизу ──────────────────────────────────────────
         bottom = QHBoxLayout()
-        btn_pay = QPushButton("➕  Ручной платёж", objectName="btnSecondary")
+        btn_pay = QPushButton("Ручной платёж", objectName="btnSecondary")
         btn_pay.clicked.connect(lambda: self._add_adjustment("payment_manual"))
         bottom.addWidget(btn_pay)
 
@@ -3171,26 +3204,26 @@ class VznosyCardDialog(QDialog):
         lay.addLayout(bottom)
 
         self.setStyleSheet("""
-            QDialog { background: #111e2b; color: #cdd9e5; }
+            QDialog { background: #FFFFFF; color: #374151; }
             QLabel  { background: transparent; }
             QPushButton#btnPrimary {
-                background: #1565c0; color: white; border: none; border-radius: 6px;
+                background: #4F46E5; color: white; border: none; border-radius: 6px;
                 padding: 8px 18px; font-size: 13px; font-weight: 600;
             }
-            QPushButton#btnPrimary:hover  { background: #1976d2; }
+            QPushButton#btnPrimary:hover  { background: #6366F1; }
             QPushButton#btnSecondary {
-                background: #1e3a5f; color: #8eb3d4; border: 1px solid #2a4a6b;
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
                 border-radius: 6px; padding: 7px 14px; font-size: 13px;
             }
-            QPushButton#btnSecondary:hover { background: #243f63; color: #cdd9e5; }
+            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
             QTableWidget#summaryTable {
-                background: #0d1b2a; border: 1px solid #1e3a5f; border-radius: 8px;
-                gridline-color: #1a2733; color: #cdd9e5; font-size: 12px;
-                selection-background-color: #1a3a5a; selection-color: #e8f4fd;
+                background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
+                gridline-color: #F3F4F6; color: #374151; font-size: 12px;
+                selection-background-color: #EEF2FF; selection-color: #111827;
             }
             QTableWidget#summaryTable QHeaderView::section {
-                background: #0a1520; color: #64b5f6; border: none;
-                border-right: 1px solid #1e3a5f; border-bottom: 2px solid #1976d2;
+                background: #F9FAFB; color: #6366F1; border: none;
+                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #6366F1;
                 padding: 6px 8px; font-size: 12px; font-weight: 600;
             }
         """)
@@ -3239,39 +3272,39 @@ class VznosyCardDialog(QDialog):
                 # Тариф
                 if y.tariff is None:
                     tariff_text = "—"
-                    tariff_color = "#7a9bb8"
+                    tariff_color = "#9CA3AF"
                 elif y.tariff.get("per_sqm"):
                     rate = y.tariff.get("rate_sqm", "?")
                     if y.area_missing:
                         tariff_text = f"{rate} ₽/м²  (площадь не указана)"
-                        tariff_color = "#ef9a9a"
+                        tariff_color = "#DC2626"
                     else:
                         tariff_text = f"{rate} ₽/м² · {area:g} м² → {fmt_money(y.amount)}"
-                        tariff_color = "#cdd9e5"
+                        tariff_color = "#374151"
                 else:
                     tariff_text = f"{y.tariff.get('amount', '?')} ₽"
-                    tariff_color = "#cdd9e5"
+                    tariff_color = "#374151"
 
                 # Начислено
                 if y.ignored:
                     amount_text = "—"
-                    amount_color = "#7a9bb8"
+                    amount_color = "#9CA3AF"
                 elif y.amount is None:
                     amount_text = "—"
-                    amount_color = "#ef9a9a" if y.area_missing else "#7a9bb8"
+                    amount_color = "#DC2626" if y.area_missing else "#9CA3AF"
                 else:
                     amount_text = fmt_money(y.amount)
-                    amount_color = "#f9a825" if y.amount > 0 else "#7a9bb8"
+                    amount_color = "#f9a825" if y.amount > 0 else "#9CA3AF"
 
                 # Оплачено за период
                 period_key = y.period_from.isoformat()
                 paid_period = py.get(period_key, 0.0)
                 paid_text = fmt_money(paid_period) if paid_period else "—"
-                paid_color = "#81d4a0" if paid_period else "#7a9bb8"
+                paid_color = "#059669" if paid_period else "#9CA3AF"
 
                 # Корректировка
                 note_text = "—"
-                note_color = "#7a9bb8"
+                note_color = "#9CA3AF"
                 if y.ignored:
                     note_text = "не учитывается"
                     note_color = "#546e7a"
@@ -3292,7 +3325,7 @@ class VznosyCardDialog(QDialog):
                         cum += y.amount
                     cum -= paid_period
                 cum_text = fmt_money(cum) if not y.ignored else "—"
-                cum_color = "#ef9a9a" if cum > 0 else ("#81d4a0" if cum < 0 else None)
+                cum_color = "#DC2626" if cum > 0 else ("#059669" if cum < 0 else None)
 
                 self._set_year_row(r, [
                     (period_label, None),
@@ -3318,11 +3351,11 @@ class VznosyCardDialog(QDialog):
                 cb.setStyleSheet("""
                     QCheckBox::indicator { width: 16px; height: 16px; }
                     QCheckBox::indicator:unchecked {
-                        border: 2px solid #2a4a6b; border-radius: 3px;
-                        background: #0d1b2a;
+                        border: 2px solid #D1D5DB; border-radius: 3px;
+                        background: #F8F9FA;
                     }
                     QCheckBox::indicator:checked {
-                        border: 2px solid #ef9a9a; border-radius: 3px;
+                        border: 2px solid #DC2626; border-radius: 3px;
                         background: #4a1a22;
                     }
                 """)
@@ -3383,7 +3416,7 @@ class VznosyCardDialog(QDialog):
             btn.setFixedSize(26, 22)
             btn.setToolTip("Удалить корректировку")
             btn.setStyleSheet(
-                "QPushButton{background:#2a1318;color:#ef9a9a;border:1px solid #6e2a30;"
+                "QPushButton{background:#2a1318;color:#DC2626;border:1px solid #6e2a30;"
                 "border-radius:4px;font-size:12px;font-weight:bold;}"
                 "QPushButton:hover{background:#4a1a22;color:#ffcccc;}"
             )
@@ -3516,6 +3549,7 @@ class EnergyDebtWidget(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setAutoFillBackground(True)
         self._df = None
         self._setup_ui()
 
@@ -3538,7 +3572,7 @@ class EnergyDebtWidget(QWidget):
         top.addWidget(self.date_as_of)
 
         self.search = QLineEdit(objectName="searchInput")
-        self.search.setPlaceholderText("🔍  Поиск по № участка или ФИО")
+        self.search.setPlaceholderText("Поиск по № участка или ФИО")
         self.search.setFixedWidth(280)
         self.search.textChanged.connect(self._apply_filter)
         top.addWidget(self.search)
@@ -3560,7 +3594,7 @@ class EnergyDebtWidget(QWidget):
         btn_rates.clicked.connect(self._open_rates_dialog)
         top.addWidget(btn_rates)
 
-        btn_excel = QPushButton("📊  Экспорт в Excel", objectName="btnSecondary")
+        btn_excel = QPushButton("Экспорт в Excel", objectName="btnSecondary")
         btn_excel.clicked.connect(self._export_excel)
         top.addWidget(btn_excel)
 
@@ -3570,10 +3604,10 @@ class EnergyDebtWidget(QWidget):
         legend = QHBoxLayout()
         legend.setSpacing(20)
         for color, text in [
-            ("#81d4a0", "■  без долга / аванс"),
+            ("#059669", "■  без долга / аванс"),
             ("#f9a825", "■  небольшой долг"),
             ("#ef6c00", "■  средний"),
-            ("#c62828", "■  крупный"),
+            ("#DC2626", "■  крупный"),
         ]:
             lb = QLabel(text)
             lb.setStyleSheet(
@@ -3605,8 +3639,8 @@ class EnergyDebtWidget(QWidget):
         self.recon_lbl = QLabel("", objectName="statusLabel")
         self.recon_lbl.setWordWrap(True)
         self.recon_lbl.setStyleSheet(
-            "background:#0a1520;border:1px solid #1e3a5f;border-radius:6px;"
-            "padding:10px 14px;color:#cdd9e5;font-size:12px;"
+            "background:#F9FAFB;border:1px solid #E5E7EB;border-radius:6px;"
+            "padding:10px 14px;color:#374151;font-size:12px;"
         )
         lay.addWidget(self.recon_lbl)
 
@@ -3715,18 +3749,18 @@ class EnergyDebtWidget(QWidget):
             date_sort = float(bal.last_reading[0] * 100 + bal.last_reading[1]) if bal.last_reading else -1.0
 
             cells = [
-                (f"уч. {plot}", plot_sort, None, "#90caf9", True),
-                (owner, owner, None, "#cdd9e5", False),
-                (last_reading_text, reading_sort, None, "#cdd9e5", False),
-                (last_date_text, date_sort, None, "#7a9bb8", False),
+                (f"уч. {plot}", plot_sort, None, "#6366F1", True),
+                (owner, owner, None, "#374151", False),
+                (last_reading_text, reading_sort, None, "#374151", False),
+                (last_date_text, date_sort, None, "#9CA3AF", False),
                 (fmt_money(bal.charged), bal.charged, None, "#f9a825" if bal.charged else "#3a5a7a", False),
-                (fmt_money(bal.paid), bal.paid, None, "#81d4a0" if bal.paid else "#3a5a7a", False),
+                (fmt_money(bal.paid), bal.paid, None, "#059669" if bal.paid else "#3a5a7a", False),
                 (fmt_money(bal.baseline) if bal.baseline else "—", bal.baseline, None,
                  "#c97c7c" if bal.baseline else "#3a5a7a", False),
                 (fmt_money(bal.debt), bal.debt, color, "#ffffff", True),
                 ("—" if bal.months_without_payment is None else str(bal.months_without_payment),
                  bal.months_without_payment or 0, None,
-                 "#ef9a9a" if (bal.months_without_payment or 0) > 3 else "#cdd9e5", False),
+                 "#DC2626" if (bal.months_without_payment or 0) > 3 else "#374151", False),
             ]
             for c, (text, value, bg, fg, bold) in enumerate(cells):
                 if isinstance(value, (int, float)):
@@ -3908,6 +3942,7 @@ class VznosyDebtWidget(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setAutoFillBackground(True)
         self._df = None
         self._last_debts: dict = {}
         self._setup_ui()
@@ -3932,7 +3967,7 @@ class VznosyDebtWidget(QWidget):
         top.addWidget(self.date_as_of)
 
         self.search = QLineEdit(objectName="searchInput")
-        self.search.setPlaceholderText("🔍  Поиск по № участка или ФИО")
+        self.search.setPlaceholderText("Поиск по № участка или ФИО")
         self.search.setFixedWidth(280)
         self.search.textChanged.connect(self._apply_filter)
         top.addWidget(self.search)
@@ -3954,7 +3989,7 @@ class VznosyDebtWidget(QWidget):
         btn_rates.clicked.connect(self._open_rates_dialog)
         top.addWidget(btn_rates)
 
-        btn_excel = QPushButton("📊  Экспорт в Excel", objectName="btnSecondary")
+        btn_excel = QPushButton("Экспорт в Excel", objectName="btnSecondary")
         btn_excel.clicked.connect(self._export_excel)
         top.addWidget(btn_excel)
 
@@ -3964,10 +3999,10 @@ class VznosyDebtWidget(QWidget):
         legend = QHBoxLayout()
         legend.setSpacing(20)
         for color, text in [
-            ("#81d4a0", "■  без долга / аванс"),
+            ("#059669", "■  без долга / аванс"),
             ("#f9a825", "■  небольшой долг"),
             ("#ef6c00", "■  средний"),
-            ("#c62828", "■  крупный"),
+            ("#DC2626", "■  крупный"),
         ]:
             lb = QLabel(text)
             lb.setStyleSheet(
@@ -4063,8 +4098,8 @@ class VznosyDebtWidget(QWidget):
             owner = ", ".join(owners.get(plot, [])) or "—"
 
             area_text = f"{area:g}" if area is not None else "—"
-            area_color = "#ef9a9a" if bal.area_missing_warning else (
-                "#cdd9e5" if area is not None else "#7a9bb8"
+            area_color = "#DC2626" if bal.area_missing_warning else (
+                "#374151" if area is not None else "#9CA3AF"
             )
             area_tip = ("Не указана площадь — начисление по тарифу за м² невозможно"
                         if bal.area_missing_warning else "")
@@ -4080,9 +4115,9 @@ class VznosyDebtWidget(QWidget):
                 debt_count += 1
 
             years_unpaid_text = "—" if bal.years_unpaid is None else str(bal.years_unpaid)
-            years_unpaid_color = "#cdd9e5"
+            years_unpaid_color = "#374151"
             if bal.years_unpaid and bal.years_unpaid >= 2:
-                years_unpaid_color = "#ef9a9a" if bal.years_unpaid >= 3 else "#ffd54f"
+                years_unpaid_color = "#DC2626" if bal.years_unpaid >= 3 else "#ffd54f"
 
             try:
                 plot_sort = float(str(plot).split(",")[0])
@@ -4090,13 +4125,13 @@ class VznosyDebtWidget(QWidget):
                 plot_sort = 0.0
 
             cells = [
-                (f"уч. {plot}", plot_sort, None, "#90caf9", True, ""),
-                (owner, owner, None, "#cdd9e5", False, ""),
+                (f"уч. {plot}", plot_sort, None, "#6366F1", True, ""),
+                (owner, owner, None, "#374151", False, ""),
                 (area_text, area if area is not None else 0.0, None, area_color, False, area_tip),
                 (fmt_money(bal.charged), bal.charged, None,
                  "#f9a825" if bal.charged else "#3a5a7a", False, ""),
                 (fmt_money(bal.paid), bal.paid, None,
-                 "#81d4a0" if bal.paid else "#3a5a7a", False, ""),
+                 "#059669" if bal.paid else "#3a5a7a", False, ""),
                 (fmt_money(bal.debt), bal.debt, color, "#ffffff", True, ""),
                 (years_unpaid_text, float(bal.years_unpaid or 0), None,
                  years_unpaid_color, False, ""),
@@ -4246,6 +4281,55 @@ class VznosyDebtWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка экспорта", str(e))
 
+class _NavButton(QWidget):
+    """Sidebar nav item: Material Icon glyph + Roboto Slab label."""
+    nav_clicked = pyqtSignal(int)
+
+    def __init__(self, icon_char: str, label: str, page_idx: int, parent=None):
+        super().__init__(parent)
+        self._page_idx = page_idx
+        self.setObjectName("navBtn")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.setFixedHeight(46)
+
+        lyt = QHBoxLayout(self)
+        lyt.setContentsMargins(20, 0, 16, 0)
+        lyt.setSpacing(12)
+
+        self._icon = QLabel(icon_char, objectName="navIcon")
+        icon_font = QFont("Material Icons")
+        icon_font.setPixelSize(20)
+        self._icon.setFont(icon_font)
+        self._icon.setFixedWidth(22)
+        self._icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        self._lbl = QLabel(label, objectName="navLabel")
+        self._lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        lyt.addWidget(self._icon)
+        lyt.addWidget(self._lbl)
+        lyt.addStretch()
+
+    def paintEvent(self, event):
+        opt = QStyleOption()
+        opt.initFrom(self)
+        p = QPainter(self)
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, p, self)
+
+    def set_active(self, active: bool):
+        prop = "true" if active else "false"
+        for w in (self, self._icon, self._lbl):
+            w.setProperty("active", prop)
+            w.style().unpolish(w)
+            w.style().polish(w)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.nav_clicked.emit(self._page_idx)
+        super().mousePressEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -4257,55 +4341,76 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self):
         central = QWidget()
+        central.setAutoFillBackground(True)
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         left_panel = QWidget(objectName="leftPanel")
-        left_panel.setFixedWidth(210)
+        left_panel.setFixedWidth(220)
         left_lyt = QVBoxLayout(left_panel)
         left_lyt.setContentsMargins(0, 0, 0, 0)
         left_lyt.setSpacing(0)
 
-        self.nav = QListWidget(objectName="navPanel")
+        # ── Logo ─────────────────────────────────────────────────────────
+        logo_widget = QWidget(objectName="navLogo")
+        logo_widget.setAutoFillBackground(True)
+        logo_widget.setFixedHeight(64)
+        logo_lyt = QHBoxLayout(logo_widget)
+        logo_lyt.setContentsMargins(20, 0, 16, 0)
+        logo_lyt.setSpacing(10)
+        logo_icon = QLabel("", objectName="navLogoIcon")
+        lf = QFont("Material Icons")
+        lf.setPixelSize(24)
+        logo_icon.setFont(lf)
+        logo_icon.setFixedWidth(26)
+        logo_text = QLabel("СНТ Учёт", objectName="navLogoText")
+        logo_lyt.addWidget(logo_icon)
+        logo_lyt.addWidget(logo_text)
+        logo_lyt.addStretch()
+        left_lyt.addWidget(logo_widget)
 
-        logo = QListWidgetItem("💼  СНТ Учёт")
-        logo.setFlags(Qt.ItemFlag.NoItemFlags)
-        logo.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setForeground(QColor("#90caf9"))
-        f = QFont(); f.setPointSize(13); f.setBold(True)
-        logo.setFont(f)
-        self.nav.addItem(logo)
-        self.nav.addItem(QListWidgetItem(""))   # разделитель
+        nav_sep = QFrame(objectName="navSep")
+        nav_sep.setFrameShape(QFrame.Shape.HLine)
+        nav_sep.setFixedHeight(1)
+        left_lyt.addWidget(nav_sep)
 
-        self.nav_indices = {}
-        for label, idx in [
-            ("📋  Детализация",         0),
-            ("💰  Членские взносы",     1),
-            ("⚡  Электричество",       5),
-            ("📍  Участки",             2),
-            ("🗂  Документы",           3),
-            ("🗺  Карта",               4),
+        # ── Nav items ─────────────────────────────────────────────────────
+        self._nav_buttons: list[_NavButton] = []
+        nav_container = QWidget(objectName="navArea")
+        nav_container.setAutoFillBackground(True)
+        nav_lyt = QVBoxLayout(nav_container)
+        nav_lyt.setContentsMargins(0, 10, 0, 10)
+        nav_lyt.setSpacing(2)
+
+        for icon, label, idx in [
+            ("", "Детализация",     0),
+            ("", "Членские взносы", 1),
+            ("", "Электричество",   5),
+            ("", "Участки",         2),
+            ("", "Документы",       3),
+            ("", "Карта",           4),
         ]:
-            item = QListWidgetItem(label)
-            item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-            self.nav.addItem(item)
-            self.nav_indices[self.nav.count() - 1] = idx
+            btn = _NavButton(icon, label, idx)
+            btn.nav_clicked.connect(self._nav_click)
+            self._nav_buttons.append(btn)
+            nav_lyt.addWidget(btn)
 
-        self.nav.currentRowChanged.connect(self._on_nav_changed)
+        nav_lyt.addStretch()
+        left_lyt.addWidget(nav_container, stretch=1)
 
-        btn_save_proj = QPushButton("💾  Сохранить проект")
+        # ── Bottom action buttons ─────────────────────────────────────────
+        btn_save_proj = QPushButton("Сохранить проект")
         btn_save_proj.setObjectName("btnNavAction")
         btn_save_proj.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_save_proj.clicked.connect(self._save_project)
 
-        btn_load_proj = QPushButton("📂  Загрузить проект")
+        btn_load_proj = QPushButton("Загрузить проект")
         btn_load_proj.setObjectName("btnNavAction")
         btn_load_proj.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_load_proj.clicked.connect(self._load_project)
 
-        left_lyt.addWidget(self.nav)
         left_lyt.addWidget(btn_save_proj)
         left_lyt.addWidget(btn_load_proj)
         root.addWidget(left_panel)
@@ -4317,6 +4422,9 @@ class MainWindow(QMainWindow):
         self.docs        = DocsWidget()
         self.map_tab     = MapWidget()
         self.energy_debt = EnergyDebtWidget()
+        for tab in (self.detail, self.vznosy_debt, self.plots,
+                    self.docs, self.map_tab, self.energy_debt):
+            tab.setAutoFillBackground(True)
         self.stack.addWidget(self.detail)       # 0
         self.stack.addWidget(self.vznosy_debt)  # 1
         self.stack.addWidget(self.plots)        # 2
@@ -4337,19 +4445,18 @@ class MainWindow(QMainWindow):
         self.plots.plotsUpdated.connect(self.detail.refresh_plot_column)
         self.plots.plotsUpdated.connect(self.docs.refresh_plots)
 
-        self.nav.setCurrentRow(2)
+        self._nav_click(0)  # initial page: Детализация
 
-    def _on_nav_changed(self, row):
-        if row in self.nav_indices:
-            idx = self.nav_indices[row]
-            self.stack.setCurrentIndex(idx)
-            if idx == 1:
-                self.vznosy_debt.refresh(self.detail.df_full)
-            elif idx == 4:
-                # карта подхватывает актуальные долги
-                self.map_tab.set_debts(self.energy_debt.get_debts())
-            elif idx == 5:
-                self.energy_debt.refresh(self.detail.df_full)
+    def _nav_click(self, page_idx: int):
+        for btn in self._nav_buttons:
+            btn.set_active(btn._page_idx == page_idx)
+        self.stack.setCurrentIndex(page_idx)
+        if page_idx == 1:
+            self.vznosy_debt.refresh(self.detail.df_full)
+        elif page_idx == 4:
+            self.map_tab.set_debts(self.energy_debt.get_debts())
+        elif page_idx == 5:
+            self.energy_debt.refresh(self.detail.df_full)
 
     # ── Сохранение / загрузка проекта ────────────────────────────────────
 
@@ -4481,110 +4588,184 @@ class MainWindow(QMainWindow):
 
     def _apply_styles(self):
         self.setStyleSheet("""
-            QMainWindow { background: #0f1923; }
+            /* ── Global ───────────────────────────────────────── */
+            QMainWindow { background: #FFFFFF; }
+
+            /* ── Sidebar ──────────────────────────────────────── */
             QWidget#leftPanel {
-                background: #0d1b2a;
-                border-right: 1px solid #1e3a5f;
+                background: #FFFFFF;
+                border-right: 1px solid #E5E7EB;
             }
-            QListWidget#navPanel {
-                background: #0d1b2a; border: none; padding: 0; outline: 0;
+            QWidget#navLogo {
+                background: #FFFFFF;
+                border-bottom: 1px solid #E5E7EB;
             }
-            QListWidget#navPanel::item {
-                color: #8eb3d4; padding: 13px 20px; font-size: 14px;
+            QLabel#navLogoIcon { color: #4F46E5; background: transparent; }
+            QLabel#navLogoText {
+                color: #111827; background: transparent;
+                font-size: 15px; font-weight: 700;
+            }
+            QFrame#navSep { background: #E5E7EB; border: none; }
+            QWidget#navArea { background: #FFFFFF; }
+
+            QWidget#navBtn {
+                background: #FFFFFF;
                 border-left: 3px solid transparent;
             }
-            QListWidget#navPanel::item:selected {
-                background: #1a2e45; color: #64b5f6; border-left: 3px solid #1976d2;
+            QWidget#navBtn:hover { background: #F3F4F6; }
+            QWidget#navBtn[active="true"] {
+                background: #EEF2FF;
+                border-left: 3px solid #4F46E5;
             }
-            QListWidget#navPanel::item:hover:!selected {
-                background: #132336; color: #b0cfe8;
+            QLabel#navIcon  { color: #9CA3AF; background: transparent; }
+            QLabel#navLabel { color: #6B7280; background: transparent; font-size: 13px; }
+            QWidget#navBtn[active="true"] QLabel#navIcon  { color: #4F46E5; }
+            QWidget#navBtn[active="true"] QLabel#navLabel {
+                color: #4F46E5; font-weight: 600;
             }
+
             QPushButton#btnNavAction {
-                background: #0d1b2a; color: #7a9bb8;
-                border: none; border-top: 1px solid #1e3a5f;
-                padding: 11px 20px; font-size: 13px;
-                text-align: left;
+                background: #FFFFFF; color: #9CA3AF;
+                border: none; border-top: 1px solid #E5E7EB;
+                padding: 11px 20px; font-size: 13px; text-align: left;
             }
-            QPushButton#btnNavAction:hover { background: #132336; color: #b0cfe8; }
-            QPushButton#btnNavAction:pressed { background: #0a1520; }
-            QStackedWidget#contentArea { background: #111e2b; }
-            QWidget {
-                background: #111e2b; color: #cdd9e5;
-                font-size: 13px; font-family: 'Segoe UI', 'Arial', sans-serif;
-            }
+            QPushButton#btnNavAction:hover { background: #F3F4F6; color: #374151; }
+            QPushButton#btnNavAction:pressed { background: #E5E7EB; }
+
+            /* ── Content area ─────────────────────────────────── */
+            QStackedWidget#contentArea { background: #F8F9FA; }
+
+            /* ── Page titles ─────────────────────────────────── */
             QLabel#pageTitle {
-                font-size: 20px; font-weight: 700; color: #e8f4fd; background: transparent;
+                font-size: 20px; font-weight: 700;
+                color: #111827; background: transparent;
             }
+
+            /* ── Filter bar ──────────────────────────────────── */
             QFrame#filterFrame {
-                background: #162131; border: 1px solid #1e3a5f; border-radius: 8px;
+                background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px;
             }
-            QLabel#filterLabel { color: #7a9bb8; background: transparent; font-size: 13px; }
+            QLabel#filterLabel { color: #9CA3AF; background: transparent; font-size: 13px; }
+
+            /* ── Inputs ──────────────────────────────────────── */
             QLineEdit#searchInput {
-                background: #0d1b2a; border: 1px solid #2a4a6b; border-radius: 6px;
-                color: #cdd9e5; padding: 7px 12px; font-size: 13px;
+                background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
+                color: #374151; padding: 7px 12px; font-size: 13px;
             }
-            QLineEdit#searchInput:focus { border: 1px solid #1976d2; }
+            QLineEdit#searchInput:focus { border: 1px solid #6366F1; }
             QComboBox#filterCombo {
-                background: #0d1b2a; border: 1px solid #2a4a6b; border-radius: 6px;
-                color: #cdd9e5; padding: 7px 10px; font-size: 13px;
+                background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
+                color: #374151; padding: 7px 10px; font-size: 13px;
             }
             QComboBox#filterCombo::drop-down { border: none; width: 18px; }
             QComboBox QAbstractItemView {
-                background: #0d1b2a; border: 1px solid #2a4a6b;
-                color: #cdd9e5; selection-background-color: #1a2e45;
+                background: #FFFFFF; border: 1px solid #D1D5DB;
+                color: #374151; selection-background-color: #EEF2FF;
+                selection-color: #4F46E5;
             }
             QDateEdit#datePicker {
-                background: #0d1b2a; border: 1px solid #2a4a6b; border-radius: 6px;
-                color: #cdd9e5; padding: 7px 10px; font-size: 13px;
+                background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
+                color: #374151; padding: 7px 10px; font-size: 13px;
             }
             QDateEdit#datePicker::drop-down { border: none; width: 18px; }
+
+            /* ── Buttons ─────────────────────────────────────── */
             QPushButton#btnPrimary {
-                background: #1565c0; color: white; border: none; border-radius: 6px;
+                background: #4F46E5; color: #FFFFFF; border: none; border-radius: 6px;
                 padding: 8px 18px; font-size: 13px; font-weight: 600;
             }
-            QPushButton#btnPrimary:hover  { background: #1976d2; }
-            QPushButton#btnPrimary:pressed { background: #0d47a1; }
+            QPushButton#btnPrimary:hover   { background: #6366F1; }
+            QPushButton#btnPrimary:pressed { background: #4338CA; }
             QPushButton#btnSecondary {
-                background: #1e3a5f; color: #8eb3d4; border: 1px solid #2a4a6b;
-                border-radius: 6px; padding: 8px 14px; font-size: 13px;
+                background: #FFFFFF; color: #374151;
+                border: 1px solid #D1D5DB; border-radius: 6px;
+                padding: 8px 14px; font-size: 13px;
             }
-            QPushButton#btnSecondary:hover { background: #243f63; color: #cdd9e5; }
+            QPushButton#btnSecondary:hover { background: #F3F4F6; color: #111827; }
+
+            /* ── Tables ──────────────────────────────────────── */
             QTableWidget#mainTable {
-                background: #0d1b2a; border: 1px solid #1e3a5f; border-radius: 8px;
-                gridline-color: #1a2733; color: #cdd9e5; font-size: 12px;
-                selection-background-color: #1a3a5a; selection-color: #e8f4fd;
+                background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px;
+                gridline-color: #F3F4F6; color: #374151; font-size: 12px;
+                selection-background-color: #EEF2FF; selection-color: #4F46E5;
             }
             QTableWidget#mainTable QHeaderView::section {
-                background: #0a1520; color: #64b5f6; border: none;
-                border-right: 1px solid #1e3a5f; border-bottom: 2px solid #1976d2;
+                background: #F9FAFB; color: #6B7280; border: none;
+                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #E5E7EB;
                 padding: 8px 10px; font-size: 12px; font-weight: 600;
             }
-            QTableWidget#mainTable::item { padding: 5px 10px; border-bottom: 1px solid #111e2b; }
-            QScrollBar:vertical { background: #0d1b2a; width: 8px; border-radius: 4px; }
-            QScrollBar::handle:vertical { background: #2a4a6b; border-radius: 4px; min-height: 30px; }
-            QScrollBar:horizontal { background: #0d1b2a; height: 8px; }
-            QScrollBar::handle:horizontal { background: #2a4a6b; border-radius: 4px; }
-            QLabel#statusLabel { color: #5a7fa0; background: transparent; font-size: 12px; }
-            QLabel#summaryIncome { color: #81d4a0; background: transparent; font-size: 13px; font-weight: 600; }
-            QLabel#summaryExpense { color: #ef9a9a; background: transparent; font-size: 13px; font-weight: 600; }
+            QTableWidget#mainTable::item {
+                padding: 5px 10px; border-bottom: 1px solid #F3F4F6;
+            }
+
             QTableWidget#summaryTable {
-                background: #0d1b2a; border: 1px solid #1e3a5f; border-radius: 8px;
-                gridline-color: #1a2733; color: #cdd9e5; font-size: 12px;
-                selection-background-color: #1a3a5a; selection-color: #e8f4fd;
+                background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px;
+                gridline-color: #F3F4F6; color: #374151; font-size: 12px;
+                selection-background-color: #EEF2FF; selection-color: #4F46E5;
             }
             QTableWidget#summaryTable QHeaderView::section {
-                background: #0a1520; color: #64b5f6; border: none;
-                border-right: 1px solid #1e3a5f; border-bottom: 2px solid #1976d2;
+                background: #F9FAFB; color: #6B7280; border: none;
+                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #E5E7EB;
                 padding: 8px 10px; font-size: 12px; font-weight: 600;
             }
-            QTableWidget#summaryTable::item { padding: 4px 10px; border-bottom: 1px solid #111e2b; }
+            QTableWidget#summaryTable::item {
+                padding: 4px 10px; border-bottom: 1px solid #F3F4F6;
+            }
+
+            /* ── Viewport backgrounds (Qt QSS quirk fix) ────── */
+            QAbstractScrollArea { background: #FFFFFF; }
+            QAbstractScrollArea > QWidget { background: #FFFFFF; }
+
+            /* ── Scrollbars ──────────────────────────────────── */
+            QScrollBar:vertical {
+                background: #F9FAFB; width: 8px; border-radius: 4px; border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: #D1D5DB; border-radius: 4px; min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover { background: #9CA3AF; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal {
+                background: #F9FAFB; height: 8px; border: none;
+            }
+            QScrollBar::handle:horizontal { background: #D1D5DB; border-radius: 4px; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+            /* ── Status / summary labels ─────────────────────── */
+            QLabel#statusLabel  { color: #9CA3AF; background: transparent; font-size: 12px; }
+            QLabel#summaryIncome  {
+                color: #059669; background: transparent; font-size: 13px; font-weight: 600;
+            }
+            QLabel#summaryExpense {
+                color: #DC2626; background: transparent; font-size: 13px; font-weight: 600;
+            }
         """)
 
 
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
+    _ensure_fonts()
+
     app = QApplication(sys.argv)
     app.setApplicationName("СНТ Финансовый учёт")
+
+    fonts_dir = Path(__file__).parent / "resources" / "fonts"
+    for font_file in fonts_dir.glob("*.ttf"):
+        QFontDatabase.addApplicationFont(str(font_file))
+
+    base_font = QFont("Roboto Slab", 11)
+    app.setFont(base_font)
+
+    palette = app.palette()
+    palette.setColor(QPalette.ColorRole.Window,      QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.Base,        QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#F9FAFB"))
+    palette.setColor(QPalette.ColorRole.WindowText,  QColor("#374151"))
+    palette.setColor(QPalette.ColorRole.Text,        QColor("#374151"))
+    palette.setColor(QPalette.ColorRole.Button,      QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.ButtonText,  QColor("#374151"))
+    app.setPalette(palette)
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
