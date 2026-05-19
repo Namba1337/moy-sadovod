@@ -85,7 +85,7 @@ class _MapView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setStyleSheet("background:#F3F4F6; border:none;")
+        self.setStyleSheet("background:#F6F9F2; border:none;")
 
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
@@ -168,7 +168,7 @@ class MapWidget(QWidget):
         lay.setSpacing(0)
 
         bar = QWidget()
-        bar.setStyleSheet("background:#F8F9FA; border-bottom:1px solid #E5E7EB;")
+        bar.setStyleSheet("background:#F8F9FA; border-bottom:1px solid #D8E0CE;")
         bar_lay = QHBoxLayout(bar)
         bar_lay.setContentsMargins(20, 8, 20, 8)
         bar_lay.setSpacing(10)
@@ -202,7 +202,7 @@ class MapWidget(QWidget):
         lay.addWidget(bar)
 
         legend = QWidget()
-        legend.setStyleSheet("background:#F8F9FA;border-bottom:1px solid #E5E7EB;")
+        legend.setStyleSheet("background:#F6F9F2;border-bottom:1px solid #D8E0CE;")
         legend_lay = QHBoxLayout(legend)
         legend_lay.setContentsMargins(20, 4, 20, 4)
         legend_lay.setSpacing(20)
@@ -226,8 +226,8 @@ class MapWidget(QWidget):
         self._info = QLabel("Кликните на участок чтобы увидеть информацию")
         self._info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._info.setStyleSheet(
-            "background:#F8F9FA; color:#374151; font-size:13px;"
-            "padding:8px; border-top:1px solid #E5E7EB;"
+            "background:#F6F9F2; color:#374151; font-size:13px;"
+            "padding:8px; border-top:1px solid #D8E0CE;"
         )
         lay.addWidget(self._info)
 
