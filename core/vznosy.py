@@ -21,6 +21,7 @@ from typing import Optional
 import pandas as pd
 
 from core import energy
+from core.utils import _read_json, _ensure_df
 
 DATA_DIR = "data"
 VZNOSY_RATES_FILE = os.path.join(DATA_DIR, "snt_vznosy_rates.json")
@@ -39,16 +40,6 @@ KIND_IGNORE_PERIOD = "ignore_period"
 
 
 # ── загрузка / сохранение ─────────────────────────────────────────────
-
-def _read_json(path: str, default):
-    try:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return default
-
 
 def load_rates() -> list:
     """[{"date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"|null, "amount": "...",
@@ -145,10 +136,6 @@ def tariff_at(d: date, rates: list) -> Optional[dict]:
     return best
 
 
-def _tariff_annual_amount(tariff: dict, area: Optional[float]) -> Optional[float]:
-    return _tariff_period_amount(tariff, area)
-
-
 def tariff_amount_for_year(year: int, rates: list,
                            area: Optional[float]) -> tuple[Optional[float], Optional[dict]]:
     jan1 = date(year, 1, 1)
@@ -196,15 +183,24 @@ def _period_override(plot: str, period_from_str: str, period_year: int,
     out: Optional[dict] = None
     for adj in _plot_adjustments(plot, adjustments):
         kind = adj.get("kind")
-        if kind in (KIND_CHARGE_OVERRIDE, KIND_EXEMPT_PERIOD):
+        if kind == KIND_EXEMPT_PERIOD:
             if adj.get("period_from") == period_from_str:
                 out = adj
-        elif kind in (KIND_CHARGE_OVERRIDE, KIND_EXEMPT_YEAR):
+        elif kind == KIND_EXEMPT_YEAR:
             try:
                 if int(adj.get("year")) == period_year:
                     out = adj
             except (TypeError, ValueError):
                 pass
+        elif kind == KIND_CHARGE_OVERRIDE:
+            if adj.get("period_from") == period_from_str:
+                out = adj
+            else:
+                try:
+                    if int(adj.get("year")) == period_year:
+                        out = adj
+                except (TypeError, ValueError):
+                    pass
     return out
 
 
@@ -234,17 +230,6 @@ class PeriodCharge:
     overridden: bool = False
     area_missing: bool = False
     ignored: bool = False           # помечен «Не учитывать»
-
-
-# Алиас для обратной совместимости
-@dataclass
-class YearCharge:
-    year: int
-    tariff: Optional[dict]
-    amount: Optional[float]
-    overridden: bool = False
-    area_missing: bool = False
-    ignored: bool = False
 
 
 def charged_periods_breakdown(plot: str, area: Optional[float], as_of: date,
@@ -305,12 +290,6 @@ def charged_periods_breakdown(plot: str, area: Optional[float], as_of: date,
     return out
 
 
-def charged_years_breakdown(plot: str, area: Optional[float], as_of: date,
-                             rates: list, adjustments: dict) -> list[PeriodCharge]:
-    """Алиас для обратной совместимости — возвращает список PeriodCharge."""
-    return charged_periods_breakdown(plot, area, as_of, rates, adjustments)
-
-
 def charged_for_plot(plot: str, area: Optional[float], as_of: date,
                      rates: list, adjustments: dict) -> float:
     return sum(
@@ -321,28 +300,6 @@ def charged_for_plot(plot: str, area: Optional[float], as_of: date,
 
 # ── платежи ───────────────────────────────────────────────────────────
 
-def _row_amount_for_plot(row: pd.Series, plot: str) -> float:
-    plots = [p.strip() for p in str(row.get("Участок", "")).split(",") if p.strip()]
-    if plot not in plots:
-        return 0.0
-    amount = energy._to_float(row.get("Поступление"))
-    if amount is None:
-        return 0.0
-    if row.get("Категория") == CAT_MIXED:
-        amount /= 2
-    amount /= len(plots)
-    return amount
-
-
-def _ensure_df(df) -> Optional[pd.DataFrame]:
-    if df is None or len(df) == 0:
-        return None
-    needed = {"Дата", "Поступление", "Категория", "Участок"}
-    if not needed.issubset(df.columns):
-        return None
-    return df
-
-
 def payments_breakdown(plot: str, df, adjustments: Optional[dict] = None) -> list[dict]:
     """Хронологический список платежей по ЧВ для участка."""
     out: list[dict] = []
@@ -350,7 +307,7 @@ def payments_breakdown(plot: str, df, adjustments: Optional[dict] = None) -> lis
     if d is not None:
         sub = d[d["Категория"].isin(CATS_VZNOSY_INCOME)].copy()
         for _, row in sub.iterrows():
-            amount = _row_amount_for_plot(row, plot)
+            amount = energy._row_amount_for_plot(row, plot)
             if amount <= 0:
                 continue
             out.append({
@@ -401,17 +358,6 @@ def paid_by_period(plot: str, df, as_of: date,
                 key = _period_key(r)
                 out[key] = out.get(key, 0.0) + p["amount"]
                 break
-    return out
-
-
-def paid_by_year(plot: str, df, as_of: date,
-                 adjustments: Optional[dict] = None) -> dict:
-    """Алиас для обратной совместимости — возвращает {year: sum}."""
-    out: dict = {}
-    for p in payments_breakdown(plot, df, adjustments):
-        if p["date"] is None or p["date"] > as_of:
-            continue
-        out[p["date"].year] = out.get(p["date"].year, 0.0) + p["amount"]
     return out
 
 

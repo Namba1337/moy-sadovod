@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import re
 import json
 import os
@@ -12,6 +12,7 @@ DATA_DIR = "data"
 import pandas as pd
 
 from core import energy
+from core.utils import fmt_money
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QStackedWidget, QLabel, QPushButton,
@@ -19,233 +20,16 @@ from PyQt6.QtWidgets import (
     QDateEdit, QFrame, QFileDialog, QMessageBox, QMenu, QInputDialog, QDialog,
     QCheckBox, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem,
+    QFormLayout, QDialogButtonBox, QScrollArea, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QDate, QPoint, QRectF, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QAction, QPainter, QPixmap, QPen
 
 
-# ======================================================================= #
-#  МОДУЛЬ КАТЕГОРИЗАЦИИ
-# ======================================================================= #
-
-CATEGORY_COLORS = {
-    "Членские взносы":                   QColor(30,  74, 120),
-    "Членские взносы + Электроэнергия":  QColor(20,  90, 100),
-    "Электроэнергия (от садоводов)":     QColor(90,  80,  10),
-    "Оплата электроэнергии (поставщик)": QColor(110, 55,  10),
-    "Налоги и штрафы":                   QColor(120, 30,  30),
-    "Программное обеспечение":           QColor(80,  40, 110),
-    "Материалы и работы":                QColor(20,  90,  40),
-    "Банковские комиссии":               QColor(80,  65,  20),
-    "Возврат":                           QColor(10,  90,  75),
-    "Подотчётные суммы":                 QColor(60,  85,  20),
-    "Прочее":                            QColor(55,  55,  60),
-}
-
-ALL_CATEGORIES = list(CATEGORY_COLORS.keys())
+from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, categorize_row, apply_categorization
 
 
-def categorize_row(row: dict) -> str:
-    text      = str(row.get("Назначение", "")).lower()
-    contragent = str(row.get("Контрагент", "")).lower()
-
-    if "пермэнергосбыт" in contragent or "пермская энергосбытовая" in contragent:
-        return "Оплата электроэнергии (поставщик)"
-
-    electro_words = [
-        "электроэнерги", "электричеств", "эл/энерги", "эл.энерги",
-        "эл.знерги", "злектроэнерги", "эл энерги", "элект.энерги",
-        "электро энерги", "свет", "э/э", "квт", "кВт",
-        "зл.знерги", "электорэнерги", "потреблен", "электролени",
-        "электротовар", "эликтричеств", "эл,энерги", "эл. энерги", "эл. энерги", "эл. энерги",
-    ]
-    member_words = [
-        "членск", "членнск", "чл.взн", "чл взн", "чл взнос",
-        "взносы", "взнос", "садоводческий взнос", "садоводческое товарищество",
-        "общественные нужды", "обществен нужды", "жкх", "ежегодный взнос",
-    ]
-    is_electro = any(w in text for w in electro_words)
-    is_member  = any(w in text for w in member_words)
-
-    if is_electro and is_member:
-        return "Членские взносы + Электроэнергия"
-    if is_electro:
-        return "Электроэнергия (от садоводов)"
-    if is_member:
-        return "Членские взносы"
-
-    if re.search(r"долг|аванс|уч\.19;|2026\s*год|2025\s*год", text):
-        return "Членские взносы"
-
-    if ("контур" in text or "контур" in contragent
-            or "программ" in text or "эвм" in text
-            or "бухгалтер" in text or "модуль" in text):
-        return "Программное обеспечение"
-
-    nalog_words = [
-        "налог","ифнс","казначейств","взыскани","штраф","пени",
-        "нк рф","енс","страховани","фз №125","требование",
-    ]
-    if any(w in text for w in nalog_words):
-        return "Налоги и штрафы"
-
-    if "комисси" in text or "рко" in text or "задолженност" in text:
-        return "Банковские комиссии"
-
-    if "возврат" in text:
-        return "Возврат"
-
-    if "подотчет" in text:
-        return "Подотчётные суммы"
-
-    material_words = [
-        "материал","уборка снега","транспортн","подряд",
-        "строит","хозяйственн","счет на оплату","счёт на оплату",
-        "оплата по счету","оплата по счёту","оплата по договору",
-    ]
-    if any(w in text for w in material_words):
-        return "Материалы и работы"
-    if any(w in contragent for w in ["ип ", "ооо "]):
-        return "Материалы и работы"
-
-    return "Прочее"
-
-
-def apply_categorization(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["Категория"] = df.apply(lambda row: categorize_row(row.to_dict()), axis=1)
-    cols = list(df.columns)
-    cols.remove("Категория")
-    idx = cols.index("Назначение") + 1 if "Назначение" in cols else len(cols)
-    cols.insert(idx, "Категория")
-    return df[cols]
-
-
-
-# ======================================================================= #
-#  МОДУЛЬ ОПРЕДЕЛЕНИЯ УЧАСТКА
-# ======================================================================= #
-from collections import defaultdict as _defaultdict
-
-_PLOTS_FILE = os.path.join(DATA_DIR, "snt_plots.json")
-
-def _load_sadovods():
-    """Загружает пары (участок, владелец) из snt_plots.json."""
-    try:
-        if os.path.exists(_PLOTS_FILE):
-            with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            result = []
-            for entry in data:
-                num = entry.get("num", "")
-                for owner in entry.get("owners", []):
-                    if owner.strip():
-                        result.append((num, owner))
-            return result
-    except Exception:
-        pass
-    return []
-
-def _build_plot_lookup(sadovods):
-    sur = _defaultdict(list)
-    fio = _defaultdict(list)
-    for plot, name in sadovods:
-        n = name.lower().strip()
-        fio[n].append(plot)
-        parts = n.split()
-        if parts:
-            s = parts[0]
-            if plot not in sur[s]:
-                sur[s].append(plot)
-    return sur, fio
-
-_SURNAME_MAP, _FIO_MAP = _build_plot_lookup(_load_sadovods())
-
-_PAT_PLOT = [
-    re.compile(r'участ[а-яё]*\s*[№#]?\s*(\d+(?:/\d+)?)', re.I),
-    re.compile(r'\bуч[.:№#]?\s*(\d+(?:/\d+)?)', re.I),
-]
-_PAT_MULTI = re.compile(r'(?:участ[а-яё]*|уч[.:№#]?)\s*(\d+)\s*[,и]\s*(\d+)', re.I)
-_NOISE = re.compile(
-    r'(?:№|n)\s*\d{3,}[/\-]\d+|м-\d+|счет[а-яё]?\s*[№#]?\s*\d{5,}'
-    r'|дог[а-яё.]*\s*[№#]?\s*[\w\-/]+|нк рф|фз\s*№|требование\s*№'
-    r'|решени[юя].{0,30}№|\d{4,}', re.I)
-
-def _find_in_text(text):
-    clean = _NOISE.sub(' ', text.lower())
-    m = _PAT_MULTI.search(clean)
-    if m:
-        return [m.group(1), m.group(2)]
-    res = []
-    for pat in _PAT_PLOT:
-        for m in pat.finditer(clean):
-            v = m.group(1).strip()
-            if v and v not in res:
-                res.append(v)
-    return res
-
-def _find_by_name(text):
-    t = text.lower()
-    # 1. Полное ФИО (3 слова)
-    for fio_n, plots in _FIO_MAP.items():
-        if fio_n in t:
-            return list(dict.fromkeys(plots))
-    # 2. «Фамилия Имя» (без отчества) — только при однозначном результате
-    seen: dict = {}
-    for fio_n, plots in _FIO_MAP.items():
-        parts = fio_n.split()
-        if len(parts) >= 2:
-            short = parts[0] + " " + parts[1]
-            if len(short) > 5 and re.search(r'\b' + re.escape(short) + r'\b', t):
-                for p in plots:
-                    seen.setdefault(short, [])
-                    if p not in seen[short]:
-                        seen[short].append(p)
-    for short, plots in seen.items():
-        return list(dict.fromkeys(plots))   # первый однозначный
-    # 3. Только фамилия
-    for sur, plots in _SURNAME_MAP.items():
-        if re.search(r'\b' + re.escape(sur) + r'\b', t):
-            return list(dict.fromkeys(plots))
-    return []
-
-def _find_by_contragent(c):
-    parts = re.split(r'/{1,}', c.lower())
-    for p in parts:
-        p = p.strip()
-        if len(p) < 5:
-            continue
-        for fio_n, plots in _FIO_MAP.items():
-            if fio_n in p or p in fio_n:
-                return list(dict.fromkeys(plots))
-        words = p.split()
-        if words and words[0] in _SURNAME_MAP:
-            return list(dict.fromkeys(_SURNAME_MAP[words[0]]))
-    return []
-
-def get_plot(row: dict) -> str:
-    text = str(row.get("Назначение", "") or "")
-    cont = str(row.get("Контрагент",  "") or "")
-    p = _find_in_text(text)
-    if p: return ", ".join(str(x) for x in p)
-    p = _find_by_name(text)
-    if p: return ", ".join(str(x) for x in p[:2])
-    p = _find_by_name(cont)
-    if p: return ", ".join(str(x) for x in p[:2])
-    p = _find_by_contragent(cont)
-    if p: return ", ".join(str(x) for x in p[:2])
-    return ""
-
-def apply_plot_column(df):
-    global _SURNAME_MAP, _FIO_MAP
-    _SURNAME_MAP, _FIO_MAP = _build_plot_lookup(_load_sadovods())
-    df = df.copy()
-    df["Участок"] = df.apply(lambda r: get_plot(r.to_dict()), axis=1)
-    cols = list(df.columns)
-    cols.remove("Участок")
-    ins = cols.index("Категория") + 1 if "Категория" in cols else len(cols)
-    cols.insert(ins, "Участок")
-    return df[cols]
+from ui.plot_detection import get_plot, apply_plot_column, _PLOTS_FILE
 
 # ======================================================================= #
 #  ВКЛАДКА ДЕТАЛИЗАЦИЯ
@@ -278,6 +62,177 @@ class _SortItem(QTableWidgetItem):
         return a < b
 
 
+def _merge_to_summa(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Если в DataFrame есть Поступление/Списание — объединяет их в Сумма.
+    Если Сумма уже есть — ничего не делает."""
+    if "Сумма" in df.columns:
+        return df
+    if "Поступление" not in df.columns and "Списание" not in df.columns:
+        return df
+    inc = pd.to_numeric(df["Поступление"], errors="coerce") if "Поступление" in df.columns \
+        else pd.Series(0.0, index=df.index)
+    exp = pd.to_numeric(df["Списание"],    errors="coerce") if "Списание"    in df.columns \
+        else pd.Series(0.0, index=df.index)
+    summa = inc.fillna(0) - exp.fillna(0)
+    summa = summa.where(summa != 0, other=float("nan"))
+    pos = list(df.columns).index("Поступление") if "Поступление" in df.columns else len(df.columns)
+    df = df.drop(columns=[c for c in ("Поступление", "Списание") if c in df.columns])
+    df.insert(min(pos, len(df.columns)), "Сумма", summa)
+    return df
+
+
+class LoadSettingsDialog(QDialog):
+    """Диалог настроек перед загрузкой файла выписки."""
+
+    _STYLE = """
+        QDialog { background: #111e2b; color: #cdd9e5; }
+        QLabel  { background: transparent; }
+        QLabel#sectionLabel {
+            color: #7a9bb8; font-size: 11px; font-weight: 600;
+            letter-spacing: 0.5px; text-transform: uppercase;
+        }
+        QPushButton#fmtActive {
+            background: #1565c0; color: #ffffff; border: none;
+            border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
+        }
+        QPushButton#fmtInactive {
+            background: #1e3a5f; color: #8eb3d4; border: 1px solid #2a4a6b;
+            border-radius: 6px; padding: 8px 20px; font-size: 13px;
+        }
+        QPushButton#fmtInactive:hover { background: #243f63; color: #cdd9e5; }
+        QPushButton#btnPrimary {
+            background: #1565c0; color: white; border: none;
+            border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
+        }
+        QPushButton#btnPrimary:hover  { background: #1976d2; }
+        QPushButton#btnPrimary:pressed { background: #0d47a1; }
+        QPushButton#btnSecondary {
+            background: #1e3a5f; color: #8eb3d4; border: 1px solid #2a4a6b;
+            border-radius: 6px; padding: 7px 16px; font-size: 13px;
+        }
+        QPushButton#btnSecondary:hover { background: #243f63; color: #cdd9e5; }
+        QCheckBox {
+            color: #cdd9e5; background: transparent; font-size: 13px; spacing: 8px;
+        }
+        QCheckBox::indicator {
+            width: 16px; height: 16px; border-radius: 4px;
+            border: 1px solid #2a4a6b; background: #0d1b2a;
+        }
+        QCheckBox::indicator:checked {
+            background: #1565c0; border-color: #1565c0;
+            image: url(none);
+        }
+        QCheckBox::indicator:hover { border-color: #4a8ac4; }
+        QFrame#divider { background: #1e3a5f; max-height: 1px; }
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Загрузка детализации")
+        self.setModal(True)
+        self.setFixedWidth(400)
+        self._fmt = "sber"
+        self._setup_ui()
+        self.setStyleSheet(self._STYLE)
+
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setSpacing(14)
+
+        # Заголовок
+        title = QLabel("Загрузка детализации")
+        title.setStyleSheet("font-size:15px; font-weight:700; color:#e8f4fd;")
+        lay.addWidget(title)
+
+        div0 = QFrame(objectName="divider")
+        div0.setFixedHeight(1)
+        lay.addWidget(div0)
+
+        # ── Формат файла ──────────────────────────────────────────────────
+        lay.addWidget(QLabel("ФОРМАТ ФАЙЛА", objectName="sectionLabel"))
+
+        fmt_row = QHBoxLayout()
+        fmt_row.setSpacing(8)
+        self._btn_sber = QPushButton("СберБизнес (операции)", objectName="fmtActive")
+        self._btn_snt  = QPushButton("СНТ Учёт",              objectName="fmtInactive")
+        self._btn_sber.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_snt .setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_sber.clicked.connect(lambda: self._set_fmt("sber"))
+        self._btn_snt .clicked.connect(lambda: self._set_fmt("snt"))
+        fmt_row.addWidget(self._btn_sber)
+        fmt_row.addWidget(self._btn_snt)
+        fmt_row.addStretch()
+        lay.addLayout(fmt_row)
+
+        # Подсказка под кнопками формата
+        self._fmt_hint = QLabel()
+        self._fmt_hint.setWordWrap(True)
+        self._fmt_hint.setStyleSheet("color:#5a7fa0; font-size:11px; background:transparent;")
+        lay.addWidget(self._fmt_hint)
+        self._update_hint()
+
+        div1 = QFrame(objectName="divider")
+        div1.setFixedHeight(1)
+        lay.addWidget(div1)
+
+        # ── Автораспределение ─────────────────────────────────────────────
+        lay.addWidget(QLabel("АВТОМАТИЧЕСКОЕ РАСПРЕДЕЛЕНИЕ", objectName="sectionLabel"))
+
+        self.chk_cat  = QCheckBox("Категория")
+        self.chk_plot = QCheckBox("Участок")
+        self.chk_cat .setChecked(True)
+        self.chk_plot.setChecked(True)
+        lay.addWidget(self.chk_cat)
+        lay.addWidget(self.chk_plot)
+
+        div2 = QFrame(objectName="divider")
+        div2.setFixedHeight(1)
+        lay.addWidget(div2)
+
+        # ── Кнопки ────────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        btn_cancel = QPushButton("Отмена",           objectName="btnSecondary")
+        btn_ok     = QPushButton("📂  Выбрать файл", objectName="btnPrimary")
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok    .clicked.connect(self.accept)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        lay.addLayout(btn_row)
+
+    def _set_fmt(self, fmt: str):
+        self._fmt = fmt
+        self._btn_sber.setObjectName("fmtActive"   if fmt == "sber" else "fmtInactive")
+        self._btn_snt .setObjectName("fmtInactive" if fmt == "sber" else "fmtActive")
+        # Перерисовываем стиль после смены objectName
+        for btn in (self._btn_sber, self._btn_snt):
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        self._update_hint()
+
+    def _update_hint(self):
+        if self._fmt == "sber":
+            self._fmt_hint.setText(
+                "Стандартная выгрузка операций из СберБизнес (.xlsx)")
+        else:
+            self._fmt_hint.setText(
+                "Файл в формате программы СНТ Учёт — столбцы уже приведены к нужному виду")
+
+    @property
+    def fmt(self) -> str:
+        return self._fmt
+
+    @property
+    def auto_cat(self) -> bool:
+        return self.chk_cat.isChecked()
+
+    @property
+    def auto_plot(self) -> bool:
+        return self.chk_plot.isChecked()
+
+
 class DetailWidget(QWidget):
     dataLoaded = pyqtSignal(object)   # эмитится после успешной загрузки выписки
 
@@ -301,6 +256,11 @@ class DetailWidget(QWidget):
         self.btn_load.setObjectName("btnPrimary")
         self.btn_load.clicked.connect(self.load_file)
         top_bar.addWidget(self.btn_load)
+
+        btn_excel = QPushButton("📊  Экспорт в Excel", objectName="btnSecondary")
+        btn_excel.clicked.connect(self._export_excel)
+        top_bar.addWidget(btn_excel)
+
         layout.addLayout(top_bar)
 
         # Панель фильтров
@@ -376,22 +336,52 @@ class DetailWidget(QWidget):
 
     # ------------------------------------------------------------------ #
     def load_file(self):
+        settings_dlg = LoadSettingsDialog(self)
+        if settings_dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        fmt       = settings_dlg.fmt
+        auto_cat  = settings_dlg.auto_cat
+        auto_plot = settings_dlg.auto_plot
+
         path, _ = QFileDialog.getOpenFileName(
             self, "Открыть файл выписки", "", "Excel файлы (*.xlsx *.xls)")
         if not path:
             return
         try:
             df = pd.read_excel(path, engine="openpyxl")
+            # Убираем пустые и валютные столбцы (актуально для СберБизнес)
             cols = [c for c in df.columns
                     if not str(c).strip().startswith("Валюта") and str(c).strip() != ""]
             df = df[cols]
-            df.rename(columns={"Контрагент cчёт": "Контрагент счёт"}, inplace=True)
+
+            if fmt == "sber":
+                # СберБизнес: удаляем технические столбцы банка
+                drop_cols = {"Номер", "Номер счёта", "Контрагент счёт", "Контрагент cчёт"}
+                df.drop(columns=[c for c in drop_cols if c in df.columns], inplace=True)
+
+            # Приводим к единому формату: Поступление/Списание → Сумма
+            df = _merge_to_summa(df)
+
             df["Дата"] = pd.to_datetime(df["Дата"], dayfirst=True, errors="coerce")
             df = df[df["Дата"].notna()].copy()
 
-            # ── АВТОКАТЕГОРИЗАЦИЯ + УЧАСТОК ──
-            df = apply_categorization(df)
-            df = apply_plot_column(df)
+            if auto_cat:
+                df = apply_categorization(df)
+            if auto_plot:
+                df = apply_plot_column(df)
+
+            # Баг 1: гарантируем наличие столбцов Категория и Участок
+            if "Категория" not in df.columns:
+                df["Категория"] = ""
+            if "Участок" not in df.columns:
+                df["Участок"] = ""
+
+            # Баг 2: столбец Участок может прийти как float (43.0) — приводим к строке
+            df["Участок"] = df["Участок"].apply(
+                lambda v: "" if pd.isna(v) else
+                str(int(v)) if isinstance(v, float) and v == int(v) else str(v)
+            )
 
             self.df_full = df
             min_d, max_d = df["Дата"].min(), df["Дата"].max()
@@ -407,6 +397,9 @@ class DetailWidget(QWidget):
     # ------------------------------------------------------------------ #
     def load_dataframe(self, df: "pd.DataFrame"):
         """Восстанавливает DataFrame из сохранённого проекта без диалога выбора файла."""
+        drop_cols = {"Номер", "Номер счёта", "Контрагент счёт", "Контрагент cчёт"}
+        df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+        df = _merge_to_summa(df)   # совместимость со старыми проектами
         self.df_full = df
         min_d, max_d = df["Дата"].min(), df["Дата"].max()
         if pd.notna(min_d):
@@ -435,10 +428,10 @@ class DetailWidget(QWidget):
         df = df[(df["Дата"].dt.date >= d_from) & (df["Дата"].dt.date <= d_to)]
 
         op_type = self.combo_type.currentText()
-        if op_type == "Поступления":
-            df = df[df["Поступление"].notna() & (df["Поступление"] > 0)]
-        elif op_type == "Списания":
-            df = df[df["Списание"].notna() & (df["Списание"] > 0)]
+        if op_type == "Поступления" and "Сумма" in df.columns:
+            df = df[pd.to_numeric(df["Сумма"], errors="coerce") > 0]
+        elif op_type == "Списания" and "Сумма" in df.columns:
+            df = df[pd.to_numeric(df["Сумма"], errors="coerce") < 0]
 
         cat_filter = self.combo_cat.currentText()
         if cat_filter != "Все категории":
@@ -467,8 +460,99 @@ class DetailWidget(QWidget):
         self.apply_filters()
 
     # ------------------------------------------------------------------ #
+    def _export_excel(self):
+        if self.df_full is None:
+            QMessageBox.warning(self, "Нет данных", "Сначала загрузите файл выписки.")
+            return
+
+        # Экспортируем текущий отфильтрованный вид (с оригинальными столбцами)
+        df = self.df_full.copy()
+        d_from = self.date_from.date().toPyDate()
+        d_to   = self.date_to.date().toPyDate()
+        df = df[(df["Дата"].dt.date >= d_from) & (df["Дата"].dt.date <= d_to)]
+
+        op_type = self.combo_type.currentText()
+        if op_type == "Поступления" and "Сумма" in df.columns:
+            df = df[pd.to_numeric(df["Сумма"], errors="coerce") > 0]
+        elif op_type == "Списания" and "Сумма" in df.columns:
+            df = df[pd.to_numeric(df["Сумма"], errors="coerce") < 0]
+
+        cat_filter = self.combo_cat.currentText()
+        if cat_filter != "Все категории":
+            df = df[df["Категория"] == cat_filter]
+
+        search = self.search_input.text().strip().lower()
+        if search:
+            mask = (
+                df["Контрагент"].astype(str).str.lower().str.contains(search, na=False) |
+                df["Назначение"].astype(str).str.lower().str.contains(search, na=False)
+            )
+            df = df[mask]
+
+        if df.empty:
+            QMessageBox.information(self, "Нет данных", "После применения фильтров нет строк для экспорта.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт детализации", "детализация.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        if not path.endswith(".xlsx"):
+            path += ".xlsx"
+
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, Alignment, PatternFill
+            from openpyxl.utils import get_column_letter
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Детализация"
+
+            headers = list(df.columns)
+            summa_col_idx = headers.index("Сумма") + 1 if "Сумма" in headers else None
+
+            ws.append(headers)
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center")
+
+            for _, row in df.iterrows():
+                out_row = []
+                for col in headers:
+                    val = row[col]
+                    if col == "Сумма":
+                        num = pd.to_numeric(val, errors="coerce")
+                        out_row.append(float(num) if pd.notna(num) else "")
+                    elif col == "Дата":
+                        out_row.append(val.strftime("%d.%m.%Y") if pd.notna(val) else "")
+                    else:
+                        out_row.append("" if pd.isna(val) else val)
+                ws.append(out_row)
+
+            # Цвет ячеек Сумма: зелёный для поступлений, красный для списаний
+            if summa_col_idx is not None:
+                green_fill = PatternFill("solid", fgColor="C8E6C9")
+                red_fill   = PatternFill("solid", fgColor="FFCDD2")
+                summa_letter = get_column_letter(summa_col_idx)
+                for r in range(2, ws.max_row + 1):
+                    cell = ws[f"{summa_letter}{r}"]
+                    if isinstance(cell.value, (int, float)):
+                        cell.fill  = green_fill if cell.value >= 0 else red_fill
+                        cell.number_format = '#,##0.00 ₽'
+                        cell.alignment = Alignment(horizontal="right")
+
+            # Авто-ширина столбцов
+            for col_cells in ws.columns:
+                max_len = max((len(str(c.value or "")) for c in col_cells), default=0)
+                ws.column_dimensions[col_cells[0].column_letter].width = min(max_len + 4, 60)
+
+            wb.save(path)
+            QMessageBox.information(self, "Экспорт завершён", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка экспорта", str(e))
+
+    # ------------------------------------------------------------------ #
     def _fill_table(self, df: pd.DataFrame):
-        # Блокируем сигнал itemChanged пока заполняем таблицу
         self.table.blockSignals(True)
         self.table.setSortingEnabled(False)
         self.table.clearContents()
@@ -479,9 +563,8 @@ class DetailWidget(QWidget):
         self.table.setHorizontalHeaderLabels(columns)
 
         col_widths = {
-            "Номер": 70, "Номер счёта": 175, "Дата": 95,
-            "Контрагент счёт": 175, "Контрагент": 260,
-            "Поступление": 115, "Списание": 115,
+            "Дата": 95, "Контрагент": 260,
+            "Сумма": 140,
             "Назначение": 340, "Категория": 210, "Участок": 80,
         }
 
@@ -491,29 +574,31 @@ class DetailWidget(QWidget):
 
             for col_idx, col in enumerate(columns):
                 val = row[col]
-                if col == "Дата" and pd.notna(val):
+                if col == "Сумма":
+                    num = pd.to_numeric(val, errors="coerce")
+                    if pd.notna(num) and num > 0:
+                        text = f"{num:,.2f} ₽".replace(",", " ")
+                        fg   = QColor("#81d4a0")
+                    elif pd.notna(num) and num < 0:
+                        text = f"−{abs(num):,.2f} ₽".replace(",", " ")
+                        fg   = QColor("#ef9a9a")
+                    else:
+                        text = ""
+                        fg   = QColor("#cdd9e5")
+                    item = _SortItem(text)
+                    item.setForeground(fg)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+                elif col == "Дата" and pd.notna(val):
                     text = val.strftime("%d.%m.%Y")
-                elif col in ("Поступление", "Списание") and pd.notna(val) and val != "":
-                    try:
-                        text = f"{float(val):,.2f} ₽".replace(",", " ")
-                    except Exception:
-                        text = str(val)
+                    item = _SortItem(text)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
                 else:
                     text = "" if pd.isna(val) else str(val)
-
-                item = _SortItem(text)
-                item.setBackground(row_color)
-                item.setData(Qt.ItemDataRole.UserRole, df_idx)
-
-                if col == "Поступление" and text:
-                    item.setForeground(QColor("#81d4a0"))
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-                elif col == "Списание" and text:
-                    item.setForeground(QColor("#ef9a9a"))
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-                else:
+                    item = _SortItem(text)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
 
+                item.setBackground(row_color)
+                item.setData(Qt.ItemDataRole.UserRole, df_idx)
                 self.table.setItem(row_idx, col_idx, item)
 
         header = self.table.horizontalHeader()
@@ -526,10 +611,14 @@ class DetailWidget(QWidget):
                 header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.ResizeToContents)
 
         self.table.setSortingEnabled(True)
-        self.table.blockSignals(False)  # Снимаем блокировку
+        self.table.blockSignals(False)
 
-        total_in  = pd.to_numeric(df["Поступление"], errors="coerce").sum()
-        total_out = pd.to_numeric(df["Списание"],    errors="coerce").sum()
+        if "Сумма" in df.columns:
+            s = pd.to_numeric(df["Сумма"], errors="coerce")
+            total_in  = s[s > 0].sum()
+            total_out = s[s < 0].abs().sum()
+        else:
+            total_in = total_out = 0.0
         self.lbl_income.setText(f"✅  Поступления: {total_in:,.2f} ₽".replace(",", " "))
         self.lbl_expense.setText(f"🔴  Списания: {total_out:,.2f} ₽".replace(",", " "))
         self.status_label.setText(f"Показано записей: {len(df)}")
@@ -662,13 +751,14 @@ class DetailWidget(QWidget):
                 if cell:
                     cell.setBackground(row_color)
 
-        # Цвет и выравнивание для числовых столбцов
-        if col in ("Поступление", "Списание"):
+        # Цвет и выравнивание для столбца Сумма
+        if col == "Сумма":
             item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-            if item.text():
-                color = QColor("#81d4a0") if col == "Поступление" else QColor("#ef9a9a")
-                item.setForeground(color)
-            else:
+            raw_num = item.text().replace(" ", "").replace("−", "-").replace("₽", "").replace(",", ".")
+            try:
+                num_val = float(raw_num)
+                item.setForeground(QColor("#81d4a0") if num_val > 0 else QColor("#ef9a9a"))
+            except ValueError:
                 item.setForeground(QColor("#cdd9e5"))
 
         self.table.blockSignals(False)
@@ -678,10 +768,10 @@ class DetailWidget(QWidget):
             df_idx = item.data(Qt.ItemDataRole.UserRole)
             if df_idx is not None and df_idx in self.df_full.index:
                 new_text = item.text().strip()
-                if col in ("Поступление", "Списание"):
-                    raw = new_text.replace(" ", "").replace(" ", "").replace("₽", "").replace(",", ".")
+                if col == "Сумма":
+                    raw = new_text.replace(" ", "").replace("−", "-").replace("₽", "").replace(",", ".")
                     try:
-                        self.df_full.at[df_idx, col] = float(raw) if raw else float("nan")
+                        self.df_full.at[df_idx, "Сумма"] = float(raw) if raw else float("nan")
                     except ValueError:
                         pass
                 elif col == "Дата":
@@ -709,15 +799,16 @@ class DetailWidget(QWidget):
             for name, c in col_headers.items():
                 cell = self.table.item(r, c)
                 if cell:
-                    raw = cell.text().replace(" ", "").replace("₽", "").replace(",", ".")
+                    raw = cell.text().replace(" ", "").replace("₽", "").replace("−", "-").replace(",", ".")
                     try:
                         val = float(raw)
                     except ValueError:
                         continue
-                    if name == "Поступление":
-                        total_in  += val
-                    elif name == "Списание":
-                        total_out += val
+                    if name == "Сумма":
+                        if val > 0:
+                            total_in  += val
+                        elif val < 0:
+                            total_out += abs(val)
 
         self.lbl_income.setText(f"✅  Поступления: {total_in:,.2f} ₽".replace(",", " "))
         self.lbl_expense.setText(f"🔴  Списания: {total_out:,.2f} ₽".replace(",", " "))
@@ -1690,17 +1781,6 @@ class PlotsWidget(QWidget):
 #  ВКЛАДКА «УЧАСТКИ»
 # ======================================================================= #            
 
-import json, os, shutil
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog,
-    QMessageBox, QDialog, QLineEdit, QFormLayout, QDialogButtonBox,
-    QFrame, QScrollArea, QSizePolicy,
-)
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon
-
-#
 class OwnersPopup(QDialog):
     """Диалог просмотра/редактирования списка собственников участка."""
 
@@ -2198,327 +2278,8 @@ class DocsWidget(QWidget):
         )
 
 
-# ======================================================================= #
-#  ВКЛАДКА «КАРТА»
-# ======================================================================= #
+from ui.map_widget import MapWidget
 
-class _PlotMarker(QGraphicsEllipseItem):
-    """Кликабельный кружок с номером участка."""
-    R = 16
-
-    def __init__(self, plot_num: str, owners: list, on_click,
-                 color: str | None = None, debt: float | None = None):
-        r = self.R
-        super().__init__(-r, -r, r * 2, r * 2)
-        self._plot_num = plot_num
-        self._owners   = owners
-        self._on_click = on_click
-        self._base_color = QColor(color) if color else QColor("#1565c0")
-        self._hover_color = self._lighten(self._base_color)
-        self._debt = debt
-        self.setBrush(self._base_color)
-        self.setPen(QPen(self._lighten(self._base_color), 2))
-        self.setZValue(1)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setAcceptHoverEvents(True)
-
-        if debt is not None:
-            tip = f"Уч. {plot_num}"
-            if owners:
-                tip += "\n" + ", ".join(owners)
-            if abs(debt) > 0.005:
-                if debt > 0:
-                    tip += f"\nДолг: {debt:,.2f} ₽".replace(",", " ")
-                else:
-                    tip += f"\nАванс: {abs(debt):,.2f} ₽".replace(",", " ")
-            else:
-                tip += "\nБез долга"
-            self.setToolTip(tip)
-
-        lbl = QGraphicsTextItem(plot_num, self)
-        lbl.setDefaultTextColor(QColor("#ffffff"))
-        f = QFont(); f.setPointSize(8); f.setBold(True)
-        lbl.setFont(f)
-        br = lbl.boundingRect()
-        lbl.setPos(-br.width() / 2, -br.height() / 2)
-
-    @staticmethod
-    def _lighten(color: QColor) -> QColor:
-        h, s, v, a = color.getHsv()
-        return QColor.fromHsv(h, max(0, s - 40), min(255, v + 40), a)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._on_click(self._plot_num, self._owners)
-        super().mousePressEvent(event)
-
-    def hoverEnterEvent(self, event):
-        self.setBrush(self._hover_color)
-        self.setPen(QPen(QColor("#ffffff"), 2))
-        super().hoverEnterEvent(event)
-
-    def hoverLeaveEvent(self, event):
-        self.setBrush(self._base_color)
-        self.setPen(QPen(self._lighten(self._base_color), 2))
-        super().hoverLeaveEvent(event)
-
-
-class _MapView(QGraphicsView):
-    """QGraphicsView с зумом колесом мыши."""
-    def __init__(self, scene, map_widget):
-        super().__init__(scene)
-        self._map_widget = map_widget
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setStyleSheet("background:#0f1923; border:none;")
-
-    def wheelEvent(self, event):
-        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.scale(factor, factor)
-
-    def mousePressEvent(self, event):
-        if (event.button() == Qt.MouseButton.LeftButton
-                and self._map_widget._placing_mode):
-            pos = self.mapToScene(event.pos())
-            self._map_widget._on_map_click(pos)
-        else:
-            super().mousePressEvent(event)
-
-
-class MapWidget(QWidget):
-    """Схема-карта участков: загрузи изображение, расставь участки кликом."""
-
-    COORDS_FILE = os.path.join(DATA_DIR, "snt_map_plots.json")
-    IMAGE_FILE  = os.path.join(DATA_DIR, "snt_map_image.json")
-
-    def __init__(self):
-        super().__init__()
-        self._placing_mode = False
-        self._image_path   = self._load_image_path()
-        self._debts: dict = {}
-        self._color_by_debt = True
-        self._setup_ui()
-        self.reload_map()
-
-    # ── Персистентность ──────────────────────────────────────────────────
-
-    def _load_image_path(self) -> str:
-        try:
-            if os.path.exists(self.IMAGE_FILE):
-                with open(self.IMAGE_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f).get("path", "")
-        except Exception:
-            pass
-        return ""
-
-    def _save_image_path(self, path: str):
-        try:
-            with open(self.IMAGE_FILE, "w", encoding="utf-8") as f:
-                json.dump({"path": path}, f, ensure_ascii=False)
-        except Exception:
-            pass
-
-    def _load_plot_coords(self) -> dict:
-        """{"20": [x_px, y_px], ...} — пиксельные координаты на схеме."""
-        try:
-            if os.path.exists(self.COORDS_FILE):
-                with open(self.COORDS_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return {}
-
-    def _save_plot_coords(self, coords: dict):
-        try:
-            with open(self.COORDS_FILE, "w", encoding="utf-8") as f:
-                json.dump(coords, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    def _load_plots_owners(self) -> dict:
-        try:
-            if os.path.exists(os.path.join(DATA_DIR, "snt_plots.json")):
-                with open(os.path.join(DATA_DIR, "snt_plots.json"), "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                return {str(p["num"]): p.get("owners", []) for p in data}
-        except Exception:
-            pass
-        return {}
-
-    # ── UI ───────────────────────────────────────────────────────────────
-
-    def _setup_ui(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-
-        bar = QWidget()
-        bar.setStyleSheet("background:#0d1b2a; border-bottom:1px solid #1e3a5f;")
-        bar_lay = QHBoxLayout(bar)
-        bar_lay.setContentsMargins(20, 8, 20, 8)
-        bar_lay.setSpacing(10)
-
-        title = QLabel("Карта участков", objectName="pageTitle")
-        bar_lay.addWidget(title)
-        bar_lay.addStretch()
-
-        self._hint_lbl = QLabel("")
-        self._hint_lbl.setStyleSheet("color:#5a8ab0; font-size:12px;")
-        bar_lay.addWidget(self._hint_lbl)
-
-        btn_load = QPushButton("🖼  Загрузить схему")
-        btn_load.setObjectName("btnSecondary")
-        btn_load.clicked.connect(self._pick_image)
-        bar_lay.addWidget(btn_load)
-
-        self._btn_place = QPushButton("📍  Расставить участки")
-        self._btn_place.setObjectName("btnSecondary")
-        self._btn_place.setCheckable(True)
-        self._btn_place.toggled.connect(self._toggle_place_mode)
-        bar_lay.addWidget(self._btn_place)
-
-        self._btn_color = QPushButton("🎨  По долгу")
-        self._btn_color.setObjectName("btnSecondary")
-        self._btn_color.setCheckable(True)
-        self._btn_color.setChecked(True)
-        self._btn_color.toggled.connect(self._toggle_color_mode)
-        bar_lay.addWidget(self._btn_color)
-
-        lay.addWidget(bar)
-
-        legend = QWidget()
-        legend.setStyleSheet("background:#0d1b2a;border-bottom:1px solid #1e3a5f;")
-        legend_lay = QHBoxLayout(legend)
-        legend_lay.setContentsMargins(20, 4, 20, 4)
-        legend_lay.setSpacing(20)
-        for color, text in [
-            ("#2e7d32", "■  без долга / аванс"),
-            ("#f9a825", "■  небольшой"),
-            ("#ef6c00", "■  средний"),
-            ("#c62828", "■  крупный"),
-        ]:
-            lb = QLabel(text)
-            lb.setStyleSheet(f"color:{color};background:transparent;font-size:11px;")
-            legend_lay.addWidget(lb)
-        legend_lay.addStretch()
-        lay.addWidget(legend)
-
-        self._scene = QGraphicsScene()
-        self._view  = _MapView(self._scene, self)
-        self._view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-        lay.addWidget(self._view, stretch=1)
-
-        self._info = QLabel("Кликните на участок чтобы увидеть информацию")
-        self._info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._info.setStyleSheet(
-            "background:#0d1b2a; color:#cdd9e5; font-size:13px;"
-            "padding:8px; border-top:1px solid #1e3a5f;"
-        )
-        lay.addWidget(self._info)
-
-    # ── Логика карты ─────────────────────────────────────────────────────
-
-    def _pick_image(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Выберите изображение схемы СНТ", "",
-            "Изображения (*.png *.jpg *.jpeg *.bmp *.webp)"
-        )
-        if path:
-            self._image_path = path
-            self._save_image_path(path)
-            self.reload_map()
-
-    def _toggle_color_mode(self, on: bool):
-        self._color_by_debt = on
-        self.reload_map()
-
-    def _toggle_place_mode(self, on: bool):
-        self._placing_mode = on
-        if on:
-            self._btn_place.setStyleSheet(
-                "QPushButton{background:#b71c1c;color:white;border-radius:6px;padding:4px 12px;}"
-            )
-            self._hint_lbl.setText("Режим расстановки: кликните на схеме → выберите участок")
-            self._view.setDragMode(QGraphicsView.DragMode.NoDrag)
-            self._view.setCursor(Qt.CursorShape.CrossCursor)
-        else:
-            self._btn_place.setStyleSheet("")
-            self._hint_lbl.setText("")
-            self._view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            self._view.setCursor(Qt.CursorShape.ArrowCursor)
-
-    def _on_map_click(self, pos):
-        """Вызывается из _MapView в режиме расстановки."""
-        owners   = self._load_plots_owners()
-        all_nums = sorted(
-            owners.keys() or [str(i) for i in range(1, 51)],
-            key=lambda x: (len(x), x)
-        )
-        num, ok = QInputDialog.getItem(
-            self, "Выбор участка",
-            "Какой участок разместить здесь?",
-            all_nums, 0, False
-        )
-        if ok and num:
-            coords = self._load_plot_coords()
-            coords[num] = [pos.x(), pos.y()]
-            self._save_plot_coords(coords)
-            self.reload_map()
-
-    def _on_plot_click(self, plot_num: str, owners: list):
-        text = " · ".join(owners) if owners else "нет данных"
-        self._info.setText(f"  Участок {plot_num}  —  {text}")
-
-    def reload_map(self):
-        self._scene.clear()
-
-        if self._image_path and os.path.exists(self._image_path):
-            px = QPixmap(self._image_path)
-            if px.isNull():
-                QMessageBox.warning(self, "Ошибка", "Не удалось загрузить изображение.")
-                self._image_path = ""
-                self.reload_map()
-                return
-            item = self._scene.addPixmap(px)
-            self._scene.setSceneRect(QRectF(0, 0, px.width(), px.height()))
-        else:
-            w, h = 820, 520
-            self._scene.setSceneRect(QRectF(0, 0, w, h))
-            self._scene.addRect(
-                QRectF(0, 0, w, h),
-                QPen(Qt.PenStyle.NoPen),
-                QColor("#0a1520")
-            )
-            t = self._scene.addText(
-                "Загрузите схему карты СНТ\n\n"
-                "Нажмите «🖼 Загрузить схему» и выберите скриншот или скан карты.\n"
-                "Затем нажмите «📍 Расставить участки» и кликайте по нужным местам.",
-                QFont("", 13)
-            )
-            t.setDefaultTextColor(QColor("#5a8ab0"))
-            br = t.boundingRect()
-            t.setPos((w - br.width()) / 2, (h - br.height()) / 2)
-
-        coords = self._load_plot_coords()
-        owners = self._load_plots_owners()
-        debts = self._debts if self._color_by_debt else {}
-        for plot_num, pos in coords.items():
-            if len(pos) < 2:
-                continue
-            owner_list = owners.get(str(plot_num), [])
-            info = debts.get(str(plot_num))
-            color = info["color"] if info else None
-            debt = info["debt"] if info else None
-            marker = _PlotMarker(plot_num, owner_list, self._on_plot_click,
-                                 color=color, debt=debt)
-            marker.setPos(pos[0], pos[1])
-            self._scene.addItem(marker)
-
-    def set_debts(self, debts: dict):
-        """Принимает {plot_num: {"debt": float, "color": "#..."}}; перерисовывает."""
-        self._debts = debts or {}
-        self.reload_map()
 
 
 # ======================================================================= #
@@ -2845,8 +2606,8 @@ class PlotCardDialog(QDialog):
             self._set_row(0, [
                 (label, None), ("—", None), ("—", None), ("—", None),
                 ("—", None), ("—", None),
-                (self._fmt_money(base), None),
-                (self._fmt_money(base), self._debt_color(base)),
+                (fmt_money(base), None),
+                (fmt_money(base), self._debt_color(base)),
                 ("", None),
             ], bold=True)
             r0 = 1
@@ -2860,9 +2621,9 @@ class PlotCardDialog(QDialog):
                 kwh_text = f"{c['kwh']:.0f}" if c["kwh"] is not None else "—"
                 rate_text = f"{c['rate']:.2f}" if c["rate"] is not None else "—"
                 amount = c["amount"] or 0.0
-                charged_text = self._fmt_money(c["amount"]) if c["amount"] is not None else "—"
+                charged_text = fmt_money(c["amount"]) if c["amount"] is not None else "—"
                 cum += amount
-                mbal_text = self._fmt_money(amount) if amount else "0 ₽"
+                mbal_text = fmt_money(amount) if amount else "0 ₽"
                 self._set_row(r, [
                     (label, None),
                     None,                              # «Показание» — редактируемое поле
@@ -2871,7 +2632,7 @@ class PlotCardDialog(QDialog):
                     (charged_text, "#f9a825" if c["amount"] else None),
                     ("—", None),
                     (mbal_text, None),
-                    (self._fmt_money(cum), self._debt_color(cum)),
+                    (fmt_money(cum), self._debt_color(cum)),
                     None,                              # кнопка удаления
                 ])
                 self._install_value_editor(r, y, m, c["value"], anomaly_map.get((y, m)))
@@ -2889,9 +2650,9 @@ class PlotCardDialog(QDialog):
                     ("—", None),
                     ("—", None),
                     ("—", None),
-                    (self._fmt_money(paid), "#81d4a0"),
-                    (self._fmt_money(-paid), None),
-                    (self._fmt_money(cum), self._debt_color(cum)),
+                    (fmt_money(paid), "#81d4a0"),
+                    (fmt_money(-paid), None),
+                    (fmt_money(cum), self._debt_color(cum)),
                     ("", None),
                 ])
                 # tooltip с назначением платежа на всю строку
@@ -2912,7 +2673,7 @@ class PlotCardDialog(QDialog):
                     (f"🔧  {evdate.strftime('%d.%m.%Y')}", "#ffd54f"),
                     (reading_text, "#ffd54f"),
                     ("—", None), ("—", None), ("—", None), ("—", None), ("—", None),
-                    (self._fmt_money(cum), self._debt_color(cum)),
+                    (fmt_money(cum), self._debt_color(cum)),
                     None,
                 ])
                 note = repl.get("note", "").strip()
@@ -2929,9 +2690,9 @@ class PlotCardDialog(QDialog):
         bal = energy.balance(self._plot, self._as_of, meters, rates, repls, baseline, self._df)
         if events or base != 0:
             self.summary_lbl.setText(
-                f"Начислено всего: {self._fmt_money(bal.baseline + bal.charged)}  ·  "
-                f"оплачено всего: {self._fmt_money(bal.paid)}  ·  "
-                f"итоговый баланс: {self._fmt_money(bal.debt)}  ·  "
+                f"Начислено всего: {fmt_money(bal.baseline + bal.charged)}  ·  "
+                f"оплачено всего: {fmt_money(bal.paid)}  ·  "
+                f"итоговый баланс: {fmt_money(bal.debt)}  ·  "
                 f"на {self._as_of.strftime('%d.%m.%Y')}"
             )
         else:
@@ -3100,13 +2861,6 @@ class PlotCardDialog(QDialog):
         return reply == QMessageBox.StandardButton.Yes
 
     # ── Прочее ───────────────────────────────────────────────────────────
-    @staticmethod
-    def _fmt_money(v: float) -> str:
-        if v is None:
-            return "—"
-        sign = "-" if v < 0 else ""
-        return f"{sign}{abs(v):,.2f} ₽".replace(",", " ")
-
     @staticmethod
     def _debt_color(v: float) -> str | None:
         if v > 0:
@@ -3492,7 +3246,7 @@ class VznosyCardDialog(QDialog):
                         tariff_text = f"{rate} ₽/м²  (площадь не указана)"
                         tariff_color = "#ef9a9a"
                     else:
-                        tariff_text = f"{rate} ₽/м² · {area:g} м² → {self._fmt_money(y.amount)}"
+                        tariff_text = f"{rate} ₽/м² · {area:g} м² → {fmt_money(y.amount)}"
                         tariff_color = "#cdd9e5"
                 else:
                     tariff_text = f"{y.tariff.get('amount', '?')} ₽"
@@ -3506,13 +3260,13 @@ class VznosyCardDialog(QDialog):
                     amount_text = "—"
                     amount_color = "#ef9a9a" if y.area_missing else "#7a9bb8"
                 else:
-                    amount_text = self._fmt_money(y.amount)
+                    amount_text = fmt_money(y.amount)
                     amount_color = "#f9a825" if y.amount > 0 else "#7a9bb8"
 
                 # Оплачено за период
                 period_key = y.period_from.isoformat()
                 paid_period = py.get(period_key, 0.0)
-                paid_text = self._fmt_money(paid_period) if paid_period else "—"
+                paid_text = fmt_money(paid_period) if paid_period else "—"
                 paid_color = "#81d4a0" if paid_period else "#7a9bb8"
 
                 # Корректировка
@@ -3537,7 +3291,7 @@ class VznosyCardDialog(QDialog):
                     if y.amount is not None:
                         cum += y.amount
                     cum -= paid_period
-                cum_text = self._fmt_money(cum) if not y.ignored else "—"
+                cum_text = fmt_money(cum) if not y.ignored else "—"
                 cum_color = "#ef9a9a" if cum > 0 else ("#81d4a0" if cum < 0 else None)
 
                 self._set_year_row(r, [
@@ -3614,7 +3368,7 @@ class VznosyCardDialog(QDialog):
             else:
                 period_text = "—"
             amount_v = energy._to_float(a.get("amount")) or 0.0
-            amount_text = self._fmt_money(amount_v)
+            amount_text = fmt_money(amount_v)
             note_text = a.get("note", "")
 
             for c, text in enumerate([date_text, kind_label, period_text,
@@ -3639,9 +3393,9 @@ class VznosyCardDialog(QDialog):
 
         # Сводка
         self.summary_lbl.setText(
-            f"Начислено: {self._fmt_money(bal.charged)}  ·  "
-            f"оплачено: {self._fmt_money(bal.paid)}  ·  "
-            f"баланс: {self._fmt_money(bal.debt)}  ·  "
+            f"Начислено: {fmt_money(bal.charged)}  ·  "
+            f"оплачено: {fmt_money(bal.paid)}  ·  "
+            f"баланс: {fmt_money(bal.debt)}  ·  "
             f"на {self._as_of.strftime('%d.%m.%Y')}"
         )
 
@@ -3657,13 +3411,6 @@ class VznosyCardDialog(QDialog):
             it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             self.table.setItem(r, c, it)
         self.table.setRowHeight(r, 28)
-
-    @staticmethod
-    def _fmt_money(v: float | None) -> str:
-        if v is None:
-            return "—"
-        sign = "-" if v < 0 else ""
-        return f"{sign}{abs(v):,.2f} ₽".replace(",", " ")
 
     def _add_adjustment(self, kind: str):
         dlg = VznosyAdjustmentDialog(self._plot, self, default_kind=kind)
@@ -3786,6 +3533,7 @@ class EnergyDebtWidget(QWidget):
         self.date_as_of = QDateEdit(calendarPopup=True, objectName="datePicker",
                                     displayFormat="dd.MM.yyyy")
         self.date_as_of.setDate(QDate.currentDate())
+        self.date_as_of.setMaximumDate(QDate.currentDate())
         self.date_as_of.dateChanged.connect(self._rebuild)
         top.addWidget(self.date_as_of)
 
@@ -3971,11 +3719,11 @@ class EnergyDebtWidget(QWidget):
                 (owner, owner, None, "#cdd9e5", False),
                 (last_reading_text, reading_sort, None, "#cdd9e5", False),
                 (last_date_text, date_sort, None, "#7a9bb8", False),
-                (self._fmt_money(bal.charged), bal.charged, None, "#f9a825" if bal.charged else "#3a5a7a", False),
-                (self._fmt_money(bal.paid), bal.paid, None, "#81d4a0" if bal.paid else "#3a5a7a", False),
-                (self._fmt_money(bal.baseline) if bal.baseline else "—", bal.baseline, None,
+                (fmt_money(bal.charged), bal.charged, None, "#f9a825" if bal.charged else "#3a5a7a", False),
+                (fmt_money(bal.paid), bal.paid, None, "#81d4a0" if bal.paid else "#3a5a7a", False),
+                (fmt_money(bal.baseline) if bal.baseline else "—", bal.baseline, None,
                  "#c97c7c" if bal.baseline else "#3a5a7a", False),
-                (self._fmt_money(bal.debt), bal.debt, color, "#ffffff", True),
+                (fmt_money(bal.debt), bal.debt, color, "#ffffff", True),
                 ("—" if bal.months_without_payment is None else str(bal.months_without_payment),
                  bal.months_without_payment or 0, None,
                  "#ef9a9a" if (bal.months_without_payment or 0) > 3 else "#cdd9e5", False),
@@ -4001,7 +3749,7 @@ class EnergyDebtWidget(QWidget):
 
         self.status_lbl.setText(
             f"Участков: {len(plots)}  ·  должников: {debt_count}  ·  "
-            f"общий долг: {self._fmt_money(total_debt)}"
+            f"общий долг: {fmt_money(total_debt)}"
         )
 
         # Сверка
@@ -4024,13 +3772,13 @@ class EnergyDebtWidget(QWidget):
                 extras = (f"  ·  общий счётчик: {rec.common_kwh:.0f} кВт·ч"
                           f"  ·  частные: {rec.private_kwh:.0f} кВт·ч"
                           f"  ·  потери: {rec.loss_kwh:.0f} кВт·ч"
-                          + (f" ({self._fmt_money(rec.loss_rub)})" if rec.loss_rub else ""))
+                          + (f" ({fmt_money(rec.loss_rub)})" if rec.loss_rub else ""))
             self.recon_lbl.setText(
                 f"<b>Сверка с поставщиком</b> ({rec.period_from} — {rec.period_to}):  "
-                f"начислено садоводам {self._fmt_money(rec.charged_total)}  ·  "
-                f"собрано {self._fmt_money(rec.collected_total)}  ·  "
-                f"уплачено в Пермэнергосбыт {self._fmt_money(rec.paid_to_supplier)}  ·  "
-                f"расхождение {self._fmt_money(rec.collected_total - rec.paid_to_supplier)}"
+                f"начислено садоводам {fmt_money(rec.charged_total)}  ·  "
+                f"собрано {fmt_money(rec.collected_total)}  ·  "
+                f"уплачено в Пермэнергосбыт {fmt_money(rec.paid_to_supplier)}  ·  "
+                f"расхождение {fmt_money(rec.collected_total - rec.paid_to_supplier)}"
                 + extras
             )
         except Exception as e:
@@ -4116,15 +3864,6 @@ class EnergyDebtWidget(QWidget):
                 f"✅  Сформировано {ok} квитанций в:\n{folder}"
             )
 
-    @staticmethod
-    def _fmt_money(v) -> str:
-        if v is None:
-            return "—"
-        if abs(v) < 0.005:
-            return "0 ₽"
-        sign = "-" if v < 0 else ""
-        return f"{sign}{abs(v):,.2f} ₽".replace(",", " ")
-
     def _export_excel(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Экспорт таблицы", "электроэнергия_долги.xlsx", "Excel (*.xlsx)")
@@ -4188,6 +3927,7 @@ class VznosyDebtWidget(QWidget):
         self.date_as_of = QDateEdit(calendarPopup=True, objectName="datePicker",
                                     displayFormat="dd.MM.yyyy")
         self.date_as_of.setDate(QDate.currentDate())
+        self.date_as_of.setMaximumDate(QDate.currentDate())
         self.date_as_of.dateChanged.connect(self._rebuild)
         top.addWidget(self.date_as_of)
 
@@ -4353,11 +4093,11 @@ class VznosyDebtWidget(QWidget):
                 (f"уч. {plot}", plot_sort, None, "#90caf9", True, ""),
                 (owner, owner, None, "#cdd9e5", False, ""),
                 (area_text, area if area is not None else 0.0, None, area_color, False, area_tip),
-                (self._fmt_money(bal.charged), bal.charged, None,
+                (fmt_money(bal.charged), bal.charged, None,
                  "#f9a825" if bal.charged else "#3a5a7a", False, ""),
-                (self._fmt_money(bal.paid), bal.paid, None,
+                (fmt_money(bal.paid), bal.paid, None,
                  "#81d4a0" if bal.paid else "#3a5a7a", False, ""),
-                (self._fmt_money(bal.debt), bal.debt, color, "#ffffff", True, ""),
+                (fmt_money(bal.debt), bal.debt, color, "#ffffff", True, ""),
                 (years_unpaid_text, float(bal.years_unpaid or 0), None,
                  years_unpaid_color, False, ""),
             ]
@@ -4384,9 +4124,9 @@ class VznosyDebtWidget(QWidget):
 
         self.status_lbl.setText(
             f"Участков: {len(plots)}  ·  должников: {debt_count}  ·  "
-            f"начислено всего: {self._fmt_money(total_charged)}  ·  "
-            f"оплачено всего: {self._fmt_money(total_paid)}  ·  "
-            f"общий долг: {self._fmt_money(total_debt)}"
+            f"начислено всего: {fmt_money(total_charged)}  ·  "
+            f"оплачено всего: {fmt_money(total_paid)}  ·  "
+            f"общий долг: {fmt_money(total_debt)}"
         )
 
         self._apply_filter()
@@ -4505,16 +4245,6 @@ class VznosyDebtWidget(QWidget):
             QMessageBox.information(self, "Экспорт завершён", f"Файл сохранён:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка экспорта", str(e))
-
-    @staticmethod
-    def _fmt_money(v) -> str:
-        if v is None:
-            return "—"
-        if abs(v) < 0.005:
-            return "0 ₽"
-        sign = "-" if v < 0 else ""
-        return f"{sign}{abs(v):,.2f} ₽".replace(",", " ")
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
