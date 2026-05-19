@@ -4758,12 +4758,12 @@ class MainWindow(QMainWindow):
     def _apply_styles(self):
         self.setStyleSheet("""
             /* ── Global ───────────────────────────────────────── */
-            QMainWindow { background: #FFFFFF; }
+            QMainWindow { background: #F6F9F2; }
 
             /* ── Custom title bar ────────────────────────────── */
             QWidget#titleBar {
-                background: #FFFFFF;
-                border-bottom: 1px solid #E5E7EB;
+                background: #F6F9F2;
+                border-bottom: 1px solid #D8E0CE;
             }
             QLabel#titleBarText {
                 color: #6B7280;
@@ -4787,26 +4787,26 @@ class MainWindow(QMainWindow):
 
             /* ── Sidebar ──────────────────────────────────────── */
             QWidget#leftPanel {
-                background: #FFFFFF;
-                border-right: 1px solid #E5E7EB;
+                background: #F6F9F2;
+                border-right: 1px solid #D8E0CE;
             }
             QWidget#navLogo {
-                background: #FFFFFF;
-                border-bottom: 1px solid #E5E7EB;
+                background: #F6F9F2;
+                border-bottom: 1px solid #D8E0CE;
             }
             QLabel#navLogoIcon { color: #4F46E5; background: transparent; }
             QLabel#navLogoText {
                 color: #111827; background: transparent;
                 font-size: 15px; font-weight: 700;
             }
-            QFrame#navSep { background: #E5E7EB; border: none; }
-            QWidget#navArea { background: #FFFFFF; }
+            QFrame#navSep { background: #D8E0CE; border: none; }
+            QWidget#navArea { background: #F6F9F2; }
 
             QWidget#navBtn {
-                background: #FFFFFF;
+                background: #F6F9F2;
                 border-left: 3px solid transparent;
             }
-            QWidget#navBtn:hover { background: #F3F4F6; }
+            QWidget#navBtn:hover { background: #E8EEE0; }
             QWidget#navBtn[active="true"] {
                 background: #EEF2FF;
                 border-left: 3px solid #4F46E5;
@@ -4819,15 +4819,15 @@ class MainWindow(QMainWindow):
             }
 
             QPushButton#btnNavAction {
-                background: #FFFFFF; color: #9CA3AF;
-                border: none; border-top: 1px solid #E5E7EB;
+                background: #F6F9F2; color: #9CA3AF;
+                border: none; border-top: 1px solid #D8E0CE;
                 padding: 11px 20px; font-size: 13px; text-align: left;
             }
-            QPushButton#btnNavAction:hover { background: #F3F4F6; color: #374151; }
-            QPushButton#btnNavAction:pressed { background: #E5E7EB; }
+            QPushButton#btnNavAction:hover { background: #E8EEE0; color: #374151; }
+            QPushButton#btnNavAction:pressed { background: #D5DFCA; }
 
             /* ── Content area ─────────────────────────────────── */
-            QStackedWidget#contentArea { background: #F8F9FA; }
+            QStackedWidget#contentArea { background: #F6F9F2; }
 
             /* ── Page titles ─────────────────────────────────── */
             QLabel#pageTitle {
@@ -4837,28 +4837,28 @@ class MainWindow(QMainWindow):
 
             /* ── Filter bar ──────────────────────────────────── */
             QFrame#filterFrame {
-                background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px;
+                background: #FFFFFF; border: 1px solid #D8E0CE; border-radius: 8px;
             }
             QLabel#filterLabel { color: #9CA3AF; background: transparent; font-size: 13px; }
 
             /* ── Inputs ──────────────────────────────────────── */
             QLineEdit#searchInput {
-                background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
+                background: #FFFFFF; border: 1px solid #C8D4BE; border-radius: 6px;
                 color: #374151; padding: 7px 12px; font-size: 13px;
             }
             QLineEdit#searchInput:focus { border: 1px solid #6366F1; }
             QComboBox#filterCombo {
-                background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
+                background: #FFFFFF; border: 1px solid #C8D4BE; border-radius: 6px;
                 color: #374151; padding: 7px 10px; font-size: 13px;
             }
             QComboBox#filterCombo::drop-down { border: none; width: 18px; }
             QComboBox QAbstractItemView {
-                background: #FFFFFF; border: 1px solid #D1D5DB;
+                background: #FFFFFF; border: 1px solid #C8D4BE;
                 color: #374151; selection-background-color: #EEF2FF;
                 selection-color: #4F46E5;
             }
             QDateEdit#datePicker {
-                background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
+                background: #FFFFFF; border: 1px solid #C8D4BE; border-radius: 6px;
                 color: #374151; padding: 7px 10px; font-size: 13px;
             }
             QDateEdit#datePicker::drop-down { border: none; width: 18px; }
@@ -4872,47 +4872,47 @@ class MainWindow(QMainWindow):
             QPushButton#btnPrimary:pressed { background: #4338CA; }
             QPushButton#btnSecondary {
                 background: #FFFFFF; color: #374151;
-                border: 1px solid #D1D5DB; border-radius: 6px;
+                border: 1px solid #C8D4BE; border-radius: 6px;
                 padding: 8px 14px; font-size: 13px;
             }
-            QPushButton#btnSecondary:hover { background: #F3F4F6; color: #111827; }
+            QPushButton#btnSecondary:hover { background: #E8EEE0; color: #111827; }
 
             /* ── Tables ──────────────────────────────────────── */
             QTableWidget#mainTable {
-                background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px;
-                gridline-color: #F3F4F6; color: #374151; font-size: 12px;
+                background: #FFFFFF; border: 1px solid #D8E0CE; border-radius: 8px;
+                gridline-color: #EBF1E4; color: #374151; font-size: 12px;
                 selection-background-color: #EEF2FF; selection-color: #4F46E5;
             }
             QTableWidget#mainTable QHeaderView::section {
-                background: #F9FAFB; color: #6B7280; border: none;
-                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #E5E7EB;
+                background: #EBF1E4; color: #6B7280; border: none;
+                border-right: 1px solid #D8E0CE; border-bottom: 2px solid #D8E0CE;
                 padding: 8px 10px; font-size: 12px; font-weight: 600;
             }
             QTableWidget#mainTable::item {
-                padding: 5px 10px; border-bottom: 1px solid #F3F4F6;
+                padding: 5px 10px; border-bottom: 1px solid #EBF1E4;
             }
 
             QTableWidget#summaryTable {
-                background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px;
-                gridline-color: #F3F4F6; color: #374151; font-size: 12px;
+                background: #FFFFFF; border: 1px solid #D8E0CE; border-radius: 8px;
+                gridline-color: #EBF1E4; color: #374151; font-size: 12px;
                 selection-background-color: #EEF2FF; selection-color: #4F46E5;
             }
             QTableWidget#summaryTable QHeaderView::section {
-                background: #F9FAFB; color: #6B7280; border: none;
-                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #E5E7EB;
+                background: #EBF1E4; color: #6B7280; border: none;
+                border-right: 1px solid #D8E0CE; border-bottom: 2px solid #D8E0CE;
                 padding: 8px 10px; font-size: 12px; font-weight: 600;
             }
             QTableWidget#summaryTable::item {
-                padding: 4px 10px; border-bottom: 1px solid #F3F4F6;
+                padding: 4px 10px; border-bottom: 1px solid #EBF1E4;
             }
 
             /* ── Viewport backgrounds (Qt QSS quirk fix) ────── */
-            QAbstractScrollArea { background: #FFFFFF; }
-            QAbstractScrollArea > QWidget { background: #FFFFFF; }
+            QAbstractScrollArea { background: #F6F9F2; }
+            QAbstractScrollArea > QWidget { background: #F6F9F2; }
 
             /* ── Scrollbars ──────────────────────────────────── */
             QScrollBar:vertical {
-                background: #F9FAFB; width: 8px; border-radius: 4px; border: none;
+                background: #EBF1E4; width: 8px; border-radius: 4px; border: none;
             }
             QScrollBar::handle:vertical {
                 background: #D1D5DB; border-radius: 4px; min-height: 30px;
@@ -4920,7 +4920,7 @@ class MainWindow(QMainWindow):
             QScrollBar::handle:vertical:hover { background: #9CA3AF; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
             QScrollBar:horizontal {
-                background: #F9FAFB; height: 8px; border: none;
+                background: #EBF1E4; height: 8px; border: none;
             }
             QScrollBar::handle:horizontal { background: #D1D5DB; border-radius: 4px; }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
@@ -4951,12 +4951,12 @@ def main():
     app.setFont(base_font)
 
     palette = app.palette()
-    palette.setColor(QPalette.ColorRole.Window,      QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.Window,      QColor("#F6F9F2"))
     palette.setColor(QPalette.ColorRole.Base,        QColor("#FFFFFF"))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#F9FAFB"))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#EBF1E4"))
     palette.setColor(QPalette.ColorRole.WindowText,  QColor("#374151"))
     palette.setColor(QPalette.ColorRole.Text,        QColor("#374151"))
-    palette.setColor(QPalette.ColorRole.Button,      QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.Button,      QColor("#F6F9F2"))
     palette.setColor(QPalette.ColorRole.ButtonText,  QColor("#374151"))
     app.setPalette(palette)
 
