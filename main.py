@@ -4289,7 +4289,7 @@ class _TitleBar(QWidget):
         self._window = window
         self._drag_pos = None
         self.setObjectName("titleBar")
-        self.setFixedHeight(40)
+        self.setFixedHeight(32)
 
         lyt = QHBoxLayout(self)
         lyt.setContentsMargins(16, 0, 0, 0)
@@ -4299,16 +4299,16 @@ class _TitleBar(QWidget):
         lyt.addWidget(title_lbl)
         lyt.addStretch()
 
-        icon_font = QFont("Material Icons")
-        icon_font.setPixelSize(18)
+        icon_font = QFont("Segoe MDL2 Assets")
+        icon_font.setPixelSize(10)
 
         for obj_name, char, slot in [
-            ("btnWinMin",   "", self._minimize),
-            ("btnWinMax",   "", self._toggle_max),
-            ("btnWinClose", "", window.close),
+            ("btnWinMin",   "", self._minimize),
+            ("btnWinMax",   "", self._toggle_max),
+            ("btnWinClose", "", window.close),
         ]:
             btn = QPushButton(char, objectName=obj_name)
-            btn.setFixedSize(46, 40)
+            btn.setFixedSize(46, 32)
             btn.setFont(icon_font)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(slot)
@@ -4329,11 +4329,11 @@ class _TitleBar(QWidget):
         if self._window.isMaximized():
             self._window.showNormal()
             if self._btn_max:
-                self._btn_max.setText("")
+                self._btn_max.setText("")
         else:
             self._window.showMaximized()
             if self._btn_max:
-                self._btn_max.setText("")
+                self._btn_max.setText("")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4345,7 +4345,7 @@ class _TitleBar(QWidget):
             if self._window.isMaximized():
                 self._window.showNormal()
                 if self._btn_max:
-                    self._btn_max.setText("")
+                    self._btn_max.setText("")
                 self._drag_pos = QPoint(self._window.width() // 3, self.height() // 2)
             self._window.move(event.globalPosition().toPoint() - self._drag_pos)
         super().mouseMoveEvent(event)
@@ -4772,15 +4772,18 @@ class MainWindow(QMainWindow):
             }
             QPushButton#btnWinMin, QPushButton#btnWinMax {
                 background: transparent; border: none;
-                color: #9CA3AF;
+                color: #1A1A1A;
             }
-            QPushButton#btnWinMin:hover { background: #F3F4F6; color: #374151; }
-            QPushButton#btnWinMax:hover { background: #F3F4F6; color: #374151; }
+            QPushButton#btnWinMin:hover  { background: rgba(0,0,0,9%); color: #1A1A1A; }
+            QPushButton#btnWinMax:hover  { background: rgba(0,0,0,9%); color: #1A1A1A; }
+            QPushButton#btnWinMin:pressed  { background: rgba(0,0,0,16%); }
+            QPushButton#btnWinMax:pressed  { background: rgba(0,0,0,16%); }
             QPushButton#btnWinClose {
                 background: transparent; border: none;
-                color: #9CA3AF;
+                color: #1A1A1A;
             }
-            QPushButton#btnWinClose:hover { background: #FEE2E2; color: #DC2626; }
+            QPushButton#btnWinClose:hover   { background: #C42B1C; color: #FFFFFF; }
+            QPushButton#btnWinClose:pressed { background: #B22418; color: #FFFFFF; }
 
             /* ── Sidebar ──────────────────────────────────────── */
             QWidget#leftPanel {
