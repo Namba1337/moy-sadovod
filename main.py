@@ -4480,18 +4480,19 @@ class _BrandText(QWidget):
     _GAP_TITLE   = 2     # зазор между МОЙ и САДОВОД, px
     _GAP_SUB     = 0     # зазор между САДОВОД и подписью, px
     _PAD_X       = 0     # горизонтальный отступ-страховка (запас под овершут)
-    _PAD_TOP     = 10    # верхний отступ — сдвигает текст вниз относительно логотипа
+    _PAD_TOP     = 4     # верхний отступ — сдвигает текст вниз относительно логотипа
     _PAD_Y       = 0     # нижний отступ-страховка
 
     def __init__(self, family: str, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        def _font(px: int, spacing: float, weight: int = 400) -> QFont:
+        def _font(px: int, spacing: float, weight: int = 400, stretch: int = 100) -> QFont:
             f = QFont(family)
             f.setPixelSize(px)
             f.setWeight(QFont.Weight(weight))
             f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+            f.setStretch(stretch)
             return f
 
         # (текст, шрифт, цвет, оптическая коррекция X)
@@ -4500,7 +4501,7 @@ class _BrandText(QWidget):
         self._lines = [
             ("МОЙ",                        _font(14, 0.0, 600), self._COLOR_TITLE,  0),
             ("САДОВОД",                    _font(20, 0.0, 600), self._COLOR_TITLE,  0),
-            ("Бухгалтерский учет для СНТ", _font(10, 0.0),      self._COLOR_SUB,    0),
+            ("Бухгалтерский учет для СНТ", _font(10, 0.0, 400, 76),   self._COLOR_SUB,    0),
         ]
         self._gaps = [self._GAP_TITLE, self._GAP_SUB]
         self._layout_lines()
@@ -4749,10 +4750,10 @@ class MainWindow(QMainWindow):
         self._nav_buttons: list[_NavButton] = []
         for icon, label, idx in [
             (chr(0xe587), "Главная",            0),
+            (chr(0xf8ee), "Список участков",    3),
             (chr(0xf191), "Детализация",        1),
             (chr(0xeaec), "Членские взносы",    2),
             (chr(0xec1c), "Электричество",      4),
-            (chr(0xf8ee), "Список участков",    3),
         ]:
             btn = _NavButton(icon, label, idx)
             btn.nav_clicked.connect(self._nav_click)
