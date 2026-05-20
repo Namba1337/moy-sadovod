@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QStyleOption, QStyle,
 )
 from PyQt6.QtCore import Qt, QDate, QPoint, QRectF, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QAction, QPainter, QPixmap, QPen, QFontDatabase, QPalette
+from PyQt6.QtGui import QFont, QFontMetrics, QColor, QAction, QPainter, QPixmap, QPen, QFontDatabase, QPalette
 
 
 from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, categorize_row, apply_categorization
@@ -4406,6 +4406,76 @@ class _NavButton(QWidget):
         super().mousePressEvent(event)
 
 
+class _BrandText(QWidget):
+    """Надпись «МОЙ / САДОВОД / Бухгалтерский учет для СНТ».
+
+    Отрисовка вручную через QPainter: положение каждой строки считается
+    по tightBoundingRect (реальные пиксели глифов), поэтому межстрочные
+    зазоры точны и не зависят от капризов метрик конкретного шрифта.
+    Зазоры _GAP_* — явные константы, их легко подправить.
+    """
+
+    _COLOR_TITLE = QColor("#07414F")
+    _COLOR_SUB   = QColor("#7A8A95")
+    _GAP_TITLE   = 5     # зазор между МОЙ и САДОВОД, px
+    _GAP_SUB     = 5     # зазор между САДОВОД и подписью, px
+    _PAD_X       = 0     # горизонтальный отступ-страховка (запас под овершут)
+    _PAD_Y       = 12     # вертикальный отступ-страховка
+
+    def __init__(self, family: str, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        def _font(px: int, spacing: float, weight: int = 400) -> QFont:
+            f = QFont(family)
+            f.setPixelSize(px)
+            f.setWeight(QFont.Weight(weight))
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+            return f
+
+        # (текст, шрифт, цвет, оптическая коррекция X)
+        # nudge<0 сдвигает строку левее: круглая «С» зрительно кажется
+        # правее плоской «М», поэтому «САДОВОД» слегка выносим влево.
+        self._lines = [
+            ("МОЙ",                        _font(16, 0.0, 600), self._COLOR_TITLE,  0),
+            ("САДОВОД",                    _font(22, 0.0, 600), self._COLOR_TITLE,  0),
+            ("Бухгалтерский учет для СНТ", _font(11, 0.0),      self._COLOR_SUB,    0),
+        ]
+        self._gaps = [self._GAP_TITLE, self._GAP_SUB]
+        self._layout_lines()
+
+    def _layout_lines(self):
+        """Считает draw_x / baseline каждой строки и итоговый размер."""
+        placed = []
+        y = self._PAD_Y
+        right_edge = 0
+        last_bottom = y
+        for i, (text, font, color, nudge) in enumerate(self._lines):
+            fm = QFontMetrics(font)
+            tbr = fm.tightBoundingRect(text)
+            # tbr.top() отрицателен (над базовой линией) → baseline ниже
+            baseline = y - tbr.top()
+            # левый край реальных глифов в _PAD_X + оптическая коррекция
+            draw_x = self._PAD_X - tbr.left() + nudge
+            placed.append((text, font, color, draw_x, baseline))
+            last_bottom = baseline + tbr.bottom() + 1
+            right_edge = max(right_edge, draw_x + tbr.left() + tbr.width())
+            if i < len(self._gaps):
+                y = last_bottom + self._gaps[i]
+        self._placed = placed
+        self.setFixedSize(right_edge + self._PAD_X,
+                          last_bottom + self._PAD_Y)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        for text, font, color, draw_x, baseline in self._placed:
+            p.setFont(font)
+            p.setPen(color)
+            p.drawText(int(draw_x), int(baseline), text)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -4525,23 +4595,20 @@ class MainWindow(QMainWindow):
                 _lbl_logo.setPixmap(_logo_pix)
                 _lbl_logo.setFixedSize(_logo_pix.width(), _logo_pix.height())
                 nav_lyt.addWidget(_lbl_logo, alignment=Qt.AlignmentFlag.AlignVCenter)
-                nav_lyt.addSpacing(8)
+                nav_lyt.addSpacing(2)
         else:
             wordmark = QLabel("Мой Садовод", objectName="navWordmark")
             nav_lyt.addWidget(wordmark)
 
-        # Текстовый блок: МОЙ / САДОВОД / подпись
-        # Rich-text QLabel — line-height управляет межстрочным прямо через CSS
-        _brand_lbl = QLabel(objectName="navBrand")
-        _brand_lbl.setTextFormat(Qt.TextFormat.RichText)
-        _brand_lbl.setText(
-            "<span style='font-size:19px; font-weight:700; color:#07414F;"
-            " letter-spacing:0.5px; line-height:85%;'>"
-            "МОЙ<br>САДОВОД</span><br>"
-            "<span style='font-size:9px; font-weight:400; color:#7A8A95;"
-            " letter-spacing:1.5px;'>Бухгалтерский учет для СНТ</span>"
+        # Текстовый блок «МОЙ / САДОВОД / подпись» — собственная отрисовка
+        _installed = set(QFontDatabase.families())
+        _brand_family = next(
+            (f for f in ("Geologica", "KOT-Eitai Gothic Bold", "KOT-Eitai Gothic",
+                         "Montserrat", "Segoe UI") if f in _installed),
+            "Segoe UI",
         )
-        nav_lyt.addWidget(_brand_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
+        _brand = _BrandText(_brand_family)
+        nav_lyt.addWidget(_brand, alignment=Qt.AlignmentFlag.AlignVCenter)
         nav_lyt.addSpacing(20)
 
         self._nav_buttons: list[_NavButton] = []
@@ -4778,7 +4845,6 @@ class MainWindow(QMainWindow):
                 border-bottom: 1px solid #D6DBE6;
             }
             QLabel#navLogo { background: transparent; }
-            QLabel#navBrand { background: transparent; }
             QLabel#navWordmark {
                 color: #07414F; background: transparent;
                 font-size: 17px; font-weight: 700;
@@ -4970,7 +5036,7 @@ def main():
     app.setApplicationName("СНТ Финансовый учёт")
 
     fonts_dir = Path(__file__).parent / "resources" / "fonts"
-    for font_file in fonts_dir.glob("*.ttf"):
+    for font_file in list(fonts_dir.glob("*.ttf")) + list(fonts_dir.glob("*.OTF")) + list(fonts_dir.glob("*.otf")):
         QFontDatabase.addApplicationFont(str(font_file))
 
     base_font = QFont("Segoe UI", 10)
