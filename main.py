@@ -23,7 +23,9 @@ from PyQt6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QScrollArea, QSizePolicy,
     QStyleOption, QStyle,
 )
-from PyQt6.QtCore import Qt, QDate, QPoint, QRectF, pyqtSignal
+from PyQt6.QtCore import (Qt, QDate, QPoint, QRectF, pyqtSignal,
+                           QPropertyAnimation, QParallelAnimationGroup,
+                           QEasingCurve, QAbstractAnimation)
 from PyQt6.QtGui import QFont, QFontMetrics, QColor, QAction, QPainter, QPixmap, QPen, QFontDatabase, QPalette, QBitmap, QPainterPath
 
 
@@ -4361,7 +4363,7 @@ class _NavButton(QWidget):
         self.setFixedHeight(38)
 
         lyt = QHBoxLayout(self)
-        lyt.setContentsMargins(6, 0, 15, 0)
+        lyt.setContentsMargins(6, 0, 0, 0)
         lyt.setSpacing(7)
 
         self._icon = QLabel(icon_char, objectName="navIcon")
@@ -4389,6 +4391,20 @@ class _NavButton(QWidget):
             w.setProperty("active", prop)
             w.style().unpolish(w)
             w.style().polish(w)
+
+    def set_collapsed(self, collapsed: bool):
+        lyt = self.layout()
+        if collapsed:
+            self._saved_margins = lyt.contentsMargins()
+            m = self._saved_margins.left()
+            lyt.setContentsMargins(m, 0, m, 0)
+            icon_w = max(self._icon.sizeHint().width(), 1)
+            self.setFixedWidth(m * 2 + icon_w)
+        else:
+            if hasattr(self, "_saved_margins"):
+                lyt.setContentsMargins(self._saved_margins)
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4429,6 +4445,20 @@ class _ActionButton(QWidget):
         opt.initFrom(self)
         p = QPainter(self)
         self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, p, self)
+
+    def set_collapsed(self, collapsed: bool):
+        lyt = self.layout()
+        if collapsed:
+            self._saved_margins = lyt.contentsMargins()
+            m = self._saved_margins.left()
+            lyt.setContentsMargins(m, 0, m, 0)
+            icon_w = max(self._icon.sizeHint().width(), 1)
+            self.setFixedWidth(m * 2 + icon_w)
+        else:
+            if hasattr(self, "_saved_margins"):
+                lyt.setContentsMargins(self._saved_margins)
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4660,15 +4690,17 @@ class MainWindow(QMainWindow):
         # ── Левый сайдбар навигации ──────────────────────────────────────
         sidebar = QWidget(objectName="sideNav")
         sidebar.setAutoFillBackground(True)
-        sidebar.setFixedWidth(250)
+        sidebar.setMinimumWidth(250)
+        sidebar.setMaximumWidth(250)
         side_lyt = QVBoxLayout(sidebar)
-        side_lyt.setContentsMargins(16, 0, 16, 16)
+        side_lyt.setContentsMargins(25, 0, 0, 0)
         side_lyt.setSpacing(4)
+        self._side_lyt = side_lyt
 
         # Шапка сайдбара: логотип + текстовый блок «МОЙ / САДОВОД»
         header = QWidget()
         header_lyt = QHBoxLayout(header)
-        header_lyt.setContentsMargins(0, 0, 0, 0)
+        header_lyt.setContentsMargins(0, 0, 5, 0)
         header_lyt.setSpacing(4)
 
         _logo_file = Path(__file__).parent / "resources" / "images" / "logo.png"
@@ -4693,8 +4725,26 @@ class MainWindow(QMainWindow):
         _brand = _BrandText(_brand_family)
         header_lyt.addWidget(_brand, alignment=Qt.AlignmentFlag.AlignVCenter)
         header_lyt.addStretch()
+
+        _chf = QFont("Material Symbols Rounded")
+        _chf.setPixelSize(20)
+        self._chevron_btn = QPushButton(chr(0xe5cb), objectName="btnChevron")
+        self._chevron_btn.setFont(_chf)
+        self._chevron_btn.setFixedSize(16, 32)
+        self._chevron_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._chevron_btn.clicked.connect(self._toggle_sidebar)
+        header_lyt.addWidget(self._chevron_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        self._brand_widget = _brand
+        header.setFixedHeight(52)
         side_lyt.addWidget(header)
         side_lyt.addSpacing(18)
+
+        btn_container = QWidget()
+        btn_container_lyt = QVBoxLayout(btn_container)
+        btn_container_lyt.setContentsMargins(0, 0, 25, 16)
+        btn_container_lyt.setSpacing(4)
+        self._btn_container_lyt = btn_container_lyt
 
         self._nav_buttons: list[_NavButton] = []
         for icon, label, idx in [
@@ -4707,17 +4757,24 @@ class MainWindow(QMainWindow):
             btn = _NavButton(icon, label, idx)
             btn.nav_clicked.connect(self._nav_click)
             self._nav_buttons.append(btn)
-            side_lyt.addWidget(btn)
+            btn_container_lyt.addWidget(btn)
 
-        side_lyt.addStretch()
+        btn_container_lyt.addStretch()
 
         btn_save_proj = _ActionButton(chr(0xf09b), "Сохранить базу СНТ")
         btn_save_proj.clicked.connect(self._save_project)
-        side_lyt.addWidget(btn_save_proj)
+        btn_container_lyt.addWidget(btn_save_proj)
 
         btn_load_proj = _ActionButton(chr(0xf090), "Загрузить базу СНТ")
         btn_load_proj.clicked.connect(self._load_project)
-        side_lyt.addWidget(btn_load_proj)
+        btn_container_lyt.addWidget(btn_load_proj)
+
+        side_lyt.addWidget(btn_container, stretch=1)
+
+        self._sidebar = sidebar
+        self._sidebar_expanded = True
+        self._btn_save = btn_save_proj
+        self._btn_load = btn_load_proj
 
         body_lyt.addWidget(sidebar)
 
@@ -4767,6 +4824,59 @@ class MainWindow(QMainWindow):
             self.vznosy_debt.refresh(self.detail.df_full)
         elif page_idx == 4:
             self.energy_debt.refresh(self.detail.df_full)
+
+    _SIDEBAR_W_EXPANDED  = 250
+    _SIDEBAR_W_COLLAPSED = 88
+
+    def _toggle_sidebar(self):
+        self._sidebar_expanded = not self._sidebar_expanded
+        expanding = self._sidebar_expanded
+
+        start_w = self._SIDEBAR_W_COLLAPSED if expanding else self._SIDEBAR_W_EXPANDED
+        end_w   = self._SIDEBAR_W_EXPANDED  if expanding else self._SIDEBAR_W_COLLAPSED
+
+        if not expanding:
+            self._brand_widget.setVisible(False)
+            self._chevron_btn.setText(chr(0xe5cc))  # chevron_right
+            for btn in self._nav_buttons:
+                btn._lbl.setVisible(False)
+                btn.set_collapsed(True)
+            self._btn_save._lbl.setVisible(False)
+            self._btn_save.set_collapsed(True)
+            self._btn_load._lbl.setVisible(False)
+            self._btn_load.set_collapsed(True)
+            self._btn_container_lyt.setContentsMargins(0, 0, 0, 16)
+
+        if getattr(self, "_sidebar_anim", None) is not None:
+            self._sidebar_anim.stop()
+            self._sidebar_anim = None
+
+        anim = QParallelAnimationGroup(self)
+        for prop in (b"minimumWidth", b"maximumWidth"):
+            a = QPropertyAnimation(self._sidebar, prop)
+            a.setDuration(220)
+            a.setStartValue(start_w)
+            a.setEndValue(end_w)
+            a.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.addAnimation(a)
+
+        def _on_done():
+            self._sidebar_anim = None
+            if expanding:
+                self._btn_container_lyt.setContentsMargins(0, 0, 25, 16)
+                self._brand_widget.setVisible(True)
+                self._chevron_btn.setText(chr(0xe5cb))  # chevron_left
+                for btn in self._nav_buttons:
+                    btn.set_collapsed(False)
+                    btn._lbl.setVisible(True)
+                self._btn_save.set_collapsed(False)
+                self._btn_save._lbl.setVisible(True)
+                self._btn_load.set_collapsed(False)
+                self._btn_load._lbl.setVisible(True)
+
+        anim.finished.connect(_on_done)
+        self._sidebar_anim = anim
+        anim.start()
 
     # ── Сохранение / загрузка проекта ────────────────────────────────────
 
@@ -4907,6 +5017,11 @@ class MainWindow(QMainWindow):
                 background: transparent; border: none;
                 color: #1A1A1A;
             }
+            QPushButton#btnChevron {
+                background: transparent; border: none;
+                color: #6B7686; border-radius: 6px; padding: 0px;
+            }
+            QPushButton#btnChevron:hover { background: #DDE2EC; color: #3C4654; }
             QPushButton#btnWinMin:hover  { background: rgba(0,0,0,9%); color: #1A1A1A; }
             QPushButton#btnWinMax:hover  { background: rgba(0,0,0,9%); color: #1A1A1A; }
             QPushButton#btnWinMin:pressed  { background: rgba(0,0,0,16%); }
