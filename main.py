@@ -4543,9 +4543,7 @@ class _RoundedFrame(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window
-        )
+        self.setWindowFlags(Qt.WindowType.Window)
         self.setWindowTitle("Мой Садовод")
         self.setMinimumSize(1280, 720)
         self.resize(1500, 860)
@@ -4560,15 +4558,27 @@ class MainWindow(QMainWindow):
             self._restore_win_resize()
 
     def _restore_win_resize(self):
-        """Re-add WS_THICKFRAME so Windows provides native resize handles."""
+        """Ensure full WS_OVERLAPPEDWINDOW style + DWM frame for animations."""
         try:
             import ctypes
             hwnd = int(self.winId())
             GWL_STYLE = -16
-            WS_THICKFRAME = 0x00040000
             style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style | WS_THICKFRAME)
-            SWP_FLAGS = 0x0020 | 0x0002 | 0x0001 | 0x0004  # FRAMECHANGED|NOMOVE|NOSIZE|NOZORDER
+            style |= (0x00040000   # WS_THICKFRAME
+                    | 0x00C00000   # WS_CAPTION
+                    | 0x00080000   # WS_SYSMENU
+                    | 0x00020000   # WS_MINIMIZEBOX
+                    | 0x00010000)  # WS_MAXIMIZEBOX
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+
+            class _MARGINS(ctypes.Structure):
+                _fields_ = [("l", ctypes.c_int), ("r", ctypes.c_int),
+                             ("t", ctypes.c_int), ("b", ctypes.c_int)]
+            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(
+                hwnd, ctypes.byref(_MARGINS(-1, -1, -1, -1))
+            )
+
+            SWP_FLAGS = 0x0020 | 0x0002 | 0x0001 | 0x0004
             ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FLAGS)
         except Exception:
             pass
@@ -4598,12 +4608,16 @@ class MainWindow(QMainWindow):
             WM_NCHITTEST  = 0x0084
 
             if msg.message == WM_NCCALCSIZE and msg.wParam:
-                # Remove all non-client area (prevent frame padding)
+                # Collapse non-client area so native chrome is invisible
                 return True, 0
 
             if msg.message == WM_NCHITTEST:
-                HTLEFT = 10; HTRIGHT = 11; HTTOP = 12; HTTOPLEFT = 13
-                HTTOPRIGHT = 14; HTBOTTOM = 15; HTBOTTOMLEFT = 16; HTBOTTOMRIGHT = 17
+                HTCLIENT      = 1
+                HTCAPTION     = 2
+                HTLEFT        = 10; HTRIGHT      = 11
+                HTTOP         = 12; HTTOPLEFT    = 13
+                HTTOPRIGHT    = 14; HTBOTTOM     = 15
+                HTBOTTOMLEFT  = 16; HTBOTTOMRIGHT = 17
 
                 x = ctypes.c_int16(msg.lParam & 0xFFFF).value
                 y = ctypes.c_int16((msg.lParam >> 16) & 0xFFFF).value
@@ -4623,6 +4637,14 @@ class MainWindow(QMainWindow):
                 if on_r:           return True, HTRIGHT
                 if on_t:           return True, HTTOP
                 if on_b:           return True, HTBOTTOM
+
+                # Title bar: HTCAPTION for native drag/snap, HTCLIENT for buttons
+                tb_h = self._title_bar.height()
+                btn_w = 3 * 46  # three 46px window buttons on the right
+                if py < tb_h:
+                    if px >= w - btn_w:
+                        return True, HTCLIENT
+                    return True, HTCAPTION
 
         return False, 0
 
