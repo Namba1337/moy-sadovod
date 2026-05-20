@@ -5122,8 +5122,17 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     _ensure_fonts()
 
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("snt.helper.app")
+
     app = QApplication(sys.argv)
     app.setApplicationName("СНТ Финансовый учёт")
+
+    _icon_path = Path(__file__).parent / "resources" / "images" / "logo_2.ico"
+    if _icon_path.exists():
+        from PyQt6.QtGui import QIcon
+        app.setWindowIcon(QIcon(str(_icon_path)))
 
     fonts_dir = Path(__file__).parent / "resources" / "fonts"
     for font_file in list(fonts_dir.glob("*.ttf")) + list(fonts_dir.glob("*.OTF")) + list(fonts_dir.glob("*.otf")):
@@ -5149,6 +5158,9 @@ def main():
     app.setPalette(palette)
 
     window = MainWindow()
+    if _icon_path.exists():
+        from PyQt6.QtGui import QIcon
+        window.setWindowIcon(QIcon(str(_icon_path)))
     window.show()
     sys.exit(app.exec())
 
