@@ -4372,7 +4372,7 @@ class _NavButton(QWidget):
         self.setFixedHeight(38)
 
         lyt = QHBoxLayout(self)
-        lyt.setContentsMargins(4, 0, 15, 0)
+        lyt.setContentsMargins(6, 0, 15, 0)
         lyt.setSpacing(7)
 
         self._icon = QLabel(icon_char, objectName="navIcon")
