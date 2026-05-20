@@ -4419,7 +4419,7 @@ class _ActionButton(QWidget):
         self.setFixedHeight(38)
 
         lyt = QHBoxLayout(self)
-        lyt.setContentsMargins(14, 0, 15, 0)
+        lyt.setContentsMargins(10, 0, 15, 0)
         lyt.setSpacing(7)
 
         self._icon = QLabel(icon_char, objectName="navIcon")
