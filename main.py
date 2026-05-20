@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QStyleOption, QStyle,
 )
 from PyQt6.QtCore import Qt, QDate, QPoint, QRectF, pyqtSignal
-from PyQt6.QtGui import QFont, QFontMetrics, QColor, QAction, QPainter, QPixmap, QPen, QFontDatabase, QPalette
+from PyQt6.QtGui import QFont, QFontMetrics, QColor, QAction, QPainter, QPixmap, QPen, QFontDatabase, QPalette, QBitmap, QPainterPath
 
 
 from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, categorize_row, apply_categorization
@@ -4418,10 +4418,11 @@ class _BrandText(QWidget):
 
     _COLOR_TITLE = QColor("#07414F")
     _COLOR_SUB   = QColor("#7A8A95")
-    _GAP_TITLE   = 5     # зазор между МОЙ и САДОВОД, px
-    _GAP_SUB     = 5     # зазор между САДОВОД и подписью, px
+    _GAP_TITLE   = 2     # зазор между МОЙ и САДОВОД, px
+    _GAP_SUB     = 0     # зазор между САДОВОД и подписью, px
     _PAD_X       = 0     # горизонтальный отступ-страховка (запас под овершут)
-    _PAD_Y       = 12     # вертикальный отступ-страховка
+    _PAD_TOP     = 10    # верхний отступ — сдвигает текст вниз относительно логотипа
+    _PAD_Y       = 0     # нижний отступ-страховка
 
     def __init__(self, family: str, parent=None):
         super().__init__(parent)
@@ -4438,9 +4439,9 @@ class _BrandText(QWidget):
         # nudge<0 сдвигает строку левее: круглая «С» зрительно кажется
         # правее плоской «М», поэтому «САДОВОД» слегка выносим влево.
         self._lines = [
-            ("МОЙ",                        _font(16, 0.0, 600), self._COLOR_TITLE,  0),
-            ("САДОВОД",                    _font(22, 0.0, 600), self._COLOR_TITLE,  0),
-            ("Бухгалтерский учет для СНТ", _font(11, 0.0),      self._COLOR_SUB,    0),
+            ("МОЙ",                        _font(14, 0.0, 600), self._COLOR_TITLE,  0),
+            ("САДОВОД",                    _font(20, 0.0, 600), self._COLOR_TITLE,  0),
+            ("Бухгалтерский учет для СНТ", _font(10, 0.0),      self._COLOR_SUB,    0),
         ]
         self._gaps = [self._GAP_TITLE, self._GAP_SUB]
         self._layout_lines()
@@ -4448,7 +4449,7 @@ class _BrandText(QWidget):
     def _layout_lines(self):
         """Считает draw_x / baseline каждой строки и итоговый размер."""
         placed = []
-        y = self._PAD_Y
+        y = self._PAD_TOP
         right_edge = 0
         last_bottom = y
         for i, (text, font, color, nudge) in enumerate(self._lines):
@@ -4464,7 +4465,7 @@ class _BrandText(QWidget):
             if i < len(self._gaps):
                 y = last_bottom + self._gaps[i]
         self._placed = placed
-        self.setFixedSize(right_edge + self._PAD_X,
+        self.setFixedSize(right_edge + self._PAD_X + 6,
                           last_bottom + self._PAD_Y)
 
     def paintEvent(self, event):
@@ -4475,6 +4476,28 @@ class _BrandText(QWidget):
             p.setFont(font)
             p.setPen(color)
             p.drawText(int(draw_x), int(baseline), text)
+
+
+class _RoundedFrame(QFrame):
+    """QFrame, который обрезает все дочерние виджеты по скруглённому прямоугольнику.
+
+    Использует QBitmap-маску (setMask), которая физически ограничивает рендеринг
+    всего дерева виджетов внутри скруглённой области — в отличие от QSS border-radius,
+    влияющего только на собственный фон виджета.
+    """
+    _RADIUS = 14
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        bm = QBitmap(self.size())
+        bm.fill(Qt.GlobalColor.color0)          # всё «прозрачно»
+        bp = QPainter(bm)
+        bp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
+        bp.fillPath(path, Qt.GlobalColor.color1)  # скруглённая область «видна»
+        bp.end()
+        self.setMask(bm)
 
 
 class MainWindow(QMainWindow):
@@ -4577,9 +4600,10 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._title_bar)
 
         # Body: левый сайдбар + область контента
-        body = QWidget()
+        body = QWidget(objectName="bodyArea")
+        body.setAutoFillBackground(True)
         body_lyt = QHBoxLayout(body)
-        body_lyt.setContentsMargins(0, 0, 0, 0)
+        body_lyt.setContentsMargins(0, 0, 8, 8)
         body_lyt.setSpacing(0)
 
         # ── Левый сайдбар навигации ──────────────────────────────────────
@@ -4669,7 +4693,13 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.docs)         # 4
         self.stack.addWidget(self.map_tab)      # 5
         self.stack.addWidget(self.energy_debt)  # 6
-        body_lyt.addWidget(self.stack, stretch=1)
+        content_frame = _RoundedFrame(objectName="contentFrame")
+        content_frame.setAutoFillBackground(True)
+        cf_lyt = QVBoxLayout(content_frame)
+        cf_lyt.setContentsMargins(0, 0, 0, 0)
+        cf_lyt.setSpacing(0)
+        cf_lyt.addWidget(self.stack)
+        body_lyt.addWidget(content_frame, stretch=1)
 
         outer.addWidget(body, stretch=1)
 
@@ -4829,12 +4859,11 @@ class MainWindow(QMainWindow):
     def _apply_styles(self):
         self.setStyleSheet("""
             /* ── Global ───────────────────────────────────────── */
-            QMainWindow { background: #F0F3F9; }
+            QMainWindow { background: #E9EDF3; }
 
             /* ── Custom title bar ────────────────────────────── */
             QWidget#titleBar {
                 background: #E9EDF3;
-                border-bottom: 1px solid #E0E5EC;
             }
             QPushButton#btnWinMin, QPushButton#btnWinMax {
                 background: transparent; border: none;
@@ -4854,7 +4883,6 @@ class MainWindow(QMainWindow):
             /* ── Left navigation sidebar ──────────────────────── */
             QWidget#sideNav {
                 background: #E9EDF3;
-                border-right: 1px solid #D6DBE6;
             }
             QLabel#navLogo { background: transparent; }
             QWidget#navBtn { background: transparent; border-radius: 8px; }
@@ -4876,7 +4904,12 @@ class MainWindow(QMainWindow):
             QPushButton#btnNavAction:pressed { background: #CBD2E0; }
 
             /* ── Content area ─────────────────────────────────── */
-            QStackedWidget#contentArea { background: #F0F3F9; }
+            QWidget#bodyArea { background: #E9EDF3; }
+            QFrame#contentFrame {
+                background: #F4F6FA;
+                border-radius: 14px;
+            }
+            QStackedWidget#contentArea { background: transparent; }
 
             /* ── Page titles ─────────────────────────────────── */
             QLabel#pageTitle {
