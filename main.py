@@ -345,7 +345,7 @@ class DetailWidget(QWidget):
         layout.addWidget(self.status_label)
 
         self.table = QTableWidget(objectName="mainTable")
-        self.table.setAlternatingRowColors(False)
+        self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -1541,7 +1541,7 @@ class PlotsWidget(QWidget):
         layout.addWidget(self.status_label)
 
         self.table = QTableWidget(objectName="mainTable")
-        self.table.setAlternatingRowColors(False)
+        self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -2251,7 +2251,7 @@ class DocsWidget(QWidget):
         layout.addWidget(self.status_label)
 
         self.table = QTableWidget(objectName="mainTable")
-        self.table.setAlternatingRowColors(False)
+        self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -2312,6 +2312,7 @@ class DocsWidget(QWidget):
 
 
 from ui.map_widget import MapWidget
+from ui.home_widget import HomeWidget
 
 
 
@@ -4295,8 +4296,6 @@ class _TitleBar(QWidget):
         lyt.setContentsMargins(16, 0, 0, 0)
         lyt.setSpacing(0)
 
-        title_lbl = QLabel("СНТ — Финансовый учёт", objectName="titleBarText")
-        lyt.addWidget(title_lbl)
         lyt.addStretch()
 
         icon_font = QFont("Segoe MDL2 Assets")
@@ -4361,7 +4360,7 @@ class _TitleBar(QWidget):
 
 
 class _NavButton(QWidget):
-    """Sidebar nav item: Material Icon glyph + Roboto Slab label."""
+    """Top-nav pill: Material Icon glyph + Roboto Slab label."""
     nav_clicked = pyqtSignal(int)
 
     def __init__(self, icon_char: str, label: str, page_idx: int, parent=None):
@@ -4370,17 +4369,16 @@ class _NavButton(QWidget):
         self.setObjectName("navBtn")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
-        self.setFixedHeight(46)
+        self.setFixedHeight(38)
 
         lyt = QHBoxLayout(self)
-        lyt.setContentsMargins(20, 0, 16, 0)
-        lyt.setSpacing(12)
+        lyt.setContentsMargins(14, 0, 15, 0)
+        lyt.setSpacing(7)
 
         self._icon = QLabel(icon_char, objectName="navIcon")
         icon_font = QFont("Material Icons")
-        icon_font.setPixelSize(20)
+        icon_font.setPixelSize(17)
         self._icon.setFont(icon_font)
-        self._icon.setFixedWidth(22)
         self._icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self._lbl = QLabel(label, objectName="navLabel")
@@ -4388,7 +4386,6 @@ class _NavButton(QWidget):
 
         lyt.addWidget(self._icon)
         lyt.addWidget(self._lbl)
-        lyt.addStretch()
 
     def paintEvent(self, event):
         opt = QStyleOption()
@@ -4415,7 +4412,7 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window
         )
-        self.setWindowTitle("СНТ — Финансовый учёт")
+        self.setWindowTitle("Мой Садовод")
         self.setMinimumSize(1280, 720)
         self.resize(1500, 860)
         self._setup_ui()
@@ -4500,7 +4497,7 @@ class MainWindow(QMainWindow):
         central.setAutoFillBackground(True)
         self.setCentralWidget(central)
 
-        # Outer vertical layout: custom title bar on top, then sidebar + content
+        # Outer layout: title bar, top navigation, content stack
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -4508,58 +4505,56 @@ class MainWindow(QMainWindow):
         self._title_bar = _TitleBar(self)
         outer.addWidget(self._title_bar)
 
-        content_w = QWidget()
-        content_w.setAutoFillBackground(True)
-        outer.addWidget(content_w, stretch=1)
+        # Top navigation bar
+        top_nav = QWidget(objectName="topNav")
+        top_nav.setAutoFillBackground(True)
+        top_nav.setFixedHeight(76)
+        nav_lyt = QHBoxLayout(top_nav)
+        nav_lyt.setContentsMargins(18, 0, 18, 0)
+        nav_lyt.setSpacing(6)
 
-        root = QHBoxLayout(content_w)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        # ── Логотип: полный PNG пропорционально уменьшен до высоты навбара ────
+        _logo_file = Path(__file__).parent / "resources" / "images" / "logo.png"
+        if _logo_file.exists():
+            _pix = QPixmap(str(_logo_file))
+            if not _pix.isNull():
+                _logo_pix = _pix.scaledToHeight(
+                    66, Qt.TransformationMode.SmoothTransformation
+                )
+                _lbl_logo = QLabel(objectName="navLogo")
+                _lbl_logo.setPixmap(_logo_pix)
+                _lbl_logo.setFixedSize(_logo_pix.width(), _logo_pix.height())
+                nav_lyt.addWidget(_lbl_logo, alignment=Qt.AlignmentFlag.AlignVCenter)
+                nav_lyt.addSpacing(8)
+        else:
+            wordmark = QLabel("Мой Садовод", objectName="navWordmark")
+            nav_lyt.addWidget(wordmark)
 
-        left_panel = QWidget(objectName="leftPanel")
-        left_panel.setFixedWidth(220)
-        left_lyt = QVBoxLayout(left_panel)
-        left_lyt.setContentsMargins(0, 0, 0, 0)
-        left_lyt.setSpacing(0)
+        # Текстовый блок: МОЙ / САДОВОД / подпись
+        _brand_box = QVBoxLayout()
+        _brand_box.setSpacing(0)
+        _brand_box.setContentsMargins(0, 0, 0, 0)
+        _lbl_moy     = QLabel("МОЙ",     objectName="navBrandTitle")
+        _lbl_sadovod = QLabel("САДОВОД", objectName="navBrandTitle")
+        _lbl_sub     = QLabel("Бухгалтерский учет для СНТ",
+                              objectName="navBrandSub")
+        _brand_box.addStretch()
+        _brand_box.addWidget(_lbl_moy)
+        _brand_box.addWidget(_lbl_sadovod)
+        _brand_box.addWidget(_lbl_sub)
+        _brand_box.addStretch()
+        nav_lyt.addLayout(_brand_box)
+        nav_lyt.addSpacing(20)
 
-        # ── Logo ─────────────────────────────────────────────────────────
-        logo_widget = QWidget(objectName="navLogo")
-        logo_widget.setAutoFillBackground(True)
-        logo_widget.setFixedHeight(64)
-        logo_lyt = QHBoxLayout(logo_widget)
-        logo_lyt.setContentsMargins(20, 0, 16, 0)
-        logo_lyt.setSpacing(10)
-        logo_icon = QLabel("", objectName="navLogoIcon")
-        lf = QFont("Material Icons")
-        lf.setPixelSize(24)
-        logo_icon.setFont(lf)
-        logo_icon.setFixedWidth(26)
-        logo_text = QLabel("СНТ Учёт", objectName="navLogoText")
-        logo_lyt.addWidget(logo_icon)
-        logo_lyt.addWidget(logo_text)
-        logo_lyt.addStretch()
-        left_lyt.addWidget(logo_widget)
-
-        nav_sep = QFrame(objectName="navSep")
-        nav_sep.setFrameShape(QFrame.Shape.HLine)
-        nav_sep.setFixedHeight(1)
-        left_lyt.addWidget(nav_sep)
-
-        # ── Nav items ─────────────────────────────────────────────────────
         self._nav_buttons: list[_NavButton] = []
-        nav_container = QWidget(objectName="navArea")
-        nav_container.setAutoFillBackground(True)
-        nav_lyt = QVBoxLayout(nav_container)
-        nav_lyt.setContentsMargins(0, 10, 0, 10)
-        nav_lyt.setSpacing(2)
-
         for icon, label, idx in [
-            ("", "Детализация",     0),
-            ("", "Членские взносы", 1),
-            ("", "Электричество",   5),
-            ("", "Участки",         2),
-            ("", "Документы",       3),
-            ("", "Карта",           4),
+            (chr(0xe88a), "Главная",         0),
+            (chr(0xe8b0), "Детализация",     1),
+            (chr(0xe850), "Членские взносы", 2),
+            (chr(0xe3e7), "Электричество",   6),
+            (chr(0xe8f0), "Участки",         3),
+            (chr(0xe2c7), "Документы",       4),
+            (chr(0xe55b), "Карта",           5),
         ]:
             btn = _NavButton(icon, label, idx)
             btn.nav_clicked.connect(self._nav_click)
@@ -4567,40 +4562,39 @@ class MainWindow(QMainWindow):
             nav_lyt.addWidget(btn)
 
         nav_lyt.addStretch()
-        left_lyt.addWidget(nav_container, stretch=1)
 
-        # ── Bottom action buttons ─────────────────────────────────────────
-        btn_save_proj = QPushButton("Сохранить проект")
-        btn_save_proj.setObjectName("btnNavAction")
+        btn_save_proj = QPushButton("Сохранить проект", objectName="btnNavAction")
         btn_save_proj.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_save_proj.clicked.connect(self._save_project)
+        nav_lyt.addWidget(btn_save_proj)
 
-        btn_load_proj = QPushButton("Загрузить проект")
-        btn_load_proj.setObjectName("btnNavAction")
+        btn_load_proj = QPushButton("Загрузить проект", objectName="btnNavAction")
         btn_load_proj.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_load_proj.clicked.connect(self._load_project)
+        nav_lyt.addWidget(btn_load_proj)
 
-        left_lyt.addWidget(btn_save_proj)
-        left_lyt.addWidget(btn_load_proj)
-        root.addWidget(left_panel)
+        outer.addWidget(top_nav)
 
+        # Content stack
         self.stack = QStackedWidget(objectName="contentArea")
+        self.home        = HomeWidget()
         self.detail      = DetailWidget()
         self.vznosy_debt = VznosyDebtWidget()
         self.plots       = PlotsWidget()
         self.docs        = DocsWidget()
         self.map_tab     = MapWidget()
         self.energy_debt = EnergyDebtWidget()
-        for tab in (self.detail, self.vznosy_debt, self.plots,
+        for tab in (self.home, self.detail, self.vznosy_debt, self.plots,
                     self.docs, self.map_tab, self.energy_debt):
             tab.setAutoFillBackground(True)
-        self.stack.addWidget(self.detail)       # 0
-        self.stack.addWidget(self.vznosy_debt)  # 1
-        self.stack.addWidget(self.plots)        # 2
-        self.stack.addWidget(self.docs)         # 3
-        self.stack.addWidget(self.map_tab)      # 4
-        self.stack.addWidget(self.energy_debt)  # 5
-        root.addWidget(self.stack, stretch=1)
+        self.stack.addWidget(self.home)         # 0
+        self.stack.addWidget(self.detail)       # 1
+        self.stack.addWidget(self.vznosy_debt)  # 2
+        self.stack.addWidget(self.plots)        # 3
+        self.stack.addWidget(self.docs)         # 4
+        self.stack.addWidget(self.map_tab)      # 5
+        self.stack.addWidget(self.energy_debt)  # 6
+        outer.addWidget(self.stack, stretch=1)
 
         # Подписки на загрузку выписки
         self.detail.dataLoaded.connect(self.vznosy_debt.refresh)
@@ -4614,17 +4608,17 @@ class MainWindow(QMainWindow):
         self.plots.plotsUpdated.connect(self.detail.refresh_plot_column)
         self.plots.plotsUpdated.connect(self.docs.refresh_plots)
 
-        self._nav_click(0)  # initial page: Детализация
+        self._nav_click(0)  # initial page: Главная
 
     def _nav_click(self, page_idx: int):
         for btn in self._nav_buttons:
             btn.set_active(btn._page_idx == page_idx)
         self.stack.setCurrentIndex(page_idx)
-        if page_idx == 1:
+        if page_idx == 2:
             self.vznosy_debt.refresh(self.detail.df_full)
-        elif page_idx == 4:
-            self.map_tab.set_debts(self.energy_debt.get_debts())
         elif page_idx == 5:
+            self.map_tab.set_debts(self.energy_debt.get_debts())
+        elif page_idx == 6:
             self.energy_debt.refresh(self.detail.df_full)
 
     # ── Сохранение / загрузка проекта ────────────────────────────────────
@@ -4758,17 +4752,12 @@ class MainWindow(QMainWindow):
     def _apply_styles(self):
         self.setStyleSheet("""
             /* ── Global ───────────────────────────────────────── */
-            QMainWindow { background: #F6F9F2; }
+            QMainWindow { background: #F0F3F9; }
 
             /* ── Custom title bar ────────────────────────────── */
             QWidget#titleBar {
-                background: #F6F9F2;
-                border-bottom: 1px solid #D8E0CE;
-            }
-            QLabel#titleBarText {
-                color: #6B7280;
-                font-size: 12px;
-                background: transparent;
+                background: #E9EDF3;
+                border-bottom: 1px solid #E0E5EC;
             }
             QPushButton#btnWinMin, QPushButton#btnWinMax {
                 background: transparent; border: none;
@@ -4785,150 +4774,196 @@ class MainWindow(QMainWindow):
             QPushButton#btnWinClose:hover   { background: #C42B1C; color: #FFFFFF; }
             QPushButton#btnWinClose:pressed { background: #B22418; color: #FFFFFF; }
 
-            /* ── Sidebar ──────────────────────────────────────── */
-            QWidget#leftPanel {
-                background: #F6F9F2;
-                border-right: 1px solid #D8E0CE;
+            /* ── Top navigation bar ───────────────────────────── */
+            QWidget#topNav {
+                background: #E9EDF3;
+                border-bottom: 1px solid #D6DBE6;
             }
-            QWidget#navLogo {
-                background: #F6F9F2;
-                border-bottom: 1px solid #D8E0CE;
+            QLabel#navLogo { background: transparent; }
+            QLabel#navBrandTitle {
+                color: #07414F; background: transparent;
+                font-size: 15px; font-weight: 700; letter-spacing: 1px;
             }
-            QLabel#navLogoIcon { color: #4F46E5; background: transparent; }
-            QLabel#navLogoText {
-                color: #111827; background: transparent;
-                font-size: 15px; font-weight: 700;
+            QLabel#navBrandSub {
+                color: #7A8A95; background: transparent;
+                font-size: 10px; font-weight: 400;
             }
-            QFrame#navSep { background: #D8E0CE; border: none; }
-            QWidget#navArea { background: #F6F9F2; }
-
-            QWidget#navBtn {
-                background: #F6F9F2;
-                border-left: 3px solid transparent;
+            QLabel#navWordmark {
+                color: #07414F; background: transparent;
+                font-size: 17px; font-weight: 700;
             }
-            QWidget#navBtn:hover { background: #E8EEE0; }
-            QWidget#navBtn[active="true"] {
-                background: #EEF2FF;
-                border-left: 3px solid #4F46E5;
-            }
-            QLabel#navIcon  { color: #9CA3AF; background: transparent; }
-            QLabel#navLabel { color: #6B7280; background: transparent; font-size: 13px; }
-            QWidget#navBtn[active="true"] QLabel#navIcon  { color: #4F46E5; }
+            QWidget#navBtn { background: transparent; border-radius: 8px; }
+            QWidget#navBtn:hover { background: #DDE2EC; }
+            QWidget#navBtn[active="true"] { background: #07414F; }
+            QLabel#navIcon  { color: #6B7686; background: transparent; }
+            QLabel#navLabel { color: #3C4654; background: transparent; font-size: 13px; }
+            QWidget#navBtn[active="true"] QLabel#navIcon  { color: #FFFFFF; }
             QWidget#navBtn[active="true"] QLabel#navLabel {
-                color: #4F46E5; font-weight: 600;
+                color: #FFFFFF; font-weight: 600;
             }
 
             QPushButton#btnNavAction {
-                background: #F6F9F2; color: #9CA3AF;
-                border: none; border-top: 1px solid #D8E0CE;
-                padding: 11px 20px; font-size: 13px; text-align: left;
+                background: #FFFFFF; color: #3C4654;
+                border: 1px solid #D5DCE4; border-radius: 8px;
+                padding: 7px 14px; font-size: 12px;
             }
-            QPushButton#btnNavAction:hover { background: #E8EEE0; color: #374151; }
-            QPushButton#btnNavAction:pressed { background: #D5DFCA; }
+            QPushButton#btnNavAction:hover { background: #D7DCE8; color: #1F2937; }
+            QPushButton#btnNavAction:pressed { background: #CBD2E0; }
 
             /* ── Content area ─────────────────────────────────── */
-            QStackedWidget#contentArea { background: #F6F9F2; }
+            QStackedWidget#contentArea { background: #F0F3F9; }
 
             /* ── Page titles ─────────────────────────────────── */
             QLabel#pageTitle {
                 font-size: 20px; font-weight: 700;
-                color: #111827; background: transparent;
+                color: #1F2937; background: transparent;
             }
+
+            /* ── Dashboard «Главная» ──────────────────────────── */
+            QScrollArea#homeScroll { background: #F0F3F9; border: none; }
+            QWidget#homeContent { background: #F0F3F9; }
+            QFrame#dashCard {
+                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 14px;
+            }
+            QLabel#cardTitleGreen {
+                color: #57A05C; background: transparent;
+                font-size: 17px; font-weight: 700;
+            }
+            QLabel#cardTitle {
+                color: #1F2937; background: transparent;
+                font-size: 15px; font-weight: 700;
+            }
+            QWidget#statCard {
+                background: #F6F8FA; border: 1px solid #E6EAEF; border-radius: 10px;
+            }
+            QLabel#statIcon { color: #2F7D55; background: transparent; }
+            QLabel#statCaption { color: #6B7280; background: transparent; font-size: 12px; }
+            QLabel#statValue {
+                color: #1F2937; background: transparent;
+                font-size: 22px; font-weight: 700;
+            }
+            QWidget#activityItem { background: transparent; border-radius: 8px; }
+            QWidget#activityItem:hover { background: #F1F5F9; }
+            QLabel#activityCheck { color: #2E9E5B; background: transparent; }
+            QLabel#activityTitle { color: #1F2937; background: transparent; font-size: 12px; }
+            QLabel#activityDate { color: #9AA3AE; background: transparent; font-size: 11px; }
+            QLabel#footerText { color: #9AA3AE; background: transparent; font-size: 12px; }
+            QPushButton#chartPeriodBtn {
+                background: #F6F8FA; color: #3C4654;
+                border: 1px solid #D5DCE4; border-radius: 6px;
+                padding: 5px 12px; font-size: 12px;
+            }
+            QPushButton#chartPeriodBtn:hover { background: #EEF1F5; }
+            QPushButton#chartMenuBtn {
+                background: #F6F8FA; color: #6B7280;
+                border: 1px solid #D5DCE4; border-radius: 6px;
+            }
+            QPushButton#chartMenuBtn:hover { background: #EEF1F5; }
 
             /* ── Filter bar ──────────────────────────────────── */
             QFrame#filterFrame {
-                background: #FFFFFF; border: 1px solid #D8E0CE; border-radius: 8px;
+                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 8px;
             }
-            QLabel#filterLabel { color: #9CA3AF; background: transparent; font-size: 13px; }
+            QLabel#filterLabel { color: #9AA3AE; background: transparent; font-size: 13px; }
 
             /* ── Inputs ──────────────────────────────────────── */
             QLineEdit#searchInput {
-                background: #FFFFFF; border: 1px solid #C8D4BE; border-radius: 6px;
-                color: #374151; padding: 7px 12px; font-size: 13px;
+                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
+                color: #1F2937; padding: 7px 12px; font-size: 13px;
             }
-            QLineEdit#searchInput:focus { border: 1px solid #6366F1; }
+            QLineEdit#searchInput:focus { border: 1px solid #07414F; }
             QComboBox#filterCombo {
-                background: #FFFFFF; border: 1px solid #C8D4BE; border-radius: 6px;
-                color: #374151; padding: 7px 10px; font-size: 13px;
+                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
+                color: #1F2937; padding: 7px 10px; font-size: 13px;
             }
             QComboBox#filterCombo::drop-down { border: none; width: 18px; }
             QComboBox QAbstractItemView {
-                background: #FFFFFF; border: 1px solid #C8D4BE;
-                color: #374151; selection-background-color: #EEF2FF;
-                selection-color: #4F46E5;
+                background: #FFFFFF; border: 1px solid #D5DCE4;
+                color: #1F2937; selection-background-color: #C9D8E2;
+                selection-color: #07414F;
             }
             QDateEdit#datePicker {
-                background: #FFFFFF; border: 1px solid #C8D4BE; border-radius: 6px;
-                color: #374151; padding: 7px 10px; font-size: 13px;
+                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
+                color: #1F2937; padding: 7px 10px; font-size: 13px;
             }
             QDateEdit#datePicker::drop-down { border: none; width: 18px; }
 
             /* ── Buttons ─────────────────────────────────────── */
             QPushButton#btnPrimary {
-                background: #4F46E5; color: #FFFFFF; border: none; border-radius: 6px;
+                background: #2F7D55; color: #FFFFFF; border: none; border-radius: 6px;
                 padding: 8px 18px; font-size: 13px; font-weight: 600;
             }
-            QPushButton#btnPrimary:hover   { background: #6366F1; }
-            QPushButton#btnPrimary:pressed { background: #4338CA; }
+            QPushButton#btnPrimary:hover   { background: #379061; }
+            QPushButton#btnPrimary:pressed { background: #266645; }
             QPushButton#btnSecondary {
-                background: #FFFFFF; color: #374151;
-                border: 1px solid #C8D4BE; border-radius: 6px;
+                background: #FFFFFF; color: #3C4654;
+                border: 1px solid #D5DCE4; border-radius: 6px;
                 padding: 8px 14px; font-size: 13px;
             }
-            QPushButton#btnSecondary:hover { background: #E8EEE0; color: #111827; }
+            QPushButton#btnSecondary:hover { background: #F0F3F7; color: #1F2937; }
 
             /* ── Tables ──────────────────────────────────────── */
             QTableWidget#mainTable {
-                background: #FFFFFF; border: 1px solid #D8E0CE; border-radius: 8px;
-                gridline-color: #EBF1E4; color: #374151; font-size: 12px;
-                selection-background-color: #EEF2FF; selection-color: #4F46E5;
+                background: #F9FAFB; border: 1px solid #D8DDE6; border-radius: 8px;
+                gridline-color: #CDD3DC; color: #1F2937; font-size: 12px;
+                selection-background-color: #C9D8E2; selection-color: #07414F;
+                alternate-background-color: #E8ECF4;
             }
             QTableWidget#mainTable QHeaderView::section {
-                background: #EBF1E4; color: #6B7280; border: none;
-                border-right: 1px solid #D8E0CE; border-bottom: 2px solid #D8E0CE;
+                background: #E9EDF5; color: #4B5563; border: none;
+                border-right: 1px solid #CDD3DC; border-bottom: 2px solid #C4CBD7;
                 padding: 8px 10px; font-size: 12px; font-weight: 600;
             }
             QTableWidget#mainTable::item {
-                padding: 5px 10px; border-bottom: 1px solid #EBF1E4;
+                padding: 5px 10px; border-bottom: 1px solid #D8DDE6;
+            }
+            QTableWidget#mainTable::item:alternate {
+                background: #E8ECF4;
+            }
+            QTableWidget#mainTable::item:hover {
+                background: #DDE4EE;
+            }
+            QTableWidget#mainTable::item:selected {
+                background: #C9D8E2; color: #07414F;
             }
 
             QTableWidget#summaryTable {
-                background: #FFFFFF; border: 1px solid #D8E0CE; border-radius: 8px;
-                gridline-color: #EBF1E4; color: #374151; font-size: 12px;
-                selection-background-color: #EEF2FF; selection-color: #4F46E5;
+                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 8px;
+                gridline-color: #EAEDF1; color: #1F2937; font-size: 12px;
+                selection-background-color: #E4F0E9; selection-color: #2F7D55;
             }
             QTableWidget#summaryTable QHeaderView::section {
-                background: #EBF1E4; color: #6B7280; border: none;
-                border-right: 1px solid #D8E0CE; border-bottom: 2px solid #D8E0CE;
+                background: #EEF1F5; color: #6B7280; border: none;
+                border-right: 1px solid #E3E8EE; border-bottom: 2px solid #E3E8EE;
                 padding: 8px 10px; font-size: 12px; font-weight: 600;
             }
             QTableWidget#summaryTable::item {
-                padding: 4px 10px; border-bottom: 1px solid #EBF1E4;
+                padding: 4px 10px; border-bottom: 1px solid #EAEDF1;
             }
 
             /* ── Viewport backgrounds (Qt QSS quirk fix) ────── */
-            QAbstractScrollArea { background: #F6F9F2; }
-            QAbstractScrollArea > QWidget { background: #F6F9F2; }
+            QAbstractScrollArea { background: #F0F3F9; }
+            QAbstractScrollArea > QWidget { background: #F0F3F9; }
 
             /* ── Scrollbars ──────────────────────────────────── */
             QScrollBar:vertical {
-                background: #EBF1E4; width: 8px; border-radius: 4px; border: none;
+                background: #E6E9EE; width: 8px; border-radius: 4px; border: none;
             }
             QScrollBar::handle:vertical {
-                background: #D1D5DB; border-radius: 4px; min-height: 30px;
+                background: #C3CAD3; border-radius: 4px; min-height: 30px;
             }
-            QScrollBar::handle:vertical:hover { background: #9CA3AF; }
+            QScrollBar::handle:vertical:hover { background: #97A1AE; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
             QScrollBar:horizontal {
-                background: #EBF1E4; height: 8px; border: none;
+                background: #E6E9EE; height: 8px; border: none;
             }
-            QScrollBar::handle:horizontal { background: #D1D5DB; border-radius: 4px; }
+            QScrollBar::handle:horizontal { background: #C3CAD3; border-radius: 4px; }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 
             /* ── Status / summary labels ─────────────────────── */
-            QLabel#statusLabel  { color: #9CA3AF; background: transparent; font-size: 12px; }
+            QLabel#statusLabel  { color: #9AA3AE; background: transparent; font-size: 12px; }
             QLabel#summaryIncome  {
-                color: #059669; background: transparent; font-size: 13px; font-weight: 600;
+                color: #2E9E5B; background: transparent; font-size: 13px; font-weight: 600;
             }
             QLabel#summaryExpense {
                 color: #DC2626; background: transparent; font-size: 13px; font-weight: 600;
@@ -4947,17 +4982,19 @@ def main():
     for font_file in fonts_dir.glob("*.ttf"):
         QFontDatabase.addApplicationFont(str(font_file))
 
-    base_font = QFont("Roboto Slab", 11)
+    base_font = QFont("Segoe UI", 10)
     app.setFont(base_font)
 
     palette = app.palette()
-    palette.setColor(QPalette.ColorRole.Window,      QColor("#F6F9F2"))
+    palette.setColor(QPalette.ColorRole.Window,      QColor("#F0F3F9"))
     palette.setColor(QPalette.ColorRole.Base,        QColor("#FFFFFF"))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#EBF1E4"))
-    palette.setColor(QPalette.ColorRole.WindowText,  QColor("#374151"))
-    palette.setColor(QPalette.ColorRole.Text,        QColor("#374151"))
-    palette.setColor(QPalette.ColorRole.Button,      QColor("#F6F9F2"))
-    palette.setColor(QPalette.ColorRole.ButtonText,  QColor("#374151"))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#E8ECF4"))
+    palette.setColor(QPalette.ColorRole.WindowText,  QColor("#1F2937"))
+    palette.setColor(QPalette.ColorRole.Text,        QColor("#1F2937"))
+    palette.setColor(QPalette.ColorRole.Button,      QColor("#F0F3F9"))
+    palette.setColor(QPalette.ColorRole.ButtonText,  QColor("#1F2937"))
+    palette.setColor(QPalette.ColorRole.Highlight,   QColor("#07414F"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
     app.setPalette(palette)
 
     window = MainWindow()
