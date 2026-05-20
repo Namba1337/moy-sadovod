@@ -4360,7 +4360,7 @@ class _TitleBar(QWidget):
 
 
 class _NavButton(QWidget):
-    """Top-nav pill: Material Icon glyph + Roboto Slab label."""
+    """Пункт левого сайдбара: глиф Material Icons + подпись."""
     nav_clicked = pyqtSignal(int)
 
     def __init__(self, icon_char: str, label: str, page_idx: int, parent=None):
@@ -4386,6 +4386,7 @@ class _NavButton(QWidget):
 
         lyt.addWidget(self._icon)
         lyt.addWidget(self._lbl)
+        lyt.addStretch()
 
     def paintEvent(self, event):
         opt = QStyleOption()
@@ -4567,7 +4568,7 @@ class MainWindow(QMainWindow):
         central.setAutoFillBackground(True)
         self.setCentralWidget(central)
 
-        # Outer layout: title bar, top navigation, content stack
+        # Outer layout: title bar + body (sidebar | content)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -4575,30 +4576,37 @@ class MainWindow(QMainWindow):
         self._title_bar = _TitleBar(self)
         outer.addWidget(self._title_bar)
 
-        # Top navigation bar
-        top_nav = QWidget(objectName="topNav")
-        top_nav.setAutoFillBackground(True)
-        top_nav.setFixedHeight(76)
-        nav_lyt = QHBoxLayout(top_nav)
-        nav_lyt.setContentsMargins(18, 0, 18, 0)
-        nav_lyt.setSpacing(6)
+        # Body: левый сайдбар + область контента
+        body = QWidget()
+        body_lyt = QHBoxLayout(body)
+        body_lyt.setContentsMargins(0, 0, 0, 0)
+        body_lyt.setSpacing(0)
 
-        # ── Логотип: полный PNG пропорционально уменьшен до высоты навбара ────
+        # ── Левый сайдбар навигации ──────────────────────────────────────
+        sidebar = QWidget(objectName="sideNav")
+        sidebar.setAutoFillBackground(True)
+        sidebar.setFixedWidth(250)
+        side_lyt = QVBoxLayout(sidebar)
+        side_lyt.setContentsMargins(16, 0, 16, 16)
+        side_lyt.setSpacing(4)
+
+        # Шапка сайдбара: логотип + текстовый блок «МОЙ / САДОВОД»
+        header = QWidget()
+        header_lyt = QHBoxLayout(header)
+        header_lyt.setContentsMargins(0, 0, 0, 0)
+        header_lyt.setSpacing(4)
+
         _logo_file = Path(__file__).parent / "resources" / "images" / "logo.png"
         if _logo_file.exists():
             _pix = QPixmap(str(_logo_file))
             if not _pix.isNull():
                 _logo_pix = _pix.scaledToHeight(
-                    66, Qt.TransformationMode.SmoothTransformation
+                    52, Qt.TransformationMode.SmoothTransformation
                 )
                 _lbl_logo = QLabel(objectName="navLogo")
                 _lbl_logo.setPixmap(_logo_pix)
                 _lbl_logo.setFixedSize(_logo_pix.width(), _logo_pix.height())
-                nav_lyt.addWidget(_lbl_logo, alignment=Qt.AlignmentFlag.AlignVCenter)
-                nav_lyt.addSpacing(2)
-        else:
-            wordmark = QLabel("Мой Садовод", objectName="navWordmark")
-            nav_lyt.addWidget(wordmark)
+                header_lyt.addWidget(_lbl_logo, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         # Текстовый блок «МОЙ / САДОВОД / подпись» — собственная отрисовка
         _installed = set(QFontDatabase.families())
@@ -4608,8 +4616,10 @@ class MainWindow(QMainWindow):
             "Segoe UI",
         )
         _brand = _BrandText(_brand_family)
-        nav_lyt.addWidget(_brand, alignment=Qt.AlignmentFlag.AlignVCenter)
-        nav_lyt.addSpacing(20)
+        header_lyt.addWidget(_brand, alignment=Qt.AlignmentFlag.AlignVCenter)
+        header_lyt.addStretch()
+        side_lyt.addWidget(header)
+        side_lyt.addSpacing(18)
 
         self._nav_buttons: list[_NavButton] = []
         for icon, label, idx in [
@@ -4624,21 +4634,21 @@ class MainWindow(QMainWindow):
             btn = _NavButton(icon, label, idx)
             btn.nav_clicked.connect(self._nav_click)
             self._nav_buttons.append(btn)
-            nav_lyt.addWidget(btn)
+            side_lyt.addWidget(btn)
 
-        nav_lyt.addStretch()
+        side_lyt.addStretch()
 
         btn_save_proj = QPushButton("Сохранить проект", objectName="btnNavAction")
         btn_save_proj.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_save_proj.clicked.connect(self._save_project)
-        nav_lyt.addWidget(btn_save_proj)
+        side_lyt.addWidget(btn_save_proj)
 
         btn_load_proj = QPushButton("Загрузить проект", objectName="btnNavAction")
         btn_load_proj.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_load_proj.clicked.connect(self._load_project)
-        nav_lyt.addWidget(btn_load_proj)
+        side_lyt.addWidget(btn_load_proj)
 
-        outer.addWidget(top_nav)
+        body_lyt.addWidget(sidebar)
 
         # Content stack
         self.stack = QStackedWidget(objectName="contentArea")
@@ -4659,7 +4669,9 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.docs)         # 4
         self.stack.addWidget(self.map_tab)      # 5
         self.stack.addWidget(self.energy_debt)  # 6
-        outer.addWidget(self.stack, stretch=1)
+        body_lyt.addWidget(self.stack, stretch=1)
+
+        outer.addWidget(body, stretch=1)
 
         # Подписки на загрузку выписки
         self.detail.dataLoaded.connect(self.vznosy_debt.refresh)
@@ -4839,16 +4851,12 @@ class MainWindow(QMainWindow):
             QPushButton#btnWinClose:hover   { background: #C42B1C; color: #FFFFFF; }
             QPushButton#btnWinClose:pressed { background: #B22418; color: #FFFFFF; }
 
-            /* ── Top navigation bar ───────────────────────────── */
-            QWidget#topNav {
+            /* ── Left navigation sidebar ──────────────────────── */
+            QWidget#sideNav {
                 background: #E9EDF3;
-                border-bottom: 1px solid #D6DBE6;
+                border-right: 1px solid #D6DBE6;
             }
             QLabel#navLogo { background: transparent; }
-            QLabel#navWordmark {
-                color: #07414F; background: transparent;
-                font-size: 17px; font-weight: 700;
-            }
             QWidget#navBtn { background: transparent; border-radius: 8px; }
             QWidget#navBtn:hover { background: #DDE2EC; }
             QWidget#navBtn[active="true"] { background: #07414F; }
@@ -4862,7 +4870,7 @@ class MainWindow(QMainWindow):
             QPushButton#btnNavAction {
                 background: #FFFFFF; color: #3C4654;
                 border: 1px solid #D5DCE4; border-radius: 8px;
-                padding: 7px 14px; font-size: 12px;
+                padding: 9px 14px; font-size: 12px;
             }
             QPushButton#btnNavAction:hover { background: #D7DCE8; color: #1F2937; }
             QPushButton#btnNavAction:pressed { background: #CBD2E0; }
