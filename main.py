@@ -4531,19 +4531,17 @@ class MainWindow(QMainWindow):
             nav_lyt.addWidget(wordmark)
 
         # Текстовый блок: МОЙ / САДОВОД / подпись
-        _brand_box = QVBoxLayout()
-        _brand_box.setSpacing(0)
-        _brand_box.setContentsMargins(0, 0, 0, 0)
-        _lbl_moy     = QLabel("МОЙ",     objectName="navBrandTitle")
-        _lbl_sadovod = QLabel("САДОВОД", objectName="navBrandTitle")
-        _lbl_sub     = QLabel("Бухгалтерский учет для СНТ",
-                              objectName="navBrandSub")
-        _brand_box.addStretch()
-        _brand_box.addWidget(_lbl_moy)
-        _brand_box.addWidget(_lbl_sadovod)
-        _brand_box.addWidget(_lbl_sub)
-        _brand_box.addStretch()
-        nav_lyt.addLayout(_brand_box)
+        # Rich-text QLabel — line-height управляет межстрочным прямо через CSS
+        _brand_lbl = QLabel(objectName="navBrand")
+        _brand_lbl.setTextFormat(Qt.TextFormat.RichText)
+        _brand_lbl.setText(
+            "<span style='font-size:19px; font-weight:700; color:#07414F;"
+            " letter-spacing:0.5px; line-height:85%;'>"
+            "МОЙ<br>САДОВОД</span><br>"
+            "<span style='font-size:9px; font-weight:400; color:#7A8A95;"
+            " letter-spacing:1.5px;'>Бухгалтерский учет для СНТ</span>"
+        )
+        nav_lyt.addWidget(_brand_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
         nav_lyt.addSpacing(20)
 
         self._nav_buttons: list[_NavButton] = []
@@ -4780,14 +4778,7 @@ class MainWindow(QMainWindow):
                 border-bottom: 1px solid #D6DBE6;
             }
             QLabel#navLogo { background: transparent; }
-            QLabel#navBrandTitle {
-                color: #07414F; background: transparent;
-                font-size: 15px; font-weight: 700; letter-spacing: 1px;
-            }
-            QLabel#navBrandSub {
-                color: #7A8A95; background: transparent;
-                font-size: 10px; font-weight: 400;
-            }
+            QLabel#navBrand { background: transparent; }
             QLabel#navWordmark {
                 color: #07414F; background: transparent;
                 font-size: 17px; font-weight: 700;
@@ -4983,6 +4974,10 @@ def main():
         QFontDatabase.addApplicationFont(str(font_file))
 
     base_font = QFont("Segoe UI", 10)
+    base_font.setStyleStrategy(
+        QFont.StyleStrategy.PreferAntialias | QFont.StyleStrategy.PreferQuality
+    )
+    base_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     app.setFont(base_font)
 
     palette = app.palette()
