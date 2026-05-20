@@ -4372,12 +4372,12 @@ class _NavButton(QWidget):
         self.setFixedHeight(38)
 
         lyt = QHBoxLayout(self)
-        lyt.setContentsMargins(14, 0, 15, 0)
+        lyt.setContentsMargins(4, 0, 15, 0)
         lyt.setSpacing(7)
 
         self._icon = QLabel(icon_char, objectName="navIcon")
-        icon_font = QFont("Material Icons")
-        icon_font.setPixelSize(17)
+        icon_font = QFont("Material Symbols Rounded")
+        icon_font.setPixelSize(25)
         self._icon.setFont(icon_font)
         self._icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
@@ -4404,6 +4404,46 @@ class _NavButton(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.nav_clicked.emit(self._page_idx)
+        super().mousePressEvent(event)
+
+
+class _ActionButton(QWidget):
+    """Кнопка действия в нижней части сайдбара: значок + подпись."""
+    clicked = pyqtSignal()
+
+    def __init__(self, icon_char: str, label: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("btnNavAction")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.setFixedHeight(38)
+
+        lyt = QHBoxLayout(self)
+        lyt.setContentsMargins(14, 0, 15, 0)
+        lyt.setSpacing(7)
+
+        self._icon = QLabel(icon_char, objectName="navIcon")
+        icon_font = QFont("Material Symbols Rounded")
+        icon_font.setPixelSize(17)
+        self._icon.setFont(icon_font)
+        self._icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        self._lbl = QLabel(label, objectName="actionLabel")
+        self._lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        lyt.addWidget(self._icon)
+        lyt.addWidget(self._lbl)
+        lyt.addStretch()
+
+    def paintEvent(self, event):
+        opt = QStyleOption()
+        opt.initFrom(self)
+        p = QPainter(self)
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, p, self)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
         super().mousePressEvent(event)
 
 
@@ -4647,13 +4687,11 @@ class MainWindow(QMainWindow):
 
         self._nav_buttons: list[_NavButton] = []
         for icon, label, idx in [
-            (chr(0xe88a), "Главная",         0),
-            (chr(0xe8b0), "Детализация",     1),
-            (chr(0xe850), "Членские взносы", 2),
-            (chr(0xe3e7), "Электричество",   6),
-            (chr(0xe8f0), "Участки",         3),
-            (chr(0xe2c7), "Документы",       4),
-            (chr(0xe55b), "Карта",           5),
+            (chr(0xe587), "Главная",            0),
+            (chr(0xf191), "Детализация",        1),
+            (chr(0xeaec), "Членские взносы",    2),
+            (chr(0xec1c), "Электричество",      4),
+            (chr(0xf8ee), "Список участков",    3),
         ]:
             btn = _NavButton(icon, label, idx)
             btn.nav_clicked.connect(self._nav_click)
@@ -4662,13 +4700,11 @@ class MainWindow(QMainWindow):
 
         side_lyt.addStretch()
 
-        btn_save_proj = QPushButton("Сохранить проект", objectName="btnNavAction")
-        btn_save_proj.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_save_proj = _ActionButton(chr(0xf09b), "Сохранить базу СНТ")
         btn_save_proj.clicked.connect(self._save_project)
         side_lyt.addWidget(btn_save_proj)
 
-        btn_load_proj = QPushButton("Загрузить проект", objectName="btnNavAction")
-        btn_load_proj.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_load_proj = _ActionButton(chr(0xf090), "Загрузить базу СНТ")
         btn_load_proj.clicked.connect(self._load_project)
         side_lyt.addWidget(btn_load_proj)
 
@@ -4680,19 +4716,15 @@ class MainWindow(QMainWindow):
         self.detail      = DetailWidget()
         self.vznosy_debt = VznosyDebtWidget()
         self.plots       = PlotsWidget()
-        self.docs        = DocsWidget()
-        self.map_tab     = MapWidget()
         self.energy_debt = EnergyDebtWidget()
         for tab in (self.home, self.detail, self.vznosy_debt, self.plots,
-                    self.docs, self.map_tab, self.energy_debt):
+                    self.energy_debt):
             tab.setAutoFillBackground(True)
         self.stack.addWidget(self.home)         # 0
         self.stack.addWidget(self.detail)       # 1
         self.stack.addWidget(self.vznosy_debt)  # 2
         self.stack.addWidget(self.plots)        # 3
-        self.stack.addWidget(self.docs)         # 4
-        self.stack.addWidget(self.map_tab)      # 5
-        self.stack.addWidget(self.energy_debt)  # 6
+        self.stack.addWidget(self.energy_debt)  # 4
         content_frame = _RoundedFrame(objectName="contentFrame")
         content_frame.setAutoFillBackground(True)
         cf_lyt = QVBoxLayout(content_frame)
@@ -4713,7 +4745,6 @@ class MainWindow(QMainWindow):
 
         # При изменении данных вкладки «Участки» — обновить все зависимые вкладки
         self.plots.plotsUpdated.connect(self.detail.refresh_plot_column)
-        self.plots.plotsUpdated.connect(self.docs.refresh_plots)
 
         self._nav_click(0)  # initial page: Главная
 
@@ -4723,9 +4754,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(page_idx)
         if page_idx == 2:
             self.vznosy_debt.refresh(self.detail.df_full)
-        elif page_idx == 5:
-            self.map_tab.set_debts(self.energy_debt.get_debts())
-        elif page_idx == 6:
+        elif page_idx == 4:
             self.energy_debt.refresh(self.detail.df_full)
 
     # ── Сохранение / загрузка проекта ────────────────────────────────────
@@ -4842,11 +4871,9 @@ class MainWindow(QMainWindow):
             return
 
         # перезагружаем все виджеты из новых файлов
-        self.plots.reload()   # также эмитит plotsUpdated → docs обновят списки
+        self.plots.reload()
         self.energy_debt.rates.reload()
         self.vznosy_debt.rates.reload()
-        self.docs.reload()
-        self.map_tab.reload_map()
 
         if detail_df is not None:
             self.detail.load_dataframe(detail_df)
@@ -4889,19 +4916,19 @@ class MainWindow(QMainWindow):
             QWidget#navBtn:hover { background: #DDE2EC; }
             QWidget#navBtn[active="true"] { background: #07414F; }
             QLabel#navIcon  { color: #6B7686; background: transparent; }
-            QLabel#navLabel { color: #3C4654; background: transparent; font-size: 13px; }
+            QLabel#navLabel { color: #3C4654; background: transparent; font-size: 14px; font-weight: 550; }
             QWidget#navBtn[active="true"] QLabel#navIcon  { color: #FFFFFF; }
             QWidget#navBtn[active="true"] QLabel#navLabel {
                 color: #FFFFFF; font-weight: 600;
             }
 
-            QPushButton#btnNavAction {
-                background: #FFFFFF; color: #3C4654;
+            QWidget#btnNavAction {
+                background: #FFFFFF;
                 border: 1px solid #D5DCE4; border-radius: 8px;
-                padding: 9px 14px; font-size: 12px;
             }
-            QPushButton#btnNavAction:hover { background: #D7DCE8; color: #1F2937; }
-            QPushButton#btnNavAction:pressed { background: #CBD2E0; }
+            QWidget#btnNavAction:hover { background: #D7DCE8; }
+            QWidget#btnNavAction:pressed { background: #CBD2E0; }
+            QLabel#actionLabel { color: #3C4654; background: transparent; font-size: 13px; font-weight: 600; }
 
             /* ── Content area ─────────────────────────────────── */
             QWidget#bodyArea { background: #E9EDF3; }
