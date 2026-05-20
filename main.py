@@ -277,11 +277,8 @@ class DetailWidget(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(14)
 
-        # Заголовок + кнопка
+        # Кнопки управления
         top_bar = QHBoxLayout()
-        title = QLabel("Детализация операций")
-        title.setObjectName("pageTitle")
-        top_bar.addWidget(title)
         top_bar.addStretch()
         self.btn_load = QPushButton("Загрузить файл")
         self.btn_load.setObjectName("btnPrimary")
@@ -1521,11 +1518,7 @@ class PlotsWidget(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(14)
 
-        # Заголовок + кнопка
         top = QHBoxLayout()
-        title = QLabel("Участки")
-        title.setObjectName("pageTitle")
-        top.addWidget(title)
         top.addStretch()
         btn_import = QPushButton("📥  Импорт из Excel")
         btn_import.setObjectName("btnSecondary")
@@ -3560,8 +3553,6 @@ class EnergyDebtWidget(QWidget):
         lay.setSpacing(12)
 
         top = QHBoxLayout()
-        title = QLabel("Долги по электроэнергии", objectName="pageTitle")
-        top.addWidget(title)
         top.addStretch()
 
         top.addWidget(QLabel("на дату:", objectName="filterLabel"))
@@ -3955,8 +3946,6 @@ class VznosyDebtWidget(QWidget):
         lay.setSpacing(12)
 
         top = QHBoxLayout()
-        title = QLabel("Долги по членским взносам", objectName="pageTitle")
-        top.addWidget(title)
         top.addStretch()
 
         top.addWidget(QLabel("на дату:", objectName="filterLabel"))

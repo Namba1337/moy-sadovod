@@ -213,9 +213,6 @@ class HomeWidget(QWidget):
         lyt.setContentsMargins(28, 24, 28, 24)
         lyt.setSpacing(18)
 
-        title = QLabel("Главная", objectName="pageTitle")
-        lyt.addWidget(title)
-
         lyt.addWidget(self._overview_card())
         lyt.addLayout(self._middle_row(), stretch=1)
         lyt.addLayout(self._footer())
