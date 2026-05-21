@@ -15,6 +15,13 @@ from core.utils import fmt_money
 from ui.energy_card import _NumItem, PlotCardDialog
 from ui.rates_widget import RatesWidget
 
+_DEBT_COLOR_LIGHT = {
+    "#2e7d32": "#c8e6c9",
+    "#f9a825": "#fff9c4",
+    "#ef6c00": "#ffe0b2",
+    "#c62828": "#ffcdd2",
+}
+
 
 class EnergyDebtWidget(QWidget):
     """Вкладка контроля долгов по электроэнергии."""
@@ -227,7 +234,7 @@ class EnergyDebtWidget(QWidget):
                 (fmt_money(bal.paid), bal.paid, None, "#059669" if bal.paid else "#3a5a7a", False),
                 (fmt_money(bal.baseline) if bal.baseline else "—", bal.baseline, None,
                  "#c97c7c" if bal.baseline else "#3a5a7a", False),
-                (fmt_money(bal.debt), bal.debt, color, "#ffffff", True),
+                (fmt_money(bal.debt), bal.debt, _DEBT_COLOR_LIGHT.get(color, color), None, True),
                 ("—" if bal.months_without_payment is None else str(bal.months_without_payment),
                  bal.months_without_payment or 0, None,
                  "#DC2626" if (bal.months_without_payment or 0) > 3 else "#374151", False),
