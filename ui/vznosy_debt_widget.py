@@ -15,6 +15,15 @@ from ui.energy_card import _NumItem
 from ui.vznosy_card import VznosyCardDialog
 from ui.rates_widget import VznosyRatesWidget
 
+# Светлые варианты цветов долга для таблицы: тёмный текст (из QSS) на светлом фоне.
+# Оригинальные тёмные цвета хранятся в debts_map для карты.
+_DEBT_COLOR_LIGHT = {
+    "#2e7d32": "#c8e6c9",
+    "#f9a825": "#fff9c4",
+    "#ef6c00": "#ffe0b2",
+    "#c62828": "#ffcdd2",
+}
+
 
 class VznosyDebtWidget(QWidget):
     """Вкладка контроля долгов по членским взносам."""
@@ -209,7 +218,7 @@ class VznosyDebtWidget(QWidget):
                  "#f9a825" if bal.charged else "#3a5a7a", False, ""),
                 (fmt_money(bal.paid), bal.paid, None,
                  "#059669" if bal.paid else "#3a5a7a", False, ""),
-                (fmt_money(bal.debt), bal.debt, color, "#ffffff", True, ""),
+                (fmt_money(bal.debt), bal.debt, _DEBT_COLOR_LIGHT.get(color, color), None, True, ""),
                 (years_unpaid_text, float(bal.years_unpaid or 0), None,
                  years_unpaid_color, False, ""),
             ]
