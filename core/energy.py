@@ -15,9 +15,7 @@ from typing import Optional
 
 import pandas as pd
 
-from core.utils import _read_json, _ensure_df
-
-DATA_DIR = "data"
+from core.utils import _read_json, _ensure_df, DATA_DIR
 METERS_FILE = os.path.join(DATA_DIR, "snt_meters.json")
 RATES_FILE = os.path.join(DATA_DIR, "snt_rates.json")
 REPLACEMENTS_FILE = os.path.join(DATA_DIR, "snt_meter_replacements.json")
