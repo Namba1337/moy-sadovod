@@ -21,9 +21,7 @@ from typing import Optional
 import pandas as pd
 
 from core import energy
-from core.utils import _read_json, _ensure_df
-
-DATA_DIR = "data"
+from core.utils import _read_json, _ensure_df, DATA_DIR
 VZNOSY_RATES_FILE = os.path.join(DATA_DIR, "snt_vznosy_rates.json")
 VZNOSY_ADJ_FILE = os.path.join(DATA_DIR, "snt_vznosy_adjustments.json")
 

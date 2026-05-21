@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QGraphicsScene,
 )
 
-DATA_DIR = "data"
+from core.utils import DATA_DIR
 
 
 class _PlotMarker(QGraphicsEllipseItem):

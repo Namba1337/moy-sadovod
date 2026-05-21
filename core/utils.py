@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+DATA_DIR = Path(__file__).parent.parent / "data"
 
 
 def _read_json(path: str, default):

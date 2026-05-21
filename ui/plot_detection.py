@@ -8,8 +8,8 @@ from collections import defaultdict as _defaultdict
 
 import pandas as pd
 
-DATA_DIR = "data"
-_PLOTS_FILE = os.path.join(DATA_DIR, "snt_plots.json")
+from core.utils import DATA_DIR
+_PLOTS_FILE = DATA_DIR / "snt_plots.json"
 
 
 def _load_sadovods():
