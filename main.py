@@ -689,6 +689,14 @@ class MainWindow(QMainWindow):
                         zf.writestr("data/detail_transactions.json", json_str)
                     except Exception as e:
                         errors.append(f"Детализация: {e}")
+                    try:
+                        cells_data = self.detail.get_manual_cells_data()
+                        zf.writestr(
+                            "data/detail_manual_cells.json",
+                            json.dumps(cells_data, ensure_ascii=False),
+                        )
+                    except Exception as e:
+                        errors.append(f"Пометки редактирования: {e}")
 
                 # включаем файл карты, если он локальный
                 map_cfg = data_dir / "snt_map_image.json"
@@ -752,6 +760,14 @@ class MainWindow(QMainWindow):
                             self, "Предупреждение",
                             f"Не удалось загрузить данные Детализации:\n{e}")
 
+                manual_cells_data = None
+                if "data/detail_manual_cells.json" in names:
+                    try:
+                        manual_cells_data = json.loads(
+                            zf.read("data/detail_manual_cells.json").decode("utf-8"))
+                    except Exception:
+                        pass
+
                 # извлекаем изображение карты
                 map_name = next(
                     (n for n in names if n.startswith("map_image.")), None)
@@ -773,6 +789,8 @@ class MainWindow(QMainWindow):
 
         if detail_df is not None:
             self.detail.load_dataframe(detail_df)
+            if manual_cells_data is not None:
+                self.detail.restore_manual_cells(manual_cells_data)
         else:
             self.energy_debt.refresh(self.detail.df_full)
             self.vznosy_debt.refresh(self.detail.df_full)

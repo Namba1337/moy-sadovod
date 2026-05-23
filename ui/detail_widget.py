@@ -1,10 +1,11 @@
 import pandas as pd
 from PyQt6.QtCore import Qt, QDate, QPoint, pyqtSignal
-from PyQt6.QtGui import QAction, QColor
+from PyQt6.QtGui import QAction, QColor, QFont
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
-    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization
@@ -55,6 +56,54 @@ class _SortItem(QTableWidgetItem):
         except ValueError:
             pass
         return a < b
+
+
+class _EditMarkDelegate(QStyledItemDelegate):
+    """Рисует иконку карандаша (Material Icons e3c9) в правой части ячейки,
+    если ячейка была отредактирована вручную."""
+
+    _CHAR = ""
+    _ICON_FONT: QFont | None = None
+
+    @classmethod
+    def _icon_font(cls) -> QFont:
+        if cls._ICON_FONT is None:
+            f = QFont("Material Icons")
+            f.setPixelSize(14)
+            cls._ICON_FONT = f
+        return cls._ICON_FONT
+
+    def __init__(self, manual_cells: set, table: QTableWidget, parent=None):
+        super().__init__(parent)
+        self._manual_cells = manual_cells
+        self._table = table
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+
+        item = self._table.item(index.row(), index.column())
+        if item is None:
+            return
+        df_idx = item.data(Qt.ItemDataRole.UserRole)
+        hdr = self._table.horizontalHeaderItem(index.column())
+        if df_idx is None or hdr is None:
+            return
+        if (df_idx, hdr.text()) not in self._manual_cells:
+            return
+
+        from PyQt6.QtWidgets import QStyle
+        painter.save()
+        painter.setFont(self._icon_font())
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.setPen(QColor(255, 255, 255, 180))
+        else:
+            painter.setPen(QColor("#9CA3AF"))
+        painter.drawText(
+            option.rect.adjusted(0, 0, -4, 0),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+            self._CHAR,
+        )
+        painter.restore()
 
 
 class LoadSettingsDialog(QDialog):
@@ -210,7 +259,12 @@ class DetailWidget(QWidget):
         super().__init__()
         self.setAutoFillBackground(True)
         self.df_full = None
+        self._manual_rows: set[int] = set()
+        self._manual_cells: set[tuple[int, str]] = set()
         self._setup_ui()
+        self.table.setItemDelegate(
+            _EditMarkDelegate(self._manual_cells, self.table, self)
+        )
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -314,6 +368,8 @@ class DetailWidget(QWidget):
         if not path:
             return
         try:
+            self._manual_rows.clear()
+            self._manual_cells.clear()
             df = pd.read_excel(path, engine="openpyxl")
             cols = [c for c in df.columns
                     if not str(c).strip().startswith("Валюта") and str(c).strip() != ""]
@@ -356,6 +412,8 @@ class DetailWidget(QWidget):
 
     def load_dataframe(self, df: "pd.DataFrame"):
         """Восстанавливает DataFrame из сохранённого проекта без диалога выбора файла."""
+        self._manual_rows.clear()
+        self._manual_cells.clear()
         drop_cols = {"Номер", "Номер счёта", "Контрагент счёт", "Контрагент cчёт"}
         df = df.drop(columns=[c for c in drop_cols if c in df.columns])
         df = _merge_to_summa(df)
@@ -368,11 +426,32 @@ class DetailWidget(QWidget):
         self.apply_filters()
         self.dataLoaded.emit(self.df_full)
 
+    def get_manual_cells_data(self) -> list:
+        """Сериализует _manual_cells для сохранения в проект."""
+        return [[int(df_idx), col] for df_idx, col in self._manual_cells]
+
+    def restore_manual_cells(self, data: list):
+        """Восстанавливает _manual_cells и _manual_rows после загрузки проекта."""
+        self._manual_cells.clear()
+        self._manual_rows.clear()
+        for item in data:
+            if len(item) == 2:
+                df_idx, col = int(item[0]), str(item[1])
+                self._manual_cells.add((df_idx, col))
+                self._manual_rows.add(df_idx)
+        self.table.viewport().update()
+
     def refresh_plot_column(self):
-        """Пересчитывает столбец «Участок» по актуальным данным из snt_plots.json."""
+        """Пересчитывает столбец «Участок» по актуальным данным из snt_plots.json.
+        Строки, вручную отредактированные пользователем, не перезаписываются."""
         if self.df_full is None:
             return
-        self.df_full = apply_plot_column(self.df_full)
+        df_new = apply_plot_column(self.df_full)
+        if "Участок" not in self.df_full.columns:
+            self.df_full = df_new
+        else:
+            auto_mask = ~self.df_full.index.isin(self._manual_rows)
+            self.df_full.loc[auto_mask, "Участок"] = df_new.loc[auto_mask, "Участок"]
         self.apply_filters()
 
     def apply_filters(self):
@@ -720,6 +799,8 @@ class DetailWidget(QWidget):
                         pass
                 else:
                     self.df_full.at[df_idx, col] = new_text
+                self._manual_rows.add(df_idx)
+                self._manual_cells.add((df_idx, col))
 
         self._update_summary()
 
