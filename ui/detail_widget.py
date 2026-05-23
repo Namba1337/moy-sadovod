@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 
@@ -31,6 +32,34 @@ def _merge_to_summa(df: "pd.DataFrame") -> "pd.DataFrame":
     pos = list(df.columns).index("Поступление") if "Поступление" in df.columns else len(df.columns)
     df = df.drop(columns=[c for c in ("Поступление", "Списание") if c in df.columns])
     df.insert(min(pos, len(df.columns)), "Сумма", summa)
+    return df
+
+
+def _compute_hash(row: dict) -> str:
+    """SHA-256 (12 символов) по ключевым полям — стабильный ID операции."""
+    parts = [
+        str(row.get("Дата", ""))[:10],
+        str(row.get("Сумма", "")),
+        str(row.get("Контрагент") or "").strip(),
+        str(row.get("Назначение") or "").strip(),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def _add_tag(tags_str: str, tag: str) -> str:
+    """Добавляет тег в строку тегов, не дублируя существующие."""
+    existing = {t.strip() for t in (tags_str or "").split(",") if t.strip()}
+    existing.add(tag)
+    return ", ".join(sorted(existing))
+
+
+def _ensure_meta_columns(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Добавляет _hash и Теги, если их ещё нет."""
+    df = df.copy()
+    if "_hash" not in df.columns:
+        df["_hash"] = df.apply(lambda r: _compute_hash(r.to_dict()), axis=1)
+    if "Теги" not in df.columns:
+        df["Теги"] = ""
     return df
 
 
@@ -154,12 +183,13 @@ class LoadSettingsDialog(QDialog):
         QFrame#divider { background: #E5E7EB; max-height: 1px; }
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, has_existing_data: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Загрузка детализации")
         self.setModal(True)
         self.setFixedWidth(400)
         self._fmt = "sber"
+        self._has_existing = has_existing_data
         self._setup_ui()
         self.setStyleSheet(self._STYLE)
 
@@ -214,6 +244,22 @@ class LoadSettingsDialog(QDialog):
         div2.setFixedHeight(1)
         lay.addWidget(div2)
 
+        if self._has_existing:
+            lay.addWidget(QLabel("РЕЖИМ ЗАГРУЗКИ", objectName="sectionLabel"))
+            self.chk_merge = QCheckBox("Добавить к существующим данным")
+            self.chk_merge.setChecked(True)
+            self.chk_merge.setToolTip(
+                "Новые операции будут добавлены к уже загруженным.\n"
+                "Дубли будут помечены тегом «Дубль»."
+            )
+            lay.addWidget(self.chk_merge)
+
+            div3 = QFrame(objectName="divider")
+            div3.setFixedHeight(1)
+            lay.addWidget(div3)
+        else:
+            self.chk_merge = None
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
         btn_cancel = QPushButton("Отмена",       objectName="btnSecondary")
@@ -253,6 +299,10 @@ class LoadSettingsDialog(QDialog):
     @property
     def auto_plot(self) -> bool:
         return self.chk_plot.isChecked()
+
+    @property
+    def merge_mode(self) -> bool:
+        return self.chk_merge.isChecked() if self.chk_merge else False
 
 
 class AddRowDialog(QDialog):
@@ -528,6 +578,14 @@ class DetailWidget(QWidget):
 
         new_idx = int(self.df_full.index.max()) + 1 if len(self.df_full) > 0 else 0
 
+        new_hash = _compute_hash(row_data)
+        existing_hashes = (
+            set(self.df_full["_hash"])
+            if "_hash" in self.df_full.columns else set()
+        )
+        row_data["_hash"] = new_hash
+        row_data["Теги"] = _add_tag("", "Дубль") if new_hash in existing_hashes else ""
+
         new_row = {
             col: row_data.get(col, "" if col != "Сумма" else float("nan"))
             for col in self.df_full.columns
@@ -551,21 +609,20 @@ class DetailWidget(QWidget):
         self.dataLoaded.emit(self.df_full)
 
     def load_file(self):
-        settings_dlg = LoadSettingsDialog(self)
+        settings_dlg = LoadSettingsDialog(self, has_existing_data=self.df_full is not None)
         if settings_dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        fmt       = settings_dlg.fmt
-        auto_cat  = settings_dlg.auto_cat
-        auto_plot = settings_dlg.auto_plot
+        fmt        = settings_dlg.fmt
+        auto_cat   = settings_dlg.auto_cat
+        auto_plot  = settings_dlg.auto_plot
+        merge_mode = settings_dlg.merge_mode
 
         path, _ = QFileDialog.getOpenFileName(
             self, "Открыть файл выписки", "", "Excel файлы (*.xlsx *.xls)")
         if not path:
             return
         try:
-            self._manual_rows.clear()
-            self._manual_cells.clear()
             df = pd.read_excel(path, engine="openpyxl")
             cols = [c for c in df.columns
                     if not str(c).strip().startswith("Валюта") and str(c).strip() != ""]
@@ -595,8 +652,42 @@ class DetailWidget(QWidget):
                 str(int(v)) if isinstance(v, float) and v == int(v) else str(v)
             )
 
-            self.df_full = df
-            min_d, max_d = df["Дата"].min(), df["Дата"].max()
+            df = _ensure_meta_columns(df)
+
+            if merge_mode and self.df_full is not None:
+                existing = _ensure_meta_columns(self.df_full)
+                existing_hashes = set(existing["_hash"])
+                seen = set(existing_hashes)
+                tags_list = []
+                for _, row in df.iterrows():
+                    h = row["_hash"]
+                    if h in seen:
+                        tags_list.append(_add_tag("", "Дубль"))
+                    else:
+                        tags_list.append("")
+                        seen.add(h)
+                df["Теги"] = tags_list
+                new_start = int(existing.index.max()) + 1 if len(existing) > 0 else 0
+                df = df.reset_index(drop=True)
+                df.index = df.index + new_start
+                self.df_full = pd.concat([existing, df])
+            else:
+                seen: set[str] = set()
+                tags_list = []
+                for _, row in df.iterrows():
+                    h = row["_hash"]
+                    if h in seen:
+                        tags_list.append(_add_tag("", "Дубль"))
+                    else:
+                        tags_list.append("")
+                        seen.add(h)
+                df["Теги"] = tags_list
+                self._manual_rows.clear()
+                self._manual_cells.clear()
+                self.df_full = df
+
+            min_d = self.df_full["Дата"].min()
+            max_d = self.df_full["Дата"].max()
             if pd.notna(min_d):
                 self.date_from.setDate(QDate(min_d.year, min_d.month, min_d.day))
             if pd.notna(max_d):
@@ -613,6 +704,7 @@ class DetailWidget(QWidget):
         drop_cols = {"Номер", "Номер счёта", "Контрагент счёт", "Контрагент cчёт"}
         df = df.drop(columns=[c for c in drop_cols if c in df.columns])
         df = _merge_to_summa(df)
+        df = _ensure_meta_columns(df)
         self.df_full = df
         min_d, max_d = df["Дата"].min(), df["Дата"].max()
         if pd.notna(min_d):
@@ -738,7 +830,7 @@ class DetailWidget(QWidget):
             ws = wb.active
             ws.title = "Детализация"
 
-            headers = list(df.columns)
+            headers = [c for c in df.columns if not str(c).startswith("_")]
             summa_col_idx = headers.index("Сумма") + 1 if "Сумма" in headers else None
 
             ws.append(headers)
@@ -784,15 +876,15 @@ class DetailWidget(QWidget):
         self.table.setSortingEnabled(False)
         self.table.clearContents()
 
-        columns = list(df.columns)
+        # Скрываем служебные колонки (начинаются с "_")
+        columns = [c for c in df.columns if not str(c).startswith("_")]
         self.table.setColumnCount(len(columns))
         self.table.setRowCount(len(df))
         self.table.setHorizontalHeaderLabels(columns)
 
         col_widths = {
-            "Дата": 95, "Контрагент": 260,
-            "Сумма": 140,
-            "Назначение": 340, "Категория": 210, "Участок": 80,
+            "Дата": 95, "Контрагент": 260, "Сумма": 140,
+            "Назначение": 340, "Категория": 210, "Участок": 80, "Теги": 120,
         }
 
         for row_idx, (df_idx, row) in enumerate(df.iterrows()):
@@ -819,6 +911,12 @@ class DetailWidget(QWidget):
                     text = val.strftime("%d.%m.%Y")
                     item = _SortItem(text)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+                elif col == "Теги":
+                    text = "" if pd.isna(val) else str(val)
+                    item = _SortItem(text)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+                    if "Дубль" in text:
+                        item.setForeground(QColor("#D97706"))
                 else:
                     text = "" if pd.isna(val) else str(val)
                     item = _SortItem(text)
