@@ -46,6 +46,8 @@ class PlotsWidget(QWidget):
         super().__init__()
         self.setAutoFillBackground(True)
         self._plots: list = self._load()
+        self._sort_col: int = 0
+        self._sort_asc: bool = True
         self._setup_ui()
         self._rebuild_table()
 
@@ -98,18 +100,52 @@ class PlotsWidget(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setSortingEnabled(False)
+        self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+        self.table.horizontalHeader().setCursor(Qt.CursorShape.PointingHandCursor)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
         layout.addWidget(self.table)
+
+    def _on_header_clicked(self, col: int):
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+        self._rebuild_table()
+
+    def _sorted_plots(self) -> list:
+        col = self._sort_col
+        asc = self._sort_asc
+        if col == 0:
+            key = lambda p: _plot_num_key(str(p.get("num", "")))
+        elif col == 1:
+            key = lambda p: ((p.get("owners") or [""])[0].lower())
+        else:
+            def key(p):
+                try:
+                    v = p.get("area")
+                    if v in (None, ""):
+                        return float("inf") if asc else float("-inf")
+                    return float(v)
+                except (TypeError, ValueError):
+                    return float("inf") if asc else float("-inf")
+        return sorted(self._plots, key=key, reverse=not asc)
 
     def _rebuild_table(self):
         self.table.blockSignals(True)
         self.table.clearContents()
 
-        plots_sorted = sorted(self._plots, key=lambda p: str(p.get("num", "")))
+        plots_sorted = self._sorted_plots()
 
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(["Участок", "Собственники", "Площадь, м²"])
+        hdr = self.table.horizontalHeader()
+        hdr.setSortIndicatorShown(True)
+        hdr.setSortIndicator(
+            self._sort_col,
+            Qt.SortOrder.AscendingOrder if self._sort_asc else Qt.SortOrder.DescendingOrder,
+        )
         self.table.setRowCount(len(plots_sorted))
 
         for r_idx, plot in enumerate(plots_sorted):
@@ -309,7 +345,7 @@ class PlotsWidget(QWidget):
         if row < 0:
             return
 
-        plots_sorted = sorted(self._plots, key=lambda p: str(p.get("num", "")))
+        plots_sorted = self._sorted_plots()
         if row >= len(plots_sorted):
             return
 
