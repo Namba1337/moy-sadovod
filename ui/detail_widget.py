@@ -1,15 +1,18 @@
+import json
+import os
+
 import pandas as pd
 from PyQt6.QtCore import Qt, QDate, QPoint, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog, QFrame,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
-    QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
+    QMessageBox, QPushButton, QStyledItemDelegate, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization
-from ui.plot_detection import apply_plot_column
+from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization, categorize_row
+from ui.plot_detection import apply_plot_column, get_plot, _PLOTS_FILE
 
 
 def _merge_to_summa(df: "pd.DataFrame") -> "pd.DataFrame":
@@ -252,6 +255,155 @@ class LoadSettingsDialog(QDialog):
         return self.chk_plot.isChecked()
 
 
+class AddRowDialog(QDialog):
+    """Диалог ручного добавления операции в таблицу Детализации."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Добавить операцию")
+        self.setMinimumWidth(500)
+        self.setModal(True)
+        self._setup_ui()
+        self._apply_styles()
+
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setSpacing(14)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.date_edit = QDateEdit(QDate.currentDate(), calendarPopup=True)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setObjectName("datePicker")
+        form.addRow("Дата:", self.date_edit)
+
+        self.inp_summa = QLineEdit()
+        self.inp_summa.setPlaceholderText("например: 1500 (поступление) или -500 (списание)")
+        form.addRow("Сумма, ₽:", self.inp_summa)
+
+        self.inp_cont = QLineEdit()
+        self.inp_cont.setPlaceholderText("Организация или ФИО")
+        form.addRow("Контрагент:", self.inp_cont)
+
+        self.inp_nazn = QLineEdit()
+        self.inp_nazn.setPlaceholderText("Назначение платежа")
+        form.addRow("Назначение:", self.inp_nazn)
+
+        cat_row = QHBoxLayout()
+        cat_row.setSpacing(6)
+        self.combo_cat = QComboBox()
+        for cat in ALL_CATEGORIES:
+            self.combo_cat.addItem(cat)
+        cat_row.addWidget(self.combo_cat, stretch=1)
+        btn_auto = QPushButton("Определить")
+        btn_auto.setObjectName("btnSecondary")
+        btn_auto.setFixedWidth(110)
+        btn_auto.clicked.connect(self._auto_detect)
+        cat_row.addWidget(btn_auto)
+        cat_widget = QWidget()
+        cat_widget.setLayout(cat_row)
+        form.addRow("Категория:", cat_widget)
+
+        self.combo_plot = QComboBox()
+        self.combo_plot.setEditable(True)
+        self.combo_plot.addItem("")
+        self._fill_plot_combo()
+        form.addRow("Участок:", self.combo_plot)
+
+        lay.addLayout(form)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
+        lay.addWidget(sep)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Добавить")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def _fill_plot_combo(self):
+        try:
+            if os.path.exists(_PLOTS_FILE):
+                with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
+                    plots = json.load(f)
+                nums = sorted(
+                    set(str(p.get("num", "")) for p in plots if p.get("num")),
+                    key=lambda s: (0, int(s), s) if s.isdigit() else (1, 0, s),
+                )
+                for num in nums:
+                    self.combo_plot.addItem(num)
+        except Exception:
+            pass
+
+    def _auto_detect(self):
+        row = {"Назначение": self.inp_nazn.text(), "Контрагент": self.inp_cont.text()}
+        cat = categorize_row(row)
+        idx = self.combo_cat.findText(cat)
+        if idx >= 0:
+            self.combo_cat.setCurrentIndex(idx)
+        plot = get_plot(row)
+        if plot:
+            self.combo_plot.setEditText(plot)
+
+    def _on_accept(self):
+        raw = (self.inp_summa.text().strip()
+               .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
+        if not raw:
+            QMessageBox.warning(self, "Ошибка", "Укажите сумму операции")
+            return
+        try:
+            float(raw)
+        except ValueError:
+            QMessageBox.warning(self, "Ошибка", "Некорректный формат суммы")
+            return
+        self.accept()
+
+    def get_result(self) -> dict:
+        raw = (self.inp_summa.text().strip()
+               .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
+        d = self.date_edit.date()
+        return {
+            "Дата":        pd.Timestamp(d.year(), d.month(), d.day()),
+            "Контрагент":  self.inp_cont.text().strip(),
+            "Сумма":       float(raw),
+            "Назначение":  self.inp_nazn.text().strip(),
+            "Категория":   self.combo_cat.currentText(),
+            "Участок":     self.combo_plot.currentText().strip(),
+        }
+
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            QDialog { background: #FFFFFF; color: #374151; }
+            QLabel  { background: transparent; color: #374151; font-size: 13px; }
+            QLineEdit, QComboBox, QDateEdit {
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 7px 10px; font-size: 13px;
+            }
+            QLineEdit:focus, QComboBox:focus, QDateEdit:focus { border: 1px solid #6366F1; }
+            QPushButton#btnSecondary {
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
+                border-radius: 6px; padding: 7px 14px; font-size: 13px;
+            }
+            QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
+            QDialogButtonBox QPushButton {
+                background: #4F46E5; color: white; border: none;
+                border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
+            }
+            QDialogButtonBox QPushButton:hover { background: #6366F1; }
+            QDialogButtonBox QPushButton[text='Отмена'] {
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
+            }
+        """)
+
+
 class DetailWidget(QWidget):
     dataLoaded = pyqtSignal(object)
 
@@ -277,6 +429,11 @@ class DetailWidget(QWidget):
         self.btn_load.setObjectName("btnPrimary")
         self.btn_load.clicked.connect(self.load_file)
         top_bar.addWidget(self.btn_load)
+
+        btn_add_row = QPushButton("＋  Добавить операцию")
+        btn_add_row.setObjectName("btnSecondary")
+        btn_add_row.clicked.connect(self._add_row)
+        top_bar.addWidget(btn_add_row)
 
         btn_excel = QPushButton("Экспорт в Excel", objectName="btnSecondary")
         btn_excel.clicked.connect(self._export_excel)
@@ -353,6 +510,45 @@ class DetailWidget(QWidget):
         summary_layout.addStretch()
         summary_layout.addWidget(self.lbl_expense)
         layout.addLayout(summary_layout)
+
+    def _add_row(self):
+        dlg = AddRowDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        row_data = dlg.get_result()
+
+        if self.df_full is None:
+            self.df_full = pd.DataFrame(
+                columns=["Дата", "Контрагент", "Сумма", "Назначение", "Категория", "Участок"]
+            )
+            self.df_full = self.df_full.astype({"Дата": "datetime64[ns]", "Сумма": float})
+            today = QDate.currentDate()
+            self.date_from.setDate(QDate(today.year() - 1, 1, 1))
+            self.date_to.setDate(today)
+
+        new_idx = int(self.df_full.index.max()) + 1 if len(self.df_full) > 0 else 0
+
+        new_row = {
+            col: row_data.get(col, "" if col != "Сумма" else float("nan"))
+            for col in self.df_full.columns
+        }
+        self.df_full.loc[new_idx] = new_row
+        self.df_full["Дата"] = pd.to_datetime(self.df_full["Дата"], errors="coerce")
+
+        self._manual_rows.add(new_idx)
+        for col in row_data:
+            if col in self.df_full.columns:
+                self._manual_cells.add((new_idx, col))
+
+        row_ts = row_data["Дата"]
+        row_qdate = QDate(row_ts.year, row_ts.month, row_ts.day)
+        if row_qdate < self.date_from.date():
+            self.date_from.setDate(row_qdate)
+        if row_qdate > self.date_to.date():
+            self.date_to.setDate(row_qdate)
+
+        self.apply_filters()
+        self.dataLoaded.emit(self.df_full)
 
     def load_file(self):
         settings_dlg = LoadSettingsDialog(self)
