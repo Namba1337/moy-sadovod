@@ -581,9 +581,14 @@ class MainWindow(QMainWindow):
         # Подписки на загрузку выписки
         self.detail.dataLoaded.connect(self.vznosy_debt.refresh)
         self.detail.dataLoaded.connect(self.energy_debt.refresh)
+        self.detail.dataLoaded.connect(self.home.refresh)
         # При изменении списка участков (в т.ч. площади) пересчитать ЧВ
         self.plots.plotsUpdated.connect(
             lambda: self.vznosy_debt.refresh(self.detail.df_full)
+        )
+        # Список участков влияет на расчёт долга по взносам — обновим «Главную»
+        self.plots.plotsUpdated.connect(
+            lambda: self.home.refresh(self.detail.df_full)
         )
 
         # При изменении данных вкладки «Участки» — обновить все зависимые вкладки
@@ -595,7 +600,9 @@ class MainWindow(QMainWindow):
         for btn in self._nav_buttons:
             btn.set_active(btn._page_idx == page_idx)
         self.stack.setCurrentIndex(page_idx)
-        if page_idx == 2:
+        if page_idx == 0:
+            self.home.refresh(self.detail.df_full)
+        elif page_idx == 2:
             self.vznosy_debt.refresh(self.detail.df_full)
         elif page_idx == 4:
             self.energy_debt.refresh(self.detail.df_full)

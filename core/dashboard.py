@@ -1,0 +1,407 @@
+"""Чистое ядро расчёта показателей дашборда «Главная» — без UI и Qt.
+
+«Период» берётся из вкладки «Членские взносы» (snt_vznosy_rates.json):
+текущий период — тот, в который попадает сегодняшняя дата; прошлый —
+предыдущий по списку. Это позволяет сравнивать поток средств по членским
+периодам (июль→июль), а не по календарным годам.
+
+Модуль не лезет в Qt и почти не лезет в файловую систему: транзакции
+принимаются готовым DataFrame, а если его нет — подхватывается
+data/detail_transactions.json через load_transactions_df().
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Optional
+
+import pandas as pd
+
+from core import energy, vznosy
+from core.utils import _read_json, DATA_DIR
+
+TRANSACTIONS_FILE = os.path.join(DATA_DIR, "detail_transactions.json")
+
+# Категории выписки, важные для дашборда
+CAT_VZNOSY = "Членские взносы"
+CAT_ELECTRO_OWNERS = "Электроэнергия (от садоводов)"
+CAT_ELECTRO_SUPPLIER = "Оплата электроэнергии (поставщик)"
+CAT_MIXED = "Членские взносы + Электроэнергия"
+
+_MONTH_RU = ["", "Янв", "Фев", "Мар", "Апр", "Май", "Июн",
+             "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]
+
+
+# ── загрузка / нормализация транзакций ────────────────────────────────
+
+def _norm_plot(v) -> str:
+    """Аккуратно приводит значение участка к строке (19.0 → «19»)."""
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        if pd.isna(v):
+            return ""
+        if v == int(v):
+            return str(int(v))
+        return str(v)
+    return str(v).strip()
+
+
+def normalize_df(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Приводит DataFrame к виду с колонками Дата(datetime), Сумма(знаковая),
+    Категория, Участок. Понимает оба формата выписки: с разделёнными
+    Поступление/Списание и с уже объединённой Суммой."""
+    if df is None or len(df) == 0:
+        return None
+    df = df.copy()
+
+    if "Дата" not in df.columns:
+        return None
+    if not pd.api.types.is_datetime64_any_dtype(df["Дата"]):
+        s = df["Дата"]
+        if pd.api.types.is_numeric_dtype(s):
+            df["Дата"] = pd.to_datetime(s, unit="ms", errors="coerce")
+        else:
+            df["Дата"] = pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+    if "Сумма" not in df.columns:
+        if "Поступление" in df.columns:
+            inc = pd.to_numeric(df["Поступление"], errors="coerce").fillna(0.0)
+        else:
+            inc = pd.Series(0.0, index=df.index)
+        if "Списание" in df.columns:
+            exp = pd.to_numeric(df["Списание"], errors="coerce").fillna(0.0)
+        else:
+            exp = pd.Series(0.0, index=df.index)
+        df["Сумма"] = inc - exp
+    else:
+        df["Сумма"] = pd.to_numeric(df["Сумма"], errors="coerce")
+
+    if "Категория" not in df.columns:
+        df["Категория"] = ""
+    df["Категория"] = df["Категория"].fillna("").astype(str)
+
+    if "Участок" not in df.columns:
+        df["Участок"] = ""
+    df["Участок"] = df["Участок"].apply(_norm_plot)
+
+    df = df[df["Дата"].notna()].copy()
+    if df.empty:
+        return None
+    return df
+
+
+def load_transactions_df() -> Optional[pd.DataFrame]:
+    """Читает data/detail_transactions.json (если есть) и возвращает
+    нормализованный DataFrame. None — файла нет или он пуст/битый."""
+    recs = _read_json(TRANSACTIONS_FILE, None)
+    if not recs:
+        return None
+    try:
+        return normalize_df(pd.DataFrame(recs))
+    except Exception:
+        return None
+
+
+# ── периоды членских взносов ──────────────────────────────────────────
+
+@dataclass
+class Period:
+    date_from: date
+    date_to: date
+    label: str                       # «2025/26»
+    amount: Optional[float] = None   # тариф периода, ₽
+
+
+def _periods() -> list[Period]:
+    """Список периодов ЧВ, отсортированный по дате начала. date_to берётся
+    из записи, а если его нет — из начала следующего периода."""
+    built = vznosy.build_periods(vznosy.load_rates())
+    raw: list[tuple[date, Optional[date], dict]] = []
+    for r in built:
+        pf = energy._parse_iso(r.get("date_from", ""))
+        if pf is None:
+            continue
+        pt = energy._parse_iso(r.get("date_to")) if r.get("date_to") else None
+        raw.append((pf, pt, r))
+
+    out: list[Period] = []
+    for i, (pf, pt, r) in enumerate(raw):
+        if pt is None:
+            if i + 1 < len(raw):
+                pt = raw[i + 1][0] - timedelta(days=1)
+            else:
+                pt = date(pf.year + 1, pf.month, pf.day) - timedelta(days=1)
+        label = f"{pf.year}/{str(pt.year)[-2:]}"
+        out.append(Period(pf, pt, label, energy._to_float(r.get("amount"))))
+    return out
+
+
+@dataclass
+class PeriodPair:
+    current: Optional[Period]
+    previous: Optional[Period]
+
+
+def resolve_periods(as_of: date) -> PeriodPair:
+    """Текущий период — содержащий as_of; прошлый — предыдущий по списку."""
+    periods = _periods()
+    if not periods:
+        return PeriodPair(None, None)
+
+    cur_idx: Optional[int] = None
+    for i, p in enumerate(periods):
+        if p.date_from <= as_of <= p.date_to:
+            cur_idx = i
+            break
+    if cur_idx is None:
+        cur_idx = len(periods) - 1 if as_of > periods[-1].date_to else 0
+
+    cur = periods[cur_idx]
+    prev = periods[cur_idx - 1] if cur_idx > 0 else None
+    return PeriodPair(cur, prev)
+
+
+# ── агрегаты по потокам ───────────────────────────────────────────────
+
+def _window_mask(df: pd.DataFrame, d0: date, d1: date):
+    dates = df["Дата"].dt.date
+    return (dates >= d0) & (dates <= d1)
+
+
+@dataclass
+class FlowSums:
+    income: float
+    expense: float
+    electricity: float        # расход на электроэнергию (поставщику)
+
+
+def flow_sums(df: Optional[pd.DataFrame], d0: date, d1: date) -> FlowSums:
+    """Приход, расход и расход на электричество в окне [d0, d1]."""
+    if df is None:
+        return FlowSums(0.0, 0.0, 0.0)
+    g = df[_window_mask(df, d0, d1)]
+    if g.empty:
+        return FlowSums(0.0, 0.0, 0.0)
+    s = pd.to_numeric(g["Сумма"], errors="coerce")
+    income = float(s[s > 0].sum())
+    expense = float(-s[s < 0].sum())
+    el = pd.to_numeric(
+        g[g["Категория"] == CAT_ELECTRO_SUPPLIER]["Сумма"], errors="coerce")
+    electricity = float(-el[el < 0].sum())
+    return FlowSums(income, expense, electricity)
+
+
+def current_balance(df: Optional[pd.DataFrame]) -> float:
+    """Остаток на счёте — сумма всех знаковых операций за всё время."""
+    if df is None:
+        return 0.0
+    return float(pd.to_numeric(df["Сумма"], errors="coerce").sum())
+
+
+def trend_pct(current: float, previous: Optional[float]) -> Optional[float]:
+    """Процент изменения current относительно previous. None — нет базы."""
+    if previous is None or abs(previous) < 1e-9:
+        return None
+    return (current - previous) / previous * 100.0
+
+
+# ── задолженность по членским взносам ─────────────────────────────────
+
+@dataclass
+class DebtSummary:
+    total_debt: float
+    debtor_count: int
+    plot_count: int
+
+
+def vznosy_debt_summary(df: Optional[pd.DataFrame], as_of: date) -> DebtSummary:
+    """Суммарный долг по ЧВ и число участков-должников на дату as_of."""
+    rates = vznosy.load_rates()
+    adj = vznosy.load_adjustments()
+    areas = vznosy.plot_area_map()
+    plots = [str(p.get("num", "")) for p in energy.load_plots() if p.get("num")]
+
+    total = 0.0
+    debtors = 0
+    for plot in plots:
+        try:
+            bal = vznosy.balance_for_plot(
+                plot, areas.get(plot), as_of, rates, adj, df)
+        except Exception:
+            continue
+        total += bal.debt
+        if bal.debt > 0.5:
+            debtors += 1
+    return DebtSummary(total, debtors, len(plots))
+
+
+# ── помесячная разбивка для столбчатого графика ───────────────────────
+
+def _month_iter(start: date, count: int) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    y, m = start.year, start.month
+    for _ in range(count):
+        out.append((y, m))
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    return out
+
+
+@dataclass
+class MonthBar:
+    year: int
+    month: int
+    label: str
+    income: float
+    expense: float
+
+
+def monthly_breakdown(df: Optional[pd.DataFrame],
+                      period: Optional[Period]) -> list[MonthBar]:
+    """Помесячные приход/расход за 12 месяцев периода."""
+    if period is None:
+        return []
+    months = _month_iter(period.date_from, 12)
+    if df is None:
+        return [MonthBar(y, m, _MONTH_RU[m], 0.0, 0.0) for (y, m) in months]
+
+    g = df[_window_mask(df, period.date_from, period.date_to)].copy()
+    out: list[MonthBar] = []
+    if g.empty:
+        return [MonthBar(y, m, _MONTH_RU[m], 0.0, 0.0) for (y, m) in months]
+
+    g["_y"] = g["Дата"].dt.year
+    g["_m"] = g["Дата"].dt.month
+    s = pd.to_numeric(g["Сумма"], errors="coerce")
+    for (y, m) in months:
+        sel = s[(g["_y"] == y) & (g["_m"] == m)]
+        income = float(sel[sel > 0].sum())
+        expense = float(-sel[sel < 0].sum())
+        out.append(MonthBar(y, m, _MONTH_RU[m], income, expense))
+    return out
+
+
+# ── разбивка по категориям для кольцевых диаграмм ──────────────────────
+
+@dataclass
+class CategorySlice:
+    name: str
+    amount: float
+
+
+def category_breakdown(df: Optional[pd.DataFrame], d0: date, d1: date,
+                       kind: str) -> list[CategorySlice]:
+    """Суммы по категориям выписки в окне [d0, d1].
+
+    kind: 'income' — положительные операции, 'expense' — отрицательные.
+    Смешанная категория «Членские взносы + Электроэнергия» делится 50/50
+    между членскими взносами и электроэнергией — так же, как в остальных
+    расчётах программы."""
+    if df is None:
+        return []
+    g = df[_window_mask(df, d0, d1)].copy()
+    if g.empty:
+        return []
+    g["_s"] = pd.to_numeric(g["Сумма"], errors="coerce").fillna(0.0)
+    g = g[g["_s"] > 0] if kind == "income" else g[g["_s"] < 0]
+
+    totals: dict[str, float] = {}
+    for _, row in g.iterrows():
+        cat = str(row.get("Категория", "")).strip() or "Прочее"
+        amt = abs(float(row["_s"]))
+        if cat == CAT_MIXED:
+            half = amt / 2.0
+            totals[CAT_VZNOSY] = totals.get(CAT_VZNOSY, 0.0) + half
+            totals[CAT_ELECTRO_OWNERS] = \
+                totals.get(CAT_ELECTRO_OWNERS, 0.0) + half
+        else:
+            totals[cat] = totals.get(cat, 0.0) + amt
+
+    out = [CategorySlice(n, v) for n, v in totals.items() if v > 0.005]
+    out.sort(key=lambda c: c.amount, reverse=True)
+    return out
+
+
+# ── итоговый снимок для виджета ────────────────────────────────────────
+
+@dataclass
+class DashboardData:
+    has_data: bool
+    as_of: date
+    current: Optional[Period]
+    previous: Optional[Period]
+
+    balance: float
+
+    collected: float
+    collected_trend: Optional[float]
+    spent: float
+    spent_trend: Optional[float]
+    electricity: float
+    electricity_trend: Optional[float]
+
+    debt: DebtSummary
+
+    months: list[MonthBar] = field(default_factory=list)
+    months_prev: list[MonthBar] = field(default_factory=list)
+    income_slices: list[CategorySlice] = field(default_factory=list)
+    expense_slices: list[CategorySlice] = field(default_factory=list)
+
+
+def build(df: Optional[pd.DataFrame],
+          as_of: Optional[date] = None) -> DashboardData:
+    """Собирает все показатели дашборда из выписки `df`."""
+    as_of = as_of or date.today()
+    df = normalize_df(df)
+
+    pair = resolve_periods(as_of)
+    cur, prev = pair.current, pair.previous
+
+    balance = current_balance(df)
+    debt = vznosy_debt_summary(df, as_of)
+
+    if cur is None:
+        return DashboardData(
+            has_data=False, as_of=as_of, current=None, previous=None,
+            balance=balance,
+            collected=0.0, collected_trend=None,
+            spent=0.0, spent_trend=None,
+            electricity=0.0, electricity_trend=None,
+            debt=debt,
+        )
+
+    cur_end = min(as_of, cur.date_to)
+    cur_f = flow_sums(df, cur.date_from, cur_end)
+
+    # Сопоставимое окно прошлого периода — тот же сдвиг от его начала.
+    if prev is not None:
+        elapsed = (cur_end - cur.date_from).days
+        prev_end = min(prev.date_from + timedelta(days=elapsed), prev.date_to)
+        prev_f = flow_sums(df, prev.date_from, prev_end)
+    else:
+        prev_f = FlowSums(0.0, 0.0, 0.0)
+
+    has_prev = prev is not None
+
+    return DashboardData(
+        has_data=df is not None,
+        as_of=as_of,
+        current=cur,
+        previous=prev,
+        balance=balance,
+        collected=cur_f.income,
+        collected_trend=trend_pct(cur_f.income, prev_f.income) if has_prev else None,
+        spent=cur_f.expense,
+        spent_trend=trend_pct(cur_f.expense, prev_f.expense) if has_prev else None,
+        electricity=cur_f.electricity,
+        electricity_trend=(trend_pct(cur_f.electricity, prev_f.electricity)
+                           if has_prev else None),
+        debt=debt,
+        months=monthly_breakdown(df, cur),
+        months_prev=monthly_breakdown(df, prev) if has_prev else [],
+        income_slices=category_breakdown(df, cur.date_from, cur_end, "income"),
+        expense_slices=category_breakdown(df, cur.date_from, cur_end, "expense"),
+    )
