@@ -1093,6 +1093,9 @@ class DetailWidget(QWidget):
                         pass
                 else:
                     self.df_full.at[df_idx, col] = new_text
+                    if col == "Категория" and new_text:
+                        if self.combo_cat.findText(new_text) == -1:
+                            self.combo_cat.addItem(new_text)
                 self._manual_rows.add(df_idx)
                 self._manual_cells.add((df_idx, col))
 

@@ -23,6 +23,9 @@ from core.utils import _read_json, DATA_DIR
 
 TRANSACTIONS_FILE = os.path.join(DATA_DIR, "detail_transactions.json")
 
+# Сентинел для build(): «автоматически выбрать предыдущий период» (обратная совместимость)
+_AUTO = object()
+
 # Категории выписки, важные для дашборда
 CAT_VZNOSY = "Членские взносы"
 CAT_ELECTRO_OWNERS = "Электроэнергия (от садоводов)"
@@ -448,15 +451,38 @@ class DashboardData:
     income_slices: list[CategorySlice] = field(default_factory=list)
     expense_slices: list[CategorySlice] = field(default_factory=list)
 
+    # ── поля для произвольного периода сравнения ──────────────────────────
+    # comparison_period_idx: None → сравнения нет
+    comparison_period_idx: Optional[int] = None
+
+    # Абсолютные значения и разницы метрик периода сравнения
+    balance_comp: float = 0.0
+    balance_trend: Optional[float] = None
+    balance_diff: float = 0.0
+
+    collected_comp: float = 0.0
+    collected_diff: float = 0.0
+    spent_comp: float = 0.0
+    spent_diff: float = 0.0
+    electricity_comp: float = 0.0
+    electricity_diff: float = 0.0
+
+    # Категориальные срезы периода сравнения (для вторых кольцевых диаграмм)
+    income_slices_comp: list[CategorySlice] = field(default_factory=list)
+    expense_slices_comp: list[CategorySlice] = field(default_factory=list)
+
 
 def build(df: Optional[pd.DataFrame],
           as_of: Optional[date] = None,
-          selected_period_idx: Optional[int] = None) -> DashboardData:
+          selected_period_idx: Optional[int] = None,
+          comparison_period_idx=_AUTO) -> DashboardData:
     """Собирает все показатели дашборда из выписки `df`.
 
-    selected_period_idx — 0-based индекс в списке all_periods (от самого
-    раннего к позднему). None → автоматически выбирается текущий период
-    (содержащий as_of) или последний по списку.
+    selected_period_idx — 0-based индекс выбранного периода (None → авто).
+    comparison_period_idx — 0-based индекс периода сравнения:
+      _AUTO (по умолчанию) → предыдущий период (обратная совместимость);
+      None → без сравнения;
+      int  → конкретный период (кроме selected_period_idx).
     """
     as_of = as_of or date.today()
     df = normalize_df(df)
@@ -464,9 +490,9 @@ def build(df: Optional[pd.DataFrame],
     all_perds = get_all_periods()
     debt = vznosy_debt_summary(df, as_of)
 
-    # ── выбор периода ─────────────────────────────────────────────────
+    # ── выбор основного периода ───────────────────────────────────────
     if not all_perds:
-        cur, prev, sel_idx = None, None, 0
+        sel_idx, cur = 0, None
     else:
         if selected_period_idx is None:
             sel_idx = None
@@ -478,9 +504,26 @@ def build(df: Optional[pd.DataFrame],
                 sel_idx = len(all_perds) - 1
         else:
             sel_idx = max(0, min(selected_period_idx, len(all_perds) - 1))
-
         cur = all_perds[sel_idx]
-        prev = all_perds[sel_idx - 1] if sel_idx > 0 else None
+
+    # ── выбор периода сравнения ───────────────────────────────────────
+    if cur is None:
+        comp_idx, comp = None, None
+    elif comparison_period_idx is _AUTO:
+        # По умолчанию — предыдущий по списку
+        comp_idx = sel_idx - 1 if sel_idx > 0 else None
+        comp = all_perds[comp_idx] if comp_idx is not None else None
+    elif comparison_period_idx is None:
+        comp_idx, comp = None, None
+    else:
+        c = int(comparison_period_idx)
+        c = max(0, min(c, len(all_perds) - 1))
+        if c == sel_idx:
+            comp_idx, comp = None, None   # нельзя сравнивать с самим собой
+        else:
+            comp_idx, comp = c, all_perds[c]
+
+    has_comp = comp is not None
 
     if cur is None:
         balance = period_end_balance(df, as_of) if df is not None else 0.0
@@ -493,52 +536,77 @@ def build(df: Optional[pd.DataFrame],
             spent=0.0, spent_trend=None,
             electricity=0.0, electricity_trend=None,
             debt=debt,
+            comparison_period_idx=None,
         )
 
-    # Конец окна выбранного периода: если период идёт сейчас — до сегодня,
-    # если уже завершён — до его последнего дня.
-    if cur.date_from <= as_of <= cur.date_to:
-        sel_end = as_of
-    else:
-        sel_end = cur.date_to
+    # ── окна дат ──────────────────────────────────────────────────────
+    # Выбранный период: если идёт сейчас — до сегодня, иначе до конца.
+    sel_end = as_of if (cur.date_from <= as_of <= cur.date_to) else cur.date_to
 
+    # Период сравнения: сопоставимое окно той же длины от его начала.
+    if has_comp:
+        elapsed = (sel_end - cur.date_from).days
+        comp_end = min(comp.date_from + timedelta(days=elapsed), comp.date_to)
+    else:
+        comp_end = None
+
+    # ── метрики выбранного периода ────────────────────────────────────
     balance = period_end_balance(df, sel_end) if df is not None else 0.0
     cur_f = flow_sums(df, cur.date_from, sel_end)
 
-    # Сопоставимое окно прошлого периода — тот же сдвиг от его начала.
-    if prev is not None:
-        elapsed = (sel_end - cur.date_from).days
-        prev_end = min(prev.date_from + timedelta(days=elapsed), prev.date_to)
-        prev_f = flow_sums(df, prev.date_from, prev_end)
+    # ── метрики периода сравнения ─────────────────────────────────────
+    if has_comp:
+        comp_f = flow_sums(df, comp.date_from, comp_end)
+        balance_comp = period_end_balance(df, comp_end) if df is not None else 0.0
     else:
-        prev_f = FlowSums(0.0, 0.0, 0.0)
-
-    has_prev = prev is not None
+        comp_f = FlowSums(0.0, 0.0, 0.0)
+        balance_comp = 0.0
 
     return DashboardData(
         has_data=df is not None,
         as_of=as_of,
         current=cur,
-        previous=prev,
+        previous=comp,                  # comp — период сравнения (любой)
         all_periods=all_perds,
         selected_period_idx=sel_idx,
+        comparison_period_idx=comp_idx,
+
         balance=balance,
         collected=cur_f.income,
-        collected_trend=trend_pct(cur_f.income, prev_f.income) if has_prev else None,
+        collected_trend=trend_pct(cur_f.income, comp_f.income) if has_comp else None,
         spent=cur_f.expense,
-        spent_trend=trend_pct(cur_f.expense, prev_f.expense) if has_prev else None,
+        spent_trend=trend_pct(cur_f.expense, comp_f.expense) if has_comp else None,
         electricity=cur_f.electricity,
-        electricity_trend=(trend_pct(cur_f.electricity, prev_f.electricity)
-                           if has_prev else None),
+        electricity_trend=(trend_pct(cur_f.electricity, comp_f.electricity)
+                           if has_comp else None),
         debt=debt,
+
+        # Абсолютные значения и разницы
+        balance_comp=balance_comp,
+        balance_trend=trend_pct(balance, balance_comp) if has_comp else None,
+        balance_diff=(balance - balance_comp) if has_comp else 0.0,
+        collected_comp=comp_f.income,
+        collected_diff=(cur_f.income - comp_f.income) if has_comp else 0.0,
+        spent_comp=comp_f.expense,
+        spent_diff=(cur_f.expense - comp_f.expense) if has_comp else 0.0,
+        electricity_comp=comp_f.electricity,
+        electricity_diff=(cur_f.electricity - comp_f.electricity) if has_comp else 0.0,
+
+        # Помесячная разбивка
         months=monthly_breakdown(df, cur),
-        months_prev=monthly_breakdown(df, prev) if has_prev else [],
+        months_prev=monthly_breakdown(df, comp) if has_comp else [],
         months_cat=monthly_category_breakdown(df, cur, "income"),
         months_cat_exp=monthly_category_breakdown(df, cur, "expense"),
-        months_cat_prev=(monthly_category_breakdown(df, prev, "income")
-                         if has_prev else []),
-        months_cat_exp_prev=(monthly_category_breakdown(df, prev, "expense")
-                             if has_prev else []),
+        months_cat_prev=(monthly_category_breakdown(df, comp, "income")
+                         if has_comp else []),
+        months_cat_exp_prev=(monthly_category_breakdown(df, comp, "expense")
+                             if has_comp else []),
+
+        # Категориальные срезы для кольцевых диаграмм
         income_slices=category_breakdown(df, cur.date_from, sel_end, "income"),
         expense_slices=category_breakdown(df, cur.date_from, sel_end, "expense"),
+        income_slices_comp=(category_breakdown(df, comp.date_from, comp_end, "income")
+                            if has_comp else []),
+        expense_slices_comp=(category_breakdown(df, comp.date_from, comp_end, "expense")
+                             if has_comp else []),
     )
