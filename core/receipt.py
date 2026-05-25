@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import html
 import os
-from datetime import date
+from datetime import date, timedelta
 
 from PyQt6.QtCore import QMarginsF
 from PyQt6.QtGui import QPageLayout, QPageSize, QTextDocument
@@ -16,6 +16,8 @@ from core.utils import fmt_money
 _MONTHS = ["янв", "фев", "мар", "апр", "май", "июн",
            "июл", "авг", "сен", "окт", "ноя", "дек"]
 
+_fmt_money = fmt_money
+
 
 def _fmt_kwh(v: float | None) -> str:
     if v is None:
@@ -23,7 +25,8 @@ def _fmt_kwh(v: float | None) -> str:
     return f"{v:.0f}"
 
 
-def _build_html(plot: str, df, as_of: date) -> tuple[str, dict]:
+def _build_html(plot: str, df, as_of: date,
+                since: date | None = None) -> tuple[str, dict]:
     meters = energy.load_meters()
     rates = energy.load_rates()
     repls = energy.load_replacements()
@@ -34,10 +37,17 @@ def _build_html(plot: str, df, as_of: date) -> tuple[str, dict]:
     bal = energy.balance(plot, as_of, meters, rates, repls, baseline, df)
     charges = energy.all_charges(plot, meters, rates, repls, up_to=as_of)
 
+    # Фильтр по начальной дате периода
+    if since is not None:
+        charges = [c for c in charges
+                   if date(c["year"], c["month"], 1) >= date(since.year, since.month, 1)]
+
     pay_by_month: dict[tuple[int, int], float] = {}
     for p in energy.payments_breakdown(plot, df):
         d = p["date"]
         if d is None or d > as_of:
+            continue
+        if since is not None and d < since:
             continue
         key = (d.year, d.month)
         pay_by_month[key] = pay_by_month.get(key, 0.0) + p["amount"]
@@ -64,21 +74,47 @@ def _build_html(plot: str, df, as_of: date) -> tuple[str, dict]:
         )
 
     total_charged = sum((c["amount"] or 0.0) for c in charges)
+    total_paid = sum(pay_by_month.values())
 
-    debt_label = "Долг" if bal.debt > 0 else ("Аванс" if bal.debt < 0 else "Без задолженности")
-    debt_color = "#c62828" if bal.debt > 0 else ("#2e7d32" if bal.debt < 0 else "#444")
+    if since is not None:
+        # Баланс накопленный до начала периода — сальдо на входе
+        day_before = since - timedelta(days=1)
+        bal_before = energy.balance(plot, day_before, meters, rates, repls, baseline, df)
+        opening = bal_before.debt
+        period_debt = opening + total_charged - total_paid
+        opening_label = f"Сальдо на {since.strftime('%d.%m.%Y')}"
+        baseline_row = (
+            f"<tr><td>{opening_label}:</td>"
+            f"<td align='right'>{_fmt_money(opening)}</td></tr>"
+        )
+    else:
+        opening = bal.baseline
+        period_debt = bal.debt
+        baseline_row = (
+            f"<tr><td>Начальное сальдо:</td>"
+            f"<td align='right'>{_fmt_money(bal.baseline)}</td></tr>"
+        )
+
+    debt_label = "Долг" if period_debt > 0 else ("Аванс" if period_debt < 0 else "Без задолженности")
+    debt_color = "#c62828" if period_debt > 0 else ("#2e7d32" if period_debt < 0 else "#444")
 
     last_text = "—"
     if bal.last_reading:
         ly, lm, lv = bal.last_reading
         last_text = f"{lv:g}  ({_MONTHS[lm-1]} {ly})"
 
+    if since is not None:
+        period_subtitle = (f"СНТ · период с {since.strftime('%d.%m.%Y')}"
+                           f" по {as_of.strftime('%d.%m.%Y')}")
+    else:
+        period_subtitle = f"СНТ · по состоянию на {as_of.strftime('%d.%m.%Y')}"
+
     body = f"""
     <html><head><meta charset="utf-8"/></head>
     <body style="font-family: 'Segoe UI', Arial, sans-serif; color:#222;">
       <h2 style="margin:0 0 4px 0;">Квитанция за электроэнергию</h2>
       <div style="color:#666; font-size:11pt; margin-bottom:14px;">
-        СНТ · по состоянию на {as_of.strftime('%d.%m.%Y')}
+        {period_subtitle}
       </div>
 
       <table style="margin-bottom:14px; font-size:11pt;">
@@ -110,12 +146,11 @@ def _build_html(plot: str, df, as_of: date) -> tuple[str, dict]:
           <tr><td>Начислено за период:</td>
               <td align="right">{_fmt_money(total_charged)}</td></tr>
           <tr><td>Оплачено за период:</td>
-              <td align="right">{_fmt_money(bal.paid)}</td></tr>
-          <tr><td>Начальное сальдо:</td>
-              <td align="right">{_fmt_money(bal.baseline)}</td></tr>
+              <td align="right">{_fmt_money(total_paid)}</td></tr>
+          {baseline_row}
           <tr style="font-weight:700; font-size:12pt;">
             <td style="color:{debt_color};">{debt_label}:</td>
-            <td align="right" style="color:{debt_color};">{_fmt_money(abs(bal.debt))}</td>
+            <td align="right" style="color:{debt_color};">{_fmt_money(abs(period_debt))}</td>
           </tr>
         </table>
       </div>
@@ -128,9 +163,9 @@ def _build_html(plot: str, df, as_of: date) -> tuple[str, dict]:
     """
     return body, {
         "owner": owner_text,
-        "debt": bal.debt,
+        "debt": period_debt,
         "charged": total_charged,
-        "paid": bal.paid,
+        "paid": total_paid,
     }
 
 
@@ -155,10 +190,11 @@ def render_pdf(html_body: str, out_path: str) -> None:
 
 
 def save_plot_receipt_pdf(plot: str, df, out_path: str,
-                          as_of: date | None = None) -> dict:
+                          as_of: date | None = None,
+                          since: date | None = None) -> dict:
     """Сохраняет квитанцию для участка в PDF. Возвращает метаданные."""
     as_of = as_of or date.today()
-    body, meta = _build_html(plot, df, as_of)
+    body, meta = _build_html(plot, df, as_of, since=since)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".",
                 exist_ok=True)
     render_pdf(body, out_path)
