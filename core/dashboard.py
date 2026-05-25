@@ -144,6 +144,11 @@ class PeriodPair:
     previous: Optional[Period]
 
 
+def get_all_periods() -> list[Period]:
+    """Все периоды ЧВ, отсортированные от самого раннего к самому позднему."""
+    return _periods()
+
+
 def resolve_periods(as_of: date) -> PeriodPair:
     """Текущий период — содержащий as_of; прошлый — предыдущий по списку."""
     periods = _periods()
@@ -198,6 +203,14 @@ def current_balance(df: Optional[pd.DataFrame]) -> float:
     if df is None:
         return 0.0
     return float(pd.to_numeric(df["Сумма"], errors="coerce").sum())
+
+
+def period_end_balance(df: Optional[pd.DataFrame], end_date: date) -> float:
+    """Накопленный остаток с первой транзакции по end_date включительно."""
+    if df is None:
+        return 0.0
+    mask = df["Дата"].dt.date <= end_date
+    return float(pd.to_numeric(df.loc[mask, "Сумма"], errors="coerce").fillna(0.0).sum())
 
 
 def trend_pct(current: float, previous: Optional[float]) -> Optional[float]:
@@ -259,6 +272,19 @@ class MonthBar:
     expense: float
 
 
+@dataclass
+class MonthCategoryBar:
+    """Помесячный поток с разбивкой по категориям (для сгруппированной гистограммы)."""
+    year: int
+    month: int
+    label: str
+    categories: list  # [(name: str, amount: float), ...]
+
+    @property
+    def total(self) -> float:
+        return sum(a for _, a in self.categories)
+
+
 def monthly_breakdown(df: Optional[pd.DataFrame],
                       period: Optional[Period]) -> list[MonthBar]:
     """Помесячные приход/расход за 12 месяцев периода."""
@@ -281,6 +307,66 @@ def monthly_breakdown(df: Optional[pd.DataFrame],
         income = float(sel[sel > 0].sum())
         expense = float(-sel[sel < 0].sum())
         out.append(MonthBar(y, m, _MONTH_RU[m], income, expense))
+    return out
+
+
+# ── помесячная разбивка по категориям для гистограмм ─────────────────
+
+def monthly_category_breakdown(df: Optional[pd.DataFrame],
+                               period: Optional[Period],
+                               kind: str) -> list[MonthCategoryBar]:
+    """Помесячный поток по категориям за 12 месяцев периода.
+
+    kind: 'income' — положительные операции, 'expense' — отрицательные.
+    Смешанная категория делится поровну между членскими взносами и
+    электроэнергией (как в остальных расчётах программы)."""
+    if period is None:
+        return []
+    months = _month_iter(period.date_from, 12)
+    if df is None:
+        return [MonthCategoryBar(y, m, _MONTH_RU[m], []) for y, m in months]
+
+    g = df[_window_mask(df, period.date_from, period.date_to)].copy()
+    g["_s"] = pd.to_numeric(g["Сумма"], errors="coerce").fillna(0.0)
+
+    # Разворачиваем смешанную категорию
+    mixed_mask = g["Категория"] == CAT_MIXED
+    if mixed_mask.any():
+        half_s = g.loc[mixed_mask, "_s"] / 2.0
+        vznosy_rows = g[mixed_mask].copy()
+        vznosy_rows["Категория"] = CAT_VZNOSY
+        vznosy_rows["_s"] = half_s.values
+        electro_rows = g[mixed_mask].copy()
+        electro_rows["Категория"] = CAT_ELECTRO_OWNERS
+        electro_rows["_s"] = half_s.values
+        g = pd.concat([g[~mixed_mask], vznosy_rows, electro_rows],
+                      ignore_index=True)
+
+    if kind == "income":
+        g = g[g["_s"] > 0].copy()
+    else:
+        g = g[g["_s"] < 0].copy()
+        g["_s"] = g["_s"].abs()
+
+    if g.empty:
+        return [MonthCategoryBar(y, m, _MONTH_RU[m], []) for y, m in months]
+
+    g["_y"] = g["Дата"].dt.year
+    g["_m"] = g["Дата"].dt.month
+    g["Категория"] = g["Категория"].fillna("").apply(
+        lambda x: x.strip() or "Прочее")
+
+    grouped = g.groupby(["_y", "_m", "Категория"])["_s"].sum()
+
+    out: list[MonthCategoryBar] = []
+    for (y, m) in months:
+        try:
+            month_s = grouped.xs((y, m), level=["_y", "_m"])
+            cats = [(cat, float(v)) for cat, v in month_s.items() if v > 0.005]
+            cats.sort(key=lambda x: x[1], reverse=True)
+        except KeyError:
+            cats = []
+        out.append(MonthCategoryBar(y, m, _MONTH_RU[m], cats))
     return out
 
 
@@ -345,27 +431,63 @@ class DashboardData:
 
     debt: DebtSummary
 
+    # Все доступные периоды + индекс выбранного (для UI-комбобокса)
+    all_periods: list[Period] = field(default_factory=list)
+    selected_period_idx: int = 0
+
+    # Простые месячные итоги (legacy, оставлены для совместимости)
     months: list[MonthBar] = field(default_factory=list)
     months_prev: list[MonthBar] = field(default_factory=list)
+
+    # Помесячные данные по категориям (для grouped stacked chart)
+    months_cat: list[MonthCategoryBar] = field(default_factory=list)
+    months_cat_exp: list[MonthCategoryBar] = field(default_factory=list)
+    months_cat_prev: list[MonthCategoryBar] = field(default_factory=list)
+    months_cat_exp_prev: list[MonthCategoryBar] = field(default_factory=list)
+
     income_slices: list[CategorySlice] = field(default_factory=list)
     expense_slices: list[CategorySlice] = field(default_factory=list)
 
 
 def build(df: Optional[pd.DataFrame],
-          as_of: Optional[date] = None) -> DashboardData:
-    """Собирает все показатели дашборда из выписки `df`."""
+          as_of: Optional[date] = None,
+          selected_period_idx: Optional[int] = None) -> DashboardData:
+    """Собирает все показатели дашборда из выписки `df`.
+
+    selected_period_idx — 0-based индекс в списке all_periods (от самого
+    раннего к позднему). None → автоматически выбирается текущий период
+    (содержащий as_of) или последний по списку.
+    """
     as_of = as_of or date.today()
     df = normalize_df(df)
 
-    pair = resolve_periods(as_of)
-    cur, prev = pair.current, pair.previous
-
-    balance = current_balance(df)
+    all_perds = get_all_periods()
     debt = vznosy_debt_summary(df, as_of)
 
+    # ── выбор периода ─────────────────────────────────────────────────
+    if not all_perds:
+        cur, prev, sel_idx = None, None, 0
+    else:
+        if selected_period_idx is None:
+            sel_idx = None
+            for i, p in enumerate(all_perds):
+                if p.date_from <= as_of <= p.date_to:
+                    sel_idx = i
+                    break
+            if sel_idx is None:
+                sel_idx = len(all_perds) - 1
+        else:
+            sel_idx = max(0, min(selected_period_idx, len(all_perds) - 1))
+
+        cur = all_perds[sel_idx]
+        prev = all_perds[sel_idx - 1] if sel_idx > 0 else None
+
     if cur is None:
+        balance = period_end_balance(df, as_of) if df is not None else 0.0
         return DashboardData(
-            has_data=False, as_of=as_of, current=None, previous=None,
+            has_data=df is not None, as_of=as_of,
+            current=None, previous=None,
+            all_periods=all_perds, selected_period_idx=0,
             balance=balance,
             collected=0.0, collected_trend=None,
             spent=0.0, spent_trend=None,
@@ -373,12 +495,19 @@ def build(df: Optional[pd.DataFrame],
             debt=debt,
         )
 
-    cur_end = min(as_of, cur.date_to)
-    cur_f = flow_sums(df, cur.date_from, cur_end)
+    # Конец окна выбранного периода: если период идёт сейчас — до сегодня,
+    # если уже завершён — до его последнего дня.
+    if cur.date_from <= as_of <= cur.date_to:
+        sel_end = as_of
+    else:
+        sel_end = cur.date_to
+
+    balance = period_end_balance(df, sel_end) if df is not None else 0.0
+    cur_f = flow_sums(df, cur.date_from, sel_end)
 
     # Сопоставимое окно прошлого периода — тот же сдвиг от его начала.
     if prev is not None:
-        elapsed = (cur_end - cur.date_from).days
+        elapsed = (sel_end - cur.date_from).days
         prev_end = min(prev.date_from + timedelta(days=elapsed), prev.date_to)
         prev_f = flow_sums(df, prev.date_from, prev_end)
     else:
@@ -391,6 +520,8 @@ def build(df: Optional[pd.DataFrame],
         as_of=as_of,
         current=cur,
         previous=prev,
+        all_periods=all_perds,
+        selected_period_idx=sel_idx,
         balance=balance,
         collected=cur_f.income,
         collected_trend=trend_pct(cur_f.income, prev_f.income) if has_prev else None,
@@ -402,6 +533,12 @@ def build(df: Optional[pd.DataFrame],
         debt=debt,
         months=monthly_breakdown(df, cur),
         months_prev=monthly_breakdown(df, prev) if has_prev else [],
-        income_slices=category_breakdown(df, cur.date_from, cur_end, "income"),
-        expense_slices=category_breakdown(df, cur.date_from, cur_end, "expense"),
+        months_cat=monthly_category_breakdown(df, cur, "income"),
+        months_cat_exp=monthly_category_breakdown(df, cur, "expense"),
+        months_cat_prev=(monthly_category_breakdown(df, prev, "income")
+                         if has_prev else []),
+        months_cat_exp_prev=(monthly_category_breakdown(df, prev, "expense")
+                             if has_prev else []),
+        income_slices=category_breakdown(df, cur.date_from, sel_end, "income"),
+        expense_slices=category_breakdown(df, cur.date_from, sel_end, "expense"),
     )
