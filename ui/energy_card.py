@@ -8,7 +8,8 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QVBoxLayout,
 )
 
 from core import energy
@@ -26,6 +27,62 @@ class _NumItem(QTableWidgetItem):
             return self._value < other._value
         except AttributeError:
             return super().__lt__(other)
+
+
+class _PdfPeriodDialog(QDialog):
+    """Диалог выбора начального месяца/года для PDF-квитанции."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Период квитанции")
+        self.setMinimumWidth(320)
+
+        today = date.today()
+        default_year = today.year - 3
+
+        layout = QVBoxLayout(self)
+
+        info = QLabel("Укажите начало периода для квитанции.\n"
+                      "Оставьте «Весь период» для полной истории.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("С месяца:"))
+
+        self._month_box = QComboBox()
+        MONTHS = ["янв", "фев", "мар", "апр", "май", "июн",
+                  "июл", "авг", "сен", "окт", "ноя", "дек"]
+        self._month_box.addItems(MONTHS)
+        self._month_box.setCurrentIndex(0)
+        row.addWidget(self._month_box)
+
+        self._year_spin = QSpinBox()
+        self._year_spin.setRange(2000, today.year)
+        self._year_spin.setValue(default_year)
+        self._year_spin.setGroupSeparatorShown(False)
+        row.addWidget(self._year_spin)
+        layout.addLayout(row)
+
+        buttons = QDialogButtonBox(self)
+        self._btn_period = buttons.addButton("За период", QDialogButtonBox.ButtonRole.AcceptRole)
+        self._btn_all = buttons.addButton("Весь период", QDialogButtonBox.ButtonRole.ResetRole)
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(self.reject)
+        self._btn_all.clicked.connect(self._accept_all)
+        self._btn_period.clicked.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self._use_since = True
+
+    def _accept_all(self):
+        self._use_since = False
+        self.accept()
+
+    def since_date(self) -> date | None:
+        if not self._use_since:
+            return None
+        return date(self._year_spin.value(), self._month_box.currentIndex() + 1, 1)
 
 
 class MeterReplacementDialog(QDialog):
@@ -623,14 +680,24 @@ class PlotCardDialog(QDialog):
             QMessageBox.information(self, "Квитанции",
                                     "Модуль квитанций ещё не подключён.")
             return
+
+        dlg = _PdfPeriodDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        since = dlg.since_date()
+
+        today = date.today()
+        default_name = (
+            f"Уч_{self._plot}_{since.strftime('%Y%m')}-{today.strftime('%Y%m')}.pdf"
+            if since else f"Уч_{self._plot}.pdf"
+        )
         path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить квитанцию", f"Уч_{self._plot}.pdf",
-            "PDF (*.pdf)"
+            self, "Сохранить квитанцию", default_name, "PDF (*.pdf)"
         )
         if not path:
             return
         try:
-            receipt.save_plot_receipt_pdf(self._plot, self._df, path)
+            receipt.save_plot_receipt_pdf(self._plot, self._df, path, since=since)
             QMessageBox.information(self, "Квитанция", f"Сохранено:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
