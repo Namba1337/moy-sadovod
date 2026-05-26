@@ -25,8 +25,18 @@ def _fmt_kwh(v: float | None) -> str:
     return f"{v:.0f}"
 
 
+def _fmt_balance_cols(balance: float) -> tuple[str, str]:
+    """Возвращает (долг, переплата) — одно заполнено, второе '—'."""
+    if balance > 0.005:
+        return _fmt_money(balance), "—"
+    if balance < -0.005:
+        return "—", _fmt_money(abs(balance))
+    return "—", "—"
+
+
 def _build_html(plot: str, df, as_of: date,
-                since: date | None = None) -> tuple[str, dict]:
+                since: date | None = None,
+                zero_opening: bool = False) -> tuple[str, dict]:
     meters = energy.load_meters()
     rates = energy.load_rates()
     repls = energy.load_replacements()
@@ -42,6 +52,12 @@ def _build_html(plot: str, df, as_of: date,
         charges = [c for c in charges
                    if date(c["year"], c["month"], 1) >= date(since.year, since.month, 1)]
 
+    base_start_str = baseline.get("start_date", "")
+    try:
+        base_start: date | None = date.fromisoformat(base_start_str) if base_start_str else None
+    except (ValueError, TypeError):
+        base_start = None
+
     pay_by_month: dict[tuple[int, int], float] = {}
     for p in energy.payments_breakdown(plot, df):
         d = p["date"]
@@ -49,51 +65,77 @@ def _build_html(plot: str, df, as_of: date,
             continue
         if since is not None and d < since:
             continue
+        if base_start is not None and d < base_start:
+            continue
         key = (d.year, d.month)
         pay_by_month[key] = pay_by_month.get(key, 0.0) + p["amount"]
 
-    rows_html = []
-    for c in charges:
-        period = f"{_MONTHS[c['month']-1]} {c['year']}"
-        value = f"{c['value']:g}"
-        if c["prev_value"] is not None:
-            value += f" <span style='color:#888'>(пред. {c['prev_value']:g})</span>"
-        rate_text = f"{c['rate']:.2f}" if c["rate"] is not None else "—"
-        kwh_text = _fmt_kwh(c["kwh"])
-        amount_text = _fmt_money(c["amount"])
-        paid = pay_by_month.get((c["year"], c["month"]), 0.0)
-        rows_html.append(
-            f"<tr>"
-            f"<td>{period}</td>"
-            f"<td align='right'>{value}</td>"
-            f"<td align='right'>{kwh_text}</td>"
-            f"<td align='right'>{rate_text}</td>"
-            f"<td align='right'>{amount_text}</td>"
-            f"<td align='right'>{_fmt_money(paid) if paid else '—'}</td>"
-            f"</tr>"
-        )
-
-    total_charged = sum((c["amount"] or 0.0) for c in charges)
-    total_paid = sum(pay_by_month.values())
-
+    # Вычисляем входящее сальдо ДО цикла строк
     if since is not None:
-        # Баланс накопленный до начала периода — сальдо на входе
         day_before = since - timedelta(days=1)
         bal_before = energy.balance(plot, day_before, meters, rates, repls, baseline, df)
         opening = bal_before.debt
-        period_debt = opening + total_charged - total_paid
         opening_label = f"Сальдо на {since.strftime('%d.%m.%Y')}"
-        baseline_row = (
-            f"<tr><td>{opening_label}:</td>"
-            f"<td align='right'>{_fmt_money(opening)}</td></tr>"
-        )
+        period_subtitle = (f"СНТ · период с {since.strftime('%d.%m.%Y')}"
+                           f" по {as_of.strftime('%d.%m.%Y')}")
     else:
         opening = bal.baseline
-        period_debt = bal.debt
-        baseline_row = (
-            f"<tr><td>Начальное сальдо:</td>"
-            f"<td align='right'>{_fmt_money(bal.baseline)}</td></tr>"
+        opening_label = "Начальное сальдо"
+        period_subtitle = f"СНТ · по состоянию на {as_of.strftime('%d.%m.%Y')}"
+
+    if zero_opening:
+        opening = 0.0
+        opening_label = "Начальное сальдо"
+
+    baseline_row = (
+        f"<tr><td>{opening_label}:</td>"
+        f"<td align='right'>{_fmt_money(opening)}</td></tr>"
+    )
+
+    # Платежи из месяцев без начислений относим к ближайшему следующему
+    # месяцу с показанием; платежи после последнего показания — к последнему.
+    sorted_charge_yms = sorted((c["year"], c["month"]) for c in charges)
+    bucketed: dict[tuple[int, int], float] = {}
+    for pay_ym, amt in pay_by_month.items():
+        target = next((cm for cm in sorted_charge_yms if cm >= pay_ym), None)
+        if target is None and sorted_charge_yms:
+            target = sorted_charge_yms[-1]
+        if target is not None:
+            bucketed[target] = bucketed.get(target, 0.0) + amt
+
+    running_balance = opening
+    rows_html = []
+    for c in charges:
+        period = f"{_MONTHS[c['month']-1]} {c['year']}"
+        prev_text = f"{c['prev_value']:g}" if c["prev_value"] is not None else "—"
+        curr_text = f"{c['value']:g}"
+        rate_text = f"{c['rate']:.2f}" if c["rate"] is not None else "—"
+        amount_text = _fmt_money(c["amount"])
+        paid = bucketed.get((c["year"], c["month"]), 0.0)
+
+        zad_dolg, zad_perep = _fmt_balance_cols(running_balance)
+        running_balance += (c["amount"] or 0.0) - paid
+        itogo_dolg, itogo_perep = _fmt_balance_cols(running_balance)
+
+        rows_html.append(
+            f"<tr>"
+            f"<td>{period}</td>"
+            f"<td align='center'>—</td>"
+            f"<td align='right'>{rate_text}</td>"
+            f"<td align='right'>{prev_text}</td>"
+            f"<td align='right'>{curr_text}</td>"
+            f"<td align='right'>{zad_dolg}</td>"
+            f"<td align='right'>{zad_perep}</td>"
+            f"<td align='right'>{amount_text}</td>"
+            f"<td align='right'>{_fmt_money(paid) if paid else '—'}</td>"
+            f"<td align='right'>{itogo_dolg}</td>"
+            f"<td align='right'>{itogo_perep}</td>"
+            f"</tr>"
         )
+
+    period_debt = running_balance
+    total_charged = sum((c["amount"] or 0.0) for c in charges)
+    total_paid = sum(pay_by_month.values())
 
     debt_label = "Долг" if period_debt > 0 else ("Аванс" if period_debt < 0 else "Без задолженности")
     debt_color = "#c62828" if period_debt > 0 else ("#2e7d32" if period_debt < 0 else "#444")
@@ -103,11 +145,9 @@ def _build_html(plot: str, df, as_of: date,
         ly, lm, lv = bal.last_reading
         last_text = f"{lv:g}  ({_MONTHS[lm-1]} {ly})"
 
-    if since is not None:
-        period_subtitle = (f"СНТ · период с {since.strftime('%d.%m.%Y')}"
-                           f" по {as_of.strftime('%d.%m.%Y')}")
-    else:
-        period_subtitle = f"СНТ · по состоянию на {as_of.strftime('%d.%m.%Y')}"
+    th = ("background:#eef3f9; font-size:9pt; padding:4px 5px; "
+          "border:1px solid #bbb; text-align:center;")
+    td_style = "font-size:9pt; padding:4px 5px;"
 
     body = f"""
     <html><head><meta charset="utf-8"/></head>
@@ -123,21 +163,31 @@ def _build_html(plot: str, df, as_of: date,
         <tr><td><b>Последнее показание:</b></td><td>&nbsp;&nbsp;{last_text}</td></tr>
       </table>
 
-      <table border="1" cellspacing="0" cellpadding="6"
-             style="border-collapse:collapse; width:100%; font-size:10pt;">
-        <thead style="background:#eef3f9;">
+      <table border="1" cellspacing="0" cellpadding="0"
+             style="border-collapse:collapse; width:100%;">
+        <thead>
           <tr>
-            <th align="left">Период</th>
-            <th align="right">Показание</th>
-            <th align="right">Расход, кВт·ч</th>
-            <th align="right">Тариф, ₽/кВт·ч</th>
-            <th align="right">Начислено</th>
-            <th align="right">Оплачено</th>
+            <th rowspan="2" style="{th}">Период</th>
+            <th rowspan="2" style="{th}">№ счётчика</th>
+            <th rowspan="2" style="{th}">Тариф,<br/>руб./кВтч</th>
+            <th colspan="2" style="{th}">Показания инд. прибора учёта (кВтч)</th>
+            <th colspan="2" style="{th}">Задолженность</th>
+            <th rowspan="2" style="{th}">Начислено</th>
+            <th rowspan="2" style="{th}">Оплачено</th>
+            <th colspan="2" style="{th}">Итого к оплате</th>
+          </tr>
+          <tr>
+            <th style="{th}">Предыдущие</th>
+            <th style="{th}">Текущие</th>
+            <th style="{th}">Долг</th>
+            <th style="{th}">Переплата</th>
+            <th style="{th}">Долг</th>
+            <th style="{th}">Переплата</th>
           </tr>
         </thead>
         <tbody>
           {''.join(rows_html) if rows_html else
-           "<tr><td colspan='6' align='center' style='color:#888'>Нет данных по показаниям</td></tr>"}
+           f"<tr><td colspan='11' align='center' style='color:#888;{td_style}'>Нет данных по показаниям</td></tr>"}
         </tbody>
       </table>
 
@@ -169,14 +219,16 @@ def _build_html(plot: str, df, as_of: date,
     }
 
 
-def render_pdf(html_body: str, out_path: str) -> None:
+def render_pdf(html_body: str, out_path: str, landscape: bool = False) -> None:
     """Рендерит HTML в PDF через QTextDocument + QPrinter."""
     printer = QPrinter(QPrinter.PrinterMode.HighResolution)
     printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
     printer.setOutputFileName(out_path)
+    orientation = (QPageLayout.Orientation.Landscape if landscape
+                   else QPageLayout.Orientation.Portrait)
     layout = QPageLayout(
         QPageSize(QPageSize.PageSizeId.A4),
-        QPageLayout.Orientation.Portrait,
+        orientation,
         QMarginsF(15, 15, 15, 15),
         QPageLayout.Unit.Millimeter,
     )
@@ -191,13 +243,14 @@ def render_pdf(html_body: str, out_path: str) -> None:
 
 def save_plot_receipt_pdf(plot: str, df, out_path: str,
                           as_of: date | None = None,
-                          since: date | None = None) -> dict:
+                          since: date | None = None,
+                          zero_opening: bool = False) -> dict:
     """Сохраняет квитанцию для участка в PDF. Возвращает метаданные."""
     as_of = as_of or date.today()
-    body, meta = _build_html(plot, df, as_of, since=since)
+    body, meta = _build_html(plot, df, as_of, since=since, zero_opening=zero_opening)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".",
                 exist_ok=True)
-    render_pdf(body, out_path)
+    render_pdf(body, out_path, landscape=True)
     return meta
 
 
