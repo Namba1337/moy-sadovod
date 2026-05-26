@@ -6,6 +6,9 @@
 *.pyo
 /dist/
 /build/
+/installer/
 *.spec
 *.snt
 *.pdf
+err.txt
+out.txt
