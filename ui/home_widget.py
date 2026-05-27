@@ -265,7 +265,6 @@ class _KpiCard(QFrame):
 
         self._trend.setText(text)
         self._trend.setStyleSheet(f"color:{color}; background:transparent;")
-        self._trend.setToolTip("По сравнению с выбранным периодом сравнения")
         self._trend.setVisible(True)
 
     def minimumSizeHint(self) -> QSize:
