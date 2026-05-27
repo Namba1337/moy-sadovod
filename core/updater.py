@@ -1,9 +1,9 @@
-"""Система облачных обновлений через GitHub Releases.
+"""Система облачных обновлений через публичный JSON-манифест.
 
 Архитектура:
-    1. UpdateChecker.check() — фоновой поток, ходит в GitHub API,
-       парсит latest-release, сравнивает версии, отдаёт ReleaseInfo
-       сигналом updateAvailable (или noUpdate / errorOccurred).
+    1. UpdateChecker.check() — фоновой поток, скачивает UPDATE_MANIFEST_URL,
+       сравнивает версии, отдаёт ReleaseInfo сигналом updateAvailable
+       (или noUpdate / errorOccurred).
     2. UpdateDownloader.start() — фоновой поток, качает установщик
        с прогрессом (downloadProgress), проверяет SHA-256, отдаёт путь
        к локальному .exe сигналом downloadFinished.
@@ -11,10 +11,17 @@
        (/SILENT /NORESTART /CLOSEAPPLICATIONS) и просит приложение
        завершиться.
 
-Версия приложения — единственная точка истины: APP_VERSION ниже.
-build.bat читает её и подставляет в installer.iss.
+Формат манифеста (публичный Gist или любой HTTPS-URL):
+    {
+        "version": "1.2.3",
+        "notes":   "Что нового в этой версии...",
+        "download_url": "https://..../MoySadovod_Setup_v1.2.3.exe",
+        "sha256":  "abcdef0123456789...",   // опционально, 64 hex-символа
+        "size_bytes": 12345678              // опционально
+    }
 
-Перед использованием задайте GITHUB_OWNER и GITHUB_REPO под свой репозиторий.
+При каждом релизе достаточно обновить JSON в Gist — никаких изменений
+в коде или перекомпиляции не требуется.
 """
 
 from __future__ import annotations
@@ -40,28 +47,20 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 # ──────────────────────────────────────────────────────────────────────────
 
 #: Текущая версия приложения. ЕДИНСТВЕННАЯ ТОЧКА ИСТИНЫ.
-#: При релизе: поднять здесь, прогнать build.bat — он сам обновит installer.iss.
-APP_VERSION = "0.1.2"
+#: При релизе: поднять здесь → прогнать build.bat → обновить Gist.
+APP_VERSION = "0.1.3"
 
-#: GitHub-репозиторий, где публикуются релизы.
-#: ВАЖНО: замените на свои реальные значения перед первым релизом.
-GITHUB_OWNER = "Namba1337"
-GITHUB_REPO = "snt_helper_app"
-
-#: Personal Access Token для приватного репозитория.
-#: Создайте fine-grained PAT с правом Contents: Read-only.
-#: Можно задать через переменную окружения GITHUB_TOKEN или вписать напрямую.
-GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "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")
-
-#: Шаблон имени основного установщика в release assets.
-#: Должен соответствовать OutputBaseFilename из installer.iss.
-INSTALLER_NAME_PATTERN = re.compile(r"MoySadovod_Setup_v[\d.]+\.exe$", re.IGNORECASE)
+#: URL публичного JSON-манифеста обновлений (GitHub Gist raw или любой HTTPS).
+#: Как создать Gist: https://gist.github.com → New gist → Public.
+#: Скопируйте ссылку «Raw» и вставьте сюда.
+#: Пример: "https://gist.githubusercontent.com/Namba1337/<id>/raw/update.json"
+UPDATE_MANIFEST_URL: str = "https://gist.githubusercontent.com/Namba1337/39df34c920f5105092075ef4bc316c09/raw/983e240d5aa5295a38bd32b4bfc76a4ce718b3ad/update.json"
 
 #: Таймаут сетевых запросов (секунды).
 NETWORK_TIMEOUT = 15
 
-#: User-Agent для GitHub API (требуется по их правилам).
-USER_AGENT = f"MoySadovod/{APP_VERSION} (+https://github.com/{GITHUB_OWNER}/{GITHUB_REPO})"
+#: User-Agent для HTTP-запросов.
+USER_AGENT = f"MoySadovod/{APP_VERSION}"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -71,16 +70,14 @@ USER_AGENT = f"MoySadovod/{APP_VERSION} (+https://github.com/{GITHUB_OWNER}/{GIT
 def _parse_version(v: str) -> tuple[int, ...]:
     """'v1.2.3' / '1.2.3' / '1.2' → (1, 2, 3) / (1, 2, 0).
 
-    Хвост вида '-beta.1' игнорируется — релиз-кандидаты считаются равными релизу
-    (для нашего использования это безопасно: канал у нас один).
+    Хвост вида '-beta.1' игнорируется — канал у нас один.
     """
     v = v.strip().lstrip("vV")
-    v = re.split(r"[-+]", v, maxsplit=1)[0]  # отрезать '-beta', '+build'
+    v = re.split(r"[-+]", v, maxsplit=1)[0]
     parts: list[int] = []
     for chunk in v.split("."):
         m = re.match(r"\d+", chunk)
         parts.append(int(m.group()) if m else 0)
-    # нормализуем длину до 3 (major.minor.patch)
     while len(parts) < 3:
         parts.append(0)
     return tuple(parts)
@@ -100,14 +97,13 @@ def is_newer(remote: str, local: str) -> bool:
 
 @dataclass(frozen=True)
 class ReleaseInfo:
-    """Информация о найденном на сервере релизе."""
-    version: str                     # 'v1.2.3' (тег как есть)
-    notes: str                       # release notes (markdown как есть)
-    download_url: str                # ссылка на .exe установщика
-    asset_name: str                  # имя файла .exe
-    size_bytes: int                  # размер установщика
-    sha256_url: Optional[str]        # ссылка на .sha256 (если есть)
-    sha256_expected: Optional[str]   # хеш, если получится скачать .sha256
+    """Информация о доступном обновлении, прочитанная из манифеста."""
+    version: str                    # '1.2.3'
+    notes: str                      # release notes (произвольный текст)
+    download_url: str               # прямая ссылка на .exe установщика
+    asset_name: str                 # имя файла (из URL)
+    size_bytes: int                 # размер в байтах (0 если не указан)
+    sha256_expected: Optional[str]  # SHA-256 для проверки целостности
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -115,49 +111,19 @@ class ReleaseInfo:
 # ──────────────────────────────────────────────────────────────────────────
 
 def _ssl_context() -> ssl.SSLContext:
-    """Системный SSL-контекст. На Windows PyInstaller иногда не видит
-    certifi — используем default_context() с системными корнями.
+    """Системный SSL-контекст.
+
+    На Windows PyInstaller иногда не находит certifi —
+    используем default_context() с системными корнями.
     """
     return ssl.create_default_context()
 
 
-def _auth_headers(*, asset: bool = False) -> dict:
-    h: dict = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/octet-stream" if asset else "application/vnd.github+json",
-    }
-    if GITHUB_TOKEN:
-        h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    return h
-
-
-class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
-    """При редиректе с github.com на сторонний домен (S3) убираем Authorization.
-
-    GitHub asset download: github.com → 302 → S3 pre-signed URL.
-    Если отправить Authorization на S3 — он вернёт 400 SignatureDoesNotMatch.
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new_req is None:
-            return None
-        from urllib.parse import urlparse
-        if urlparse(newurl).netloc not in ("github.com", "api.github.com"):
-            new_req.remove_header("Authorization")
-            new_req.remove_header("authorization")
-        return new_req
-
-
-def _http_get(url: str, *, timeout: int = NETWORK_TIMEOUT, asset: bool = False) -> bytes:
-    """GET через urllib с токеном. При редиректе на S3 снимает Authorization.
-
-    asset=True: ставит Accept: application/octet-stream (для скачивания файлов
-    через GitHub API asset-эндпоинт приватного репо).
-    """
-    req = urllib.request.Request(url, headers=_auth_headers(asset=asset))
+def _http_get(url: str, *, timeout: int = NETWORK_TIMEOUT) -> bytes:
+    """Простой GET-запрос по HTTPS. Без авторизации — только публичные URL."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     opener = urllib.request.build_opener(
-        _StripAuthOnRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())
+        urllib.request.HTTPSHandler(context=_ssl_context())
     )
     with opener.open(req, timeout=timeout) as r:
         return r.read()
@@ -168,75 +134,54 @@ def _http_get(url: str, *, timeout: int = NETWORK_TIMEOUT, asset: bool = False) 
 # ──────────────────────────────────────────────────────────────────────────
 
 class _CheckWorker(QThread):
-    finished_ok = pyqtSignal(object)   # ReleaseInfo | None (None = нет обновлений)
+    finished_ok = pyqtSignal(object)  # ReleaseInfo | None
     failed = pyqtSignal(str)
 
     def run(self) -> None:
+        # Проверяем, что URL манифеста задан
+        if "REPLACE_WITH_YOUR_GIST_ID" in UPDATE_MANIFEST_URL:
+            self.failed.emit("URL манифеста обновлений не настроен.")
+            return
+
         try:
-            api_url = (
-                f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-            )
-            raw = _http_get(api_url)
+            raw = _http_get(UPDATE_MANIFEST_URL)
             data = json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as e:
-            if e.code == 404:
-                # Релизов ещё нет — это не ошибка, просто нет обновлений.
-                self.finished_ok.emit(None)
-                return
             self.failed.emit(f"HTTP {e.code}: {e.reason}")
             return
         except Exception as e:
             self.failed.emit(str(e))
             return
 
-        tag = (data.get("tag_name") or data.get("name") or "").strip()
-        if not tag:
-            self.failed.emit("В ответе GitHub нет tag_name")
+        version = str(data.get("version", "")).strip()
+        if not version:
+            self.failed.emit("В манифесте отсутствует поле 'version'.")
             return
 
-        if not is_newer(tag, APP_VERSION):
+        if not is_newer(version, APP_VERSION):
             self.finished_ok.emit(None)
             return
 
-        # Ищем нужный asset — установщик Inno Setup.
-        installer_asset = None
-        sha256_asset = None
-        for asset in data.get("assets", []) or []:
-            name = asset.get("name", "")
-            if INSTALLER_NAME_PATTERN.search(name):
-                installer_asset = asset
-            elif name.lower().endswith(".sha256"):
-                sha256_asset = asset
-
-        if not installer_asset:
-            self.failed.emit(
-                f"В релизе {tag} не найден установщик "
-                f"(ожидалось имя вида MoySadovod_Setup_vX.Y.Z.exe)"
-            )
+        download_url = str(data.get("download_url", "")).strip()
+        if not download_url:
+            self.failed.emit("В манифесте отсутствует поле 'download_url'.")
             return
 
-        # Подтянем .sha256 (если есть) — он маленький, можно прямо тут.
+        # Имя файла берём из URL
+        asset_name = Path(download_url.split("?")[0]).name or "MoySadovod_Setup.exe"
+
+        # SHA-256 — опционально
+        sha256_raw = str(data.get("sha256", "")).strip().lower()
         sha256_expected: Optional[str] = None
-        sha256_url: Optional[str] = None
-        if sha256_asset:
-            sha256_url = sha256_asset.get("url") or sha256_asset.get("browser_download_url")
-            try:
-                sha_raw = _http_get(sha256_url, asset=True).decode("utf-8", errors="replace")
-                # Формат файла: "<hex>  <filename>" или просто "<hex>"
-                first_token = sha_raw.strip().split()[0] if sha_raw.strip() else ""
-                if re.fullmatch(r"[0-9a-fA-F]{64}", first_token):
-                    sha256_expected = first_token.lower()
-            except Exception:
-                # Не критично — продолжим без проверки хеша, но предупредим.
-                pass
+        if re.fullmatch(r"[0-9a-f]{64}", sha256_raw):
+            sha256_expected = sha256_raw
 
         self.finished_ok.emit(ReleaseInfo(
-            version=tag,
-            notes=(data.get("body") or "").strip(),
-            download_url=installer_asset.get("url") or installer_asset["browser_download_url"],
-            asset_name=installer_asset["name"],
-            size_bytes=int(installer_asset.get("size") or 0),
-            sha256_url=sha256_url,
+            version=version,
+            notes=str(data.get("notes", "")).strip(),
+            download_url=download_url,
+            asset_name=asset_name,
+            size_bytes=int(data.get("size_bytes", 0) or 0),
             sha256_expected=sha256_expected,
         ))
 
@@ -244,7 +189,7 @@ class _CheckWorker(QThread):
 class UpdateChecker(QObject):
     """Фасад для проверки обновлений. Использовать как одноразовый объект."""
 
-    updateAvailable = pyqtSignal(object)   # ReleaseInfo
+    updateAvailable = pyqtSignal(object)  # ReleaseInfo
     noUpdate = pyqtSignal()
     errorOccurred = pyqtSignal(str)
 
@@ -273,8 +218,8 @@ class UpdateChecker(QObject):
 # ──────────────────────────────────────────────────────────────────────────
 
 class _DownloadWorker(QThread):
-    progress = pyqtSignal(int, int)   # bytes_done, bytes_total
-    finished_ok = pyqtSignal(str)     # путь к скачанному файлу
+    progress = pyqtSignal(int, int)  # bytes_done, bytes_total
+    finished_ok = pyqtSignal(str)   # путь к скачанному файлу
     failed = pyqtSignal(str)
 
     def __init__(self, info: ReleaseInfo, dest_path: str,
@@ -288,12 +233,14 @@ class _DownloadWorker(QThread):
         self._cancel = True
 
     def run(self) -> None:
-        url = self._info.download_url
         dest = self._dest_path
         try:
-            req = urllib.request.Request(url, headers=_auth_headers(asset=True))
+            req = urllib.request.Request(
+                self._info.download_url,
+                headers={"User-Agent": USER_AGENT},
+            )
             opener = urllib.request.build_opener(
-                _StripAuthOnRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())
+                urllib.request.HTTPSHandler(context=_ssl_context())
             )
             with opener.open(req, timeout=NETWORK_TIMEOUT) as resp:
                 total = int(resp.headers.get("Content-Length") or
@@ -320,15 +267,15 @@ class _DownloadWorker(QThread):
                         done += len(chunk)
                         self.progress.emit(done, total)
 
-                # Атомарно переименуем .part → финальное имя.
+                # Атомарно переименуем .part → финальное имя
                 if os.path.exists(dest):
                     os.remove(dest)
                 os.rename(tmp_path, dest)
 
-                # Проверка целостности.
+                # Проверка целостности
                 if self._info.sha256_expected:
                     actual = hasher.hexdigest().lower()
-                    if actual != self._info.sha256_expected.lower():
+                    if actual != self._info.sha256_expected:
                         try:
                             os.remove(dest)
                         except OSError:
@@ -349,7 +296,7 @@ class UpdateDownloader(QObject):
     """Фасад для скачивания установщика."""
 
     downloadProgress = pyqtSignal(int, int)
-    downloadFinished = pyqtSignal(str)   # путь к локальному .exe
+    downloadFinished = pyqtSignal(str)  # путь к локальному .exe
     errorOccurred = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
@@ -359,7 +306,6 @@ class UpdateDownloader(QObject):
     def start(self, info: ReleaseInfo) -> None:
         if self._worker and self._worker.isRunning():
             return
-        # Сохраняем в %TEMP% — Inno Setup сам спросит UAC, если нужно.
         tmp_dir = Path(tempfile.gettempdir()) / "MoySadovod_update"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         dest = str(tmp_dir / info.asset_name)
@@ -395,8 +341,6 @@ def run_installer(installer_path: str) -> bool:
         return False
 
     try:
-        # Используем CREATE_NEW_PROCESS_GROUP, чтобы установщик пережил
-        # завершение родителя.
         import subprocess
         DETACHED_PROCESS = 0x00000008
         CREATE_NEW_PROCESS_GROUP = 0x00000200
