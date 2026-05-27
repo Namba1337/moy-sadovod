@@ -1027,10 +1027,10 @@ def main():
 
     if sys.platform == "win32":
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("snt.helper.app")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("moy.sadovod.app")
 
     app = QApplication(sys.argv)
-    app.setApplicationName("СНТ Финансовый учёт")
+    app.setApplicationName("Мой Садовод")
 
     _icon_path = Path(__file__).parent / "resources" / "images" / "logo_2.ico"
     if _icon_path.exists():

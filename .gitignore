@@ -12,3 +12,4 @@
 *.pdf
 err.txt
 out.txt
+build.bat

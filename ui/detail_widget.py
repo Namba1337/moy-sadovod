@@ -211,7 +211,7 @@ class LoadSettingsDialog(QDialog):
         fmt_row = QHBoxLayout()
         fmt_row.setSpacing(8)
         self._btn_sber = QPushButton("СберБизнес (операции)", objectName="fmtActive")
-        self._btn_snt  = QPushButton("СНТ Учёт",              objectName="fmtInactive")
+        self._btn_snt  = QPushButton("Мой Садовод",            objectName="fmtInactive")
         self._btn_sber.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_snt .setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_sber.clicked.connect(lambda: self._set_fmt("sber"))
@@ -286,7 +286,7 @@ class LoadSettingsDialog(QDialog):
                 "Стандартная выгрузка операций из СберБизнес (.xlsx)")
         else:
             self._fmt_hint.setText(
-                "Файл в формате программы СНТ Учёт — столбцы уже приведены к нужному виду")
+                "Файл в формате программы Мой Садовод — столбцы уже приведены к нужному виду")
 
     @property
     def fmt(self) -> str:
