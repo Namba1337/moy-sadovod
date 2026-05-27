@@ -41,12 +41,17 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 #: Текущая версия приложения. ЕДИНСТВЕННАЯ ТОЧКА ИСТИНЫ.
 #: При релизе: поднять здесь, прогнать build.bat — он сам обновит installer.iss.
-APP_VERSION = "1.0.0"
+APP_VERSION = "0.1.0"
 
 #: GitHub-репозиторий, где публикуются релизы.
 #: ВАЖНО: замените на свои реальные значения перед первым релизом.
 GITHUB_OWNER = "Namba1337"
 GITHUB_REPO = "snt_helper_app"
+
+#: Personal Access Token для приватного репозитория.
+#: Создайте fine-grained PAT с правом Contents: Read-only.
+#: Можно задать через переменную окружения GITHUB_TOKEN или вписать напрямую.
+GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "***REMOVED-REVOKED-TOKEN***")
 
 #: Шаблон имени основного установщика в release assets.
 #: Должен соответствовать OutputBaseFilename из installer.iss.
@@ -116,14 +121,36 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+def _auth_headers() -> dict:
+    h: dict = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return h
+
+
 def _http_get(url: str, *, timeout: int = NETWORK_TIMEOUT) -> bytes:
-    """GET без редиректов через urllib (stdlib) с нашим User-Agent."""
-    req = urllib.request.Request(url, headers={
-        "User-Agent": USER_AGENT,
-        "Accept": "application/vnd.github+json",
-    })
+    """GET через urllib (stdlib) с User-Agent и опциональным токеном."""
+    req = urllib.request.Request(url, headers=_auth_headers())
     with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
         return r.read()
+
+
+class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    """При редиректе с github.com на сторонний домен (S3) убираем Authorization.
+
+    GitHub asset download: github.com → 302 → S3 pre-signed URL.
+    Если отправить Authorization на S3 — он вернёт 400 SignatureDoesNotMatch.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        from urllib.parse import urlparse
+        if urlparse(newurl).netloc not in ("github.com", "api.github.com"):
+            new_req.remove_header("Authorization")
+            new_req.remove_header("authorization")
+        return new_req
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -254,9 +281,11 @@ class _DownloadWorker(QThread):
         url = self._info.download_url
         dest = self._dest_path
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT,
-                                        context=_ssl_context()) as resp:
+            req = urllib.request.Request(url, headers=_auth_headers())
+            opener = urllib.request.build_opener(
+                _StripAuthOnRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())
+            )
+            with opener.open(req, timeout=NETWORK_TIMEOUT) as resp:
                 total = int(resp.headers.get("Content-Length") or
                             self._info.size_bytes or 0)
                 hasher = hashlib.sha256()
