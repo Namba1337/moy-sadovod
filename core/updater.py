@@ -45,7 +45,7 @@ APP_VERSION = "1.0.0"
 
 #: GitHub-репозиторий, где публикуются релизы.
 #: ВАЖНО: замените на свои реальные значения перед первым релизом.
-GITHUB_OWNER = "your-github-username"
+GITHUB_OWNER = "Namba1337"
 GITHUB_REPO = "snt_helper_app"
 
 #: Шаблон имени основного установщика в release assets.
