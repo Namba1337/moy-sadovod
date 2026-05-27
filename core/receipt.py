@@ -16,9 +16,6 @@ from core.utils import fmt_money
 _MONTHS = ["янв", "фев", "мар", "апр", "май", "июн",
            "июл", "авг", "сен", "окт", "ноя", "дек"]
 
-_fmt_money = fmt_money
-
-
 def _fmt_kwh(v: float | None) -> str:
     if v is None:
         return "—"
@@ -28,9 +25,9 @@ def _fmt_kwh(v: float | None) -> str:
 def _fmt_balance_cols(balance: float) -> tuple[str, str]:
     """Возвращает (долг, переплата) — одно заполнено, второе '—'."""
     if balance > 0.005:
-        return _fmt_money(balance), "—"
+        return fmt_money(balance), "—"
     if balance < -0.005:
-        return "—", _fmt_money(abs(balance))
+        return "—", fmt_money(abs(balance))
     return "—", "—"
 
 
@@ -89,7 +86,7 @@ def _build_html(plot: str, df, as_of: date,
 
     baseline_row = (
         f"<tr><td>{opening_label}:</td>"
-        f"<td align='right'>{_fmt_money(opening)}</td></tr>"
+        f"<td align='right'>{fmt_money(opening)}</td></tr>"
     )
 
     # Платежи из месяцев без начислений относим к ближайшему следующему
@@ -110,7 +107,7 @@ def _build_html(plot: str, df, as_of: date,
         prev_text = f"{c['prev_value']:g}" if c["prev_value"] is not None else "—"
         curr_text = f"{c['value']:g}"
         rate_text = f"{c['rate']:.2f}" if c["rate"] is not None else "—"
-        amount_text = _fmt_money(c["amount"])
+        amount_text = fmt_money(c["amount"])
         paid = bucketed.get((c["year"], c["month"]), 0.0)
 
         zad_dolg, zad_perep = _fmt_balance_cols(running_balance)
@@ -127,7 +124,7 @@ def _build_html(plot: str, df, as_of: date,
             f"<td align='right'>{zad_dolg}</td>"
             f"<td align='right'>{zad_perep}</td>"
             f"<td align='right'>{amount_text}</td>"
-            f"<td align='right'>{_fmt_money(paid) if paid else '—'}</td>"
+            f"<td align='right'>{fmt_money(paid) if paid else '—'}</td>"
             f"<td align='right'>{itogo_dolg}</td>"
             f"<td align='right'>{itogo_perep}</td>"
             f"</tr>"
@@ -194,13 +191,13 @@ def _build_html(plot: str, df, as_of: date,
       <div style="margin-top:18px; font-size:11pt;">
         <table style="width:100%;">
           <tr><td>Начислено за период:</td>
-              <td align="right">{_fmt_money(total_charged)}</td></tr>
+              <td align="right">{fmt_money(total_charged)}</td></tr>
           <tr><td>Оплачено за период:</td>
-              <td align="right">{_fmt_money(total_paid)}</td></tr>
+              <td align="right">{fmt_money(total_paid)}</td></tr>
           {baseline_row}
           <tr style="font-weight:700; font-size:12pt;">
             <td style="color:{debt_color};">{debt_label}:</td>
-            <td align="right" style="color:{debt_color};">{_fmt_money(abs(period_debt))}</td>
+            <td align="right" style="color:{debt_color};">{fmt_money(abs(period_debt))}</td>
           </tr>
         </table>
       </div>
@@ -284,11 +281,11 @@ def _build_vznosy_html(plot: str, df, as_of: date) -> tuple[str, dict]:
         else:
             tariff_text = f"{y.tariff.get('amount', '?')} ₽"
 
-        amount_text = _fmt_money(y.amount) if y.amount is not None else "—"
+        amount_text = fmt_money(y.amount) if y.amount is not None else "—"
         if y.overridden:
             amount_text += " *"
         period_key = y.period_from.isoformat()
-        paid_text = _fmt_money(py.get(period_key, 0.0)) if py.get(period_key) else "—"
+        paid_text = fmt_money(py.get(period_key, 0.0)) if py.get(period_key) else "—"
 
         rows_html.append(
             f"<tr>"
@@ -336,12 +333,12 @@ def _build_vznosy_html(plot: str, df, as_of: date) -> tuple[str, dict]:
       <div style="margin-top:18px; font-size:11pt;">
         <table style="width:100%;">
           <tr><td>Начислено всего:</td>
-              <td align="right">{_fmt_money(bal.charged)}</td></tr>
+              <td align="right">{fmt_money(bal.charged)}</td></tr>
           <tr><td>Оплачено всего:</td>
-              <td align="right">{_fmt_money(bal.paid)}</td></tr>
+              <td align="right">{fmt_money(bal.paid)}</td></tr>
           <tr style="font-weight:700; font-size:12pt;">
             <td style="color:{debt_color};">{debt_label}:</td>
-            <td align="right" style="color:{debt_color};">{_fmt_money(abs(bal.debt))}</td>
+            <td align="right" style="color:{debt_color};">{fmt_money(abs(bal.debt))}</td>
           </tr>
         </table>
       </div>
@@ -371,36 +368,3 @@ def save_vznosy_receipt_pdf(plot: str, df, out_path: str,
     return meta
 
 
-def receipt_text(plot: str, df, as_of: date | None = None) -> str:
-    """Текстовая квитанция для копирования в мессенджер."""
-    as_of = as_of or date.today()
-    meters = energy.load_meters()
-    rates = energy.load_rates()
-    repls = energy.load_replacements()
-    baseline = energy.load_baseline()
-    owners = energy.owners_map().get(str(plot), [])
-    owner_text = ", ".join(owners) if owners else "—"
-    bal = energy.balance(plot, as_of, meters, rates, repls, baseline, df)
-
-    lines = [
-        f"Квитанция за электроэнергию",
-        f"СНТ · на {as_of.strftime('%d.%m.%Y')}",
-        f"Участок: {plot}",
-        f"Владелец: {owner_text}",
-    ]
-    if bal.last_reading:
-        ly, lm, lv = bal.last_reading
-        lines.append(f"Посл. показание: {lv:g} ({_MONTHS[lm-1]} {ly})")
-    lines += [
-        f"Начислено всего: {_fmt_money(bal.charged)}",
-        f"Оплачено всего: {_fmt_money(bal.paid)}",
-    ]
-    if bal.baseline:
-        lines.append(f"Начальное сальдо: {_fmt_money(bal.baseline)}")
-    if bal.debt > 0:
-        lines.append(f"К ОПЛАТЕ: {_fmt_money(bal.debt)}")
-    elif bal.debt < 0:
-        lines.append(f"Аванс: {_fmt_money(abs(bal.debt))}")
-    else:
-        lines.append("Задолженности нет")
-    return "\n".join(lines)

@@ -63,12 +63,6 @@ def load_baseline() -> dict:
     return _read_json(BASELINE_FILE, {"start_date": "", "balances": {}})
 
 
-def save_baseline(data: dict) -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(BASELINE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 def load_common_meter() -> dict:
     """{"YYYY:M": "значение общего счётчика СНТ на конец месяца"}"""
     return _read_json(COMMON_METER_FILE, {})

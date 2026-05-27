@@ -51,7 +51,7 @@ def _norm_plot(v) -> str:
     return str(v).strip()
 
 
-def normalize_df(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+def _normalize_df(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     """Приводит DataFrame к виду с колонками Дата(datetime), Сумма(знаковая),
     Категория, Участок. Понимает оба формата выписки: с разделёнными
     Поступление/Списание и с уже объединённой Суммой."""
@@ -102,7 +102,7 @@ def load_transactions_df() -> Optional[pd.DataFrame]:
     if not recs:
         return None
     try:
-        return normalize_df(pd.DataFrame(recs))
+        return _normalize_df(pd.DataFrame(recs))
     except Exception:
         return None
 
@@ -201,14 +201,7 @@ def flow_sums(df: Optional[pd.DataFrame], d0: date, d1: date) -> FlowSums:
     return FlowSums(income, expense, electricity)
 
 
-def current_balance(df: Optional[pd.DataFrame]) -> float:
-    """Остаток на счёте — сумма всех знаковых операций за всё время."""
-    if df is None:
-        return 0.0
-    return float(pd.to_numeric(df["Сумма"], errors="coerce").sum())
-
-
-def period_end_balance(df: Optional[pd.DataFrame], end_date: date) -> float:
+def _period_end_balance(df: Optional[pd.DataFrame], end_date: date) -> float:
     """Накопленный остаток с первой транзакции по end_date включительно."""
     if df is None:
         return 0.0
@@ -485,7 +478,7 @@ def build(df: Optional[pd.DataFrame],
       int  → конкретный период (кроме selected_period_idx).
     """
     as_of = as_of or date.today()
-    df = normalize_df(df)
+    df = _normalize_df(df)
 
     all_perds = get_all_periods()
     debt = vznosy_debt_summary(df, as_of)
@@ -526,7 +519,7 @@ def build(df: Optional[pd.DataFrame],
     has_comp = comp is not None
 
     if cur is None:
-        balance = period_end_balance(df, as_of) if df is not None else 0.0
+        balance = _period_end_balance(df, as_of) if df is not None else 0.0
         return DashboardData(
             has_data=df is not None, as_of=as_of,
             current=None, previous=None,
@@ -551,13 +544,13 @@ def build(df: Optional[pd.DataFrame],
         comp_end = None
 
     # ── метрики выбранного периода ────────────────────────────────────
-    balance = period_end_balance(df, sel_end) if df is not None else 0.0
+    balance = _period_end_balance(df, sel_end) if df is not None else 0.0
     cur_f = flow_sums(df, cur.date_from, sel_end)
 
     # ── метрики периода сравнения ─────────────────────────────────────
     if has_comp:
         comp_f = flow_sums(df, comp.date_from, comp_end)
-        balance_comp = period_end_balance(df, comp_end) if df is not None else 0.0
+        balance_comp = _period_end_balance(df, comp_end) if df is not None else 0.0
     else:
         comp_f = FlowSums(0.0, 0.0, 0.0)
         balance_comp = 0.0

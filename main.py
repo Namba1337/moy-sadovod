@@ -2,8 +2,6 @@
 import re
 import json
 import os
-import shutil
-import calendar
 import zipfile
 from datetime import date
 from pathlib import Path
@@ -11,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from core import energy
-from core.utils import DATA_DIR, fmt_money
+from core.utils import DATA_DIR
 from core.updater import APP_VERSION, UpdateChecker
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -23,23 +21,19 @@ from PyQt6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QScrollArea, QSizePolicy,
     QStyleOption, QStyle,
 )
-from PyQt6.QtCore import (Qt, QDate, QPoint, QRectF, QTimer, pyqtSignal,
+from PyQt6.QtCore import (Qt, QPoint, QRectF, QTimer, pyqtSignal,
                            QPropertyAnimation, QParallelAnimationGroup,
                            QEasingCurve, QAbstractAnimation)
-from PyQt6.QtGui import QFont, QFontMetrics, QColor, QAction, QPainter, QPixmap, QPen, QFontDatabase, QPalette, QBitmap, QPainterPath
+from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPainter, QPixmap, QPen, QFontDatabase, QPalette, QBitmap, QPainterPath
 
 
-from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, categorize_row, apply_categorization
-
-
-from ui.plot_detection import get_plot, apply_plot_column, _PLOTS_FILE
-from ui.energy_card import _NumItem, MeterReplacementDialog, PlotCardDialog
-from ui.vznosy_card import VznosyAdjustmentDialog, VznosyCardDialog
+from ui.energy_card import MeterReplacementDialog, PlotCardDialog
+from ui.vznosy_card import VznosyCardDialog
 from ui.rates_widget import RatesWidget, VznosyRatesWidget
 from ui.energy_debt_widget import EnergyDebtWidget
 from ui.vznosy_debt_widget import VznosyDebtWidget
-from ui.plots_widget import PlotsWidget, OwnersPopup, PlotEditDialog, DocCell, DocsWidget, _load_plot_order
-from ui.detail_widget import _SortItem, LoadSettingsDialog, DetailWidget
+from ui.plots_widget import PlotsWidget
+from ui.detail_widget import DetailWidget
 from ui.home_widget import HomeWidget
 
 
