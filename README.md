@@ -60,16 +60,32 @@ snt_app/
 ## Облачные обновления
 
 Приложение само проверяет наличие новой версии при запуске и через кнопку
-**«Проверить обновления»** в сайдбаре. Источник — GitHub Releases.
+**«Проверить обновления»** в сайдбаре. Источник — GitHub Releases приватного репозитория.
 
 ### Настройка (однократно)
 
-1. Открыть `core/updater.py` и заполнить:
-   ```python
-   GITHUB_OWNER = "ваш-логин-или-организация"
-   GITHUB_REPO  = "snt_helper_app"
-   ```
-2. Создать публичный (или приватный — потребует токен) репозиторий с этим именем.
+#### 1. Создать GitHub Personal Access Token
+
+1. Открыть **GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens**.
+2. Нажать **Generate new token**, заполнить:
+   - **Token name**: `MoySadovod Updater`
+   - **Expiration**: по желанию (или No expiration)
+   - **Repository access**: Only selected repositories → выбрать `snt_helper_app`
+   - **Permissions → Contents**: `Read-only`
+3. Скопировать токен (показывается один раз).
+
+#### 2. Прописать токен в updater.py
+
+Открыть `core/updater.py` и вставить токен:
+
+```python
+GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "ghp_ВАШ_ТОКЕН_ЗДЕСЬ")
+```
+
+`GITHUB_OWNER` и `GITHUB_REPO` уже заполнены верно.
+
+> **Безопасность:** токен имеет права только на чтение содержимого одного репозитория,
+> поэтому его можно безопасно бандлить внутрь `.exe`.
 
 ### Выпуск новой версии
 
