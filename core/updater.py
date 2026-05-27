@@ -121,18 +121,14 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
-def _auth_headers() -> dict:
-    h: dict = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+def _auth_headers(*, asset: bool = False) -> dict:
+    h: dict = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/octet-stream" if asset else "application/vnd.github+json",
+    }
     if GITHUB_TOKEN:
         h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     return h
-
-
-def _http_get(url: str, *, timeout: int = NETWORK_TIMEOUT) -> bytes:
-    """GET через urllib (stdlib) с User-Agent и опциональным токеном."""
-    req = urllib.request.Request(url, headers=_auth_headers())
-    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
-        return r.read()
 
 
 class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
@@ -151,6 +147,20 @@ class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
             new_req.remove_header("Authorization")
             new_req.remove_header("authorization")
         return new_req
+
+
+def _http_get(url: str, *, timeout: int = NETWORK_TIMEOUT, asset: bool = False) -> bytes:
+    """GET через urllib с токеном. При редиректе на S3 снимает Authorization.
+
+    asset=True: ставит Accept: application/octet-stream (для скачивания файлов
+    через GitHub API asset-эндпоинт приватного репо).
+    """
+    req = urllib.request.Request(url, headers=_auth_headers(asset=asset))
+    opener = urllib.request.build_opener(
+        _StripAuthOnRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())
+    )
+    with opener.open(req, timeout=timeout) as r:
+        return r.read()
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -209,9 +219,9 @@ class _CheckWorker(QThread):
         sha256_expected: Optional[str] = None
         sha256_url: Optional[str] = None
         if sha256_asset:
-            sha256_url = sha256_asset.get("browser_download_url")
+            sha256_url = sha256_asset.get("url") or sha256_asset.get("browser_download_url")
             try:
-                sha_raw = _http_get(sha256_url).decode("utf-8", errors="replace")
+                sha_raw = _http_get(sha256_url, asset=True).decode("utf-8", errors="replace")
                 # Формат файла: "<hex>  <filename>" или просто "<hex>"
                 first_token = sha_raw.strip().split()[0] if sha_raw.strip() else ""
                 if re.fullmatch(r"[0-9a-fA-F]{64}", first_token):
@@ -223,7 +233,7 @@ class _CheckWorker(QThread):
         self.finished_ok.emit(ReleaseInfo(
             version=tag,
             notes=(data.get("body") or "").strip(),
-            download_url=installer_asset["browser_download_url"],
+            download_url=installer_asset.get("url") or installer_asset["browser_download_url"],
             asset_name=installer_asset["name"],
             size_bytes=int(installer_asset.get("size") or 0),
             sha256_url=sha256_url,
@@ -281,7 +291,7 @@ class _DownloadWorker(QThread):
         url = self._info.download_url
         dest = self._dest_path
         try:
-            req = urllib.request.Request(url, headers=_auth_headers())
+            req = urllib.request.Request(url, headers=_auth_headers(asset=True))
             opener = urllib.request.build_opener(
                 _StripAuthOnRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())
             )
