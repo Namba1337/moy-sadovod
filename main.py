@@ -552,8 +552,8 @@ class MainWindow(QMainWindow):
         btn_load_proj.clicked.connect(self._load_project)
         btn_container_lyt.addWidget(btn_load_proj)
 
-        # Кнопка ручной проверки обновлений (значок «облако со стрелкой»)
-        btn_update = _ActionButton(chr(0xeb5b), "Проверить обновления")
+        # Кнопка ручной проверки обновлений
+        btn_update = _ActionButton(chr(0xe627), "Проверить обновления")
         btn_update.clicked.connect(lambda: self._check_for_updates(manual=True))
         btn_container_lyt.addWidget(btn_update)
 
