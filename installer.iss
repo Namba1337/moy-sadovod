@@ -1,8 +1,8 @@
-#define AppName "СНТ Учёт"
+#define AppName "Мой Садовод"
 #define AppVersion "1.0.0"
 #define AppPublisher "СНТ"
-#define AppExeName "SNT_Uchet.exe"
-#define SourceExe "dist\SNT_Uchet.exe"
+#define AppExeName "MoySadovod.exe"
+#define SourceExe "dist\MoySadovod.exe"
 
 [Setup]
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
@@ -12,7 +12,7 @@ AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir=installer
-OutputBaseFilename=SNT_Uchet_Setup_v{#AppVersion}
+OutputBaseFilename=MoySadovod_Setup_v{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
