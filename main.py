@@ -12,6 +12,7 @@ import pandas as pd
 
 from core import energy
 from core.utils import DATA_DIR, fmt_money
+from core.updater import APP_VERSION, UpdateChecker
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QStackedWidget, QLabel, QPushButton,
@@ -22,7 +23,7 @@ from PyQt6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QScrollArea, QSizePolicy,
     QStyleOption, QStyle,
 )
-from PyQt6.QtCore import (Qt, QDate, QPoint, QRectF, pyqtSignal,
+from PyQt6.QtCore import (Qt, QDate, QPoint, QRectF, QTimer, pyqtSignal,
                            QPropertyAnimation, QParallelAnimationGroup,
                            QEasingCurve, QAbstractAnimation)
 from PyQt6.QtGui import QFont, QFontMetrics, QColor, QAction, QPainter, QPixmap, QPen, QFontDatabase, QPalette, QBitmap, QPainterPath
@@ -338,9 +339,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.Window)
-        self.setWindowTitle("Мой Садовод")
+        self.setWindowTitle(f"Мой Садовод — v{APP_VERSION}")
         self.setMinimumSize(1280, 720)
         self.resize(1500, 860)
+        self._update_checker = None
+        self._update_manual = False
         self._setup_ui()
         self._apply_styles()
 
@@ -350,6 +353,11 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if sys.platform == "win32":
             self._restore_win_resize()
+        # Автоматическая проверка обновлений — один раз, через 1.5 сек
+        # после первого показа окна (чтобы UI успел отрисоваться).
+        if not getattr(self, "_update_check_scheduled", False):
+            self._update_check_scheduled = True
+            QTimer.singleShot(1500, lambda: self._check_for_updates(manual=False))
 
     def _restore_win_resize(self):
         """Ensure full WS_OVERLAPPEDWINDOW style + DWM frame for animations."""
@@ -544,12 +552,18 @@ class MainWindow(QMainWindow):
         btn_load_proj.clicked.connect(self._load_project)
         btn_container_lyt.addWidget(btn_load_proj)
 
+        # Кнопка ручной проверки обновлений (значок «облако со стрелкой»)
+        btn_update = _ActionButton(chr(0xeb5b), "Проверить обновления")
+        btn_update.clicked.connect(lambda: self._check_for_updates(manual=True))
+        btn_container_lyt.addWidget(btn_update)
+
         side_lyt.addWidget(btn_container, stretch=1)
 
         self._sidebar = sidebar
         self._sidebar_expanded = True
         self._btn_save = btn_save_proj
         self._btn_load = btn_load_proj
+        self._btn_update = btn_update
 
         body_lyt.addWidget(sidebar)
 
@@ -623,10 +637,9 @@ class MainWindow(QMainWindow):
             for btn in self._nav_buttons:
                 btn._lbl.setVisible(False)
                 btn.set_collapsed(True)
-            self._btn_save._lbl.setVisible(False)
-            self._btn_save.set_collapsed(True)
-            self._btn_load._lbl.setVisible(False)
-            self._btn_load.set_collapsed(True)
+            for b in (self._btn_save, self._btn_load, self._btn_update):
+                b._lbl.setVisible(False)
+                b.set_collapsed(True)
             self._btn_container_lyt.setContentsMargins(0, 0, 0, 16)
 
         if getattr(self, "_sidebar_anim", None) is not None:
@@ -651,10 +664,9 @@ class MainWindow(QMainWindow):
                 for btn in self._nav_buttons:
                     btn.set_collapsed(False)
                     btn._lbl.setVisible(True)
-                self._btn_save.set_collapsed(False)
-                self._btn_save._lbl.setVisible(True)
-                self._btn_load.set_collapsed(False)
-                self._btn_load._lbl.setVisible(True)
+                for b in (self._btn_save, self._btn_load, self._btn_update):
+                    b.set_collapsed(False)
+                    b._lbl.setVisible(True)
 
         anim.finished.connect(_on_done)
         self._sidebar_anim = anim
@@ -803,6 +815,57 @@ class MainWindow(QMainWindow):
             self.vznosy_debt.refresh(self.detail.df_full)
 
         QMessageBox.information(self, "Загружено", "Проект успешно загружен.")
+
+    # ── Облачные обновления ─────────────────────────────────────────────
+
+    def _check_for_updates(self, *, manual: bool) -> None:
+        """Запросить latest-release с GitHub.
+
+        manual=True  — показываем «нет обновлений»/ошибку явно.
+        manual=False — авто-проверка на старте; молчим, если нечего сказать.
+        """
+        # Не плодим параллельные проверки
+        if getattr(self, "_update_checker", None) is not None:
+            return
+
+        checker = UpdateChecker(self)
+        self._update_checker = checker
+        self._update_manual = manual
+
+        checker.updateAvailable.connect(self._on_update_available)
+        checker.noUpdate.connect(self._on_no_update)
+        checker.errorOccurred.connect(self._on_update_error)
+        checker.check()
+
+    def _release_checker(self) -> None:
+        self._update_checker = None
+
+    def _on_update_available(self, info) -> None:
+        self._release_checker()
+        # Импортируем здесь — чтобы избежать ненужной зависимости UI от ядра
+        # на этапе импорта main.py (PyInstaller-frozen инициализация и т.п.).
+        from ui.update_dialog import UpdateDialog
+        dlg = UpdateDialog(info, self)
+        dlg.exec()
+
+    def _on_no_update(self) -> None:
+        manual = self._update_manual
+        self._release_checker()
+        if manual:
+            QMessageBox.information(
+                self, "Обновления",
+                f"У вас актуальная версия ({APP_VERSION}).",
+            )
+
+    def _on_update_error(self, msg: str) -> None:
+        manual = self._update_manual
+        self._release_checker()
+        if manual:
+            QMessageBox.warning(
+                self, "Не удалось проверить обновления",
+                f"Не удалось связаться с сервером обновлений:\n{msg}",
+            )
+        # При авто-проверке молча игнорируем — нет интернета, нет проблемы.
 
     def _apply_styles(self):
         self.setStyleSheet("""
