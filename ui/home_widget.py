@@ -229,9 +229,9 @@ class _KpiCard(QFrame):
         val_row.addStretch()
         lyt.addLayout(val_row)
 
-        self._trend = QLabel("", objectName="kpiTrend")
+        self._trend = QLabel("—", objectName="kpiTrend")
         self._trend.setWordWrap(True)
-        self._trend.setVisible(False)
+        self._trend.setStyleSheet("color:#9AA3AE; background:transparent;")
         lyt.addWidget(self._trend)
 
         self._subtitle = QLabel("", objectName="kpiSubtitle")
@@ -246,7 +246,8 @@ class _KpiCard(QFrame):
         self._subtitle.setVisible(bool(subtitle))
 
         if trend is None or trend[0] is None:
-            self._trend.setVisible(False)
+            self._trend.setText("—")
+            self._trend.setStyleSheet("color:#9AA3AE; background:transparent;")
             return
 
         pct, good_when_up = trend[0], trend[1]
@@ -767,16 +768,15 @@ class HomeWidget(QWidget):
 
         lyt.addLayout(header)
 
-        self._kpi_balance = _KpiCard(_IC_BALANCE, "Остаток на конец периода", "#2F7D55")
+        self._kpi_balance = _KpiCard(_IC_BALANCE, "Баланс", "#2F7D55")
         self._kpi_collected = _KpiCard(_IC_COLLECT, "Собрано средств", "#2E9E5B")
         self._kpi_spent = _KpiCard(_IC_SPEND, "Потрачено средств", "#E0A23C")
-        self._kpi_electro = _KpiCard(_IC_ELECTRO, "Потрачено на электричество", "#3E7CB1")
-        self._kpi_debt = _KpiCard(_IC_DEBT, "Задолженность по взносам", "#C25E5E")
+        self._kpi_debt = _KpiCard(_IC_DEBT, "Общая задолженность", "#C25E5E")
 
         row = QHBoxLayout()
         row.setSpacing(11)
         for card in (self._kpi_balance, self._kpi_collected, self._kpi_spent,
-                     self._kpi_electro, self._kpi_debt):
+                     self._kpi_debt):
             row.addWidget(card, stretch=1)
         lyt.addLayout(row)
         return frame
@@ -976,7 +976,7 @@ class HomeWidget(QWidget):
         # ── нет данных ─────────────────────────────────────────────────
         if data is None:
             for card in (self._kpi_balance, self._kpi_collected,
-                         self._kpi_spent, self._kpi_electro, self._kpi_debt):
+                         self._kpi_spent, self._kpi_debt):
                 card.set("—")
             self._income_chart.set_data([], [])
             self._expense_chart.set_data([], [])
@@ -1007,7 +1007,9 @@ class HomeWidget(QWidget):
         # ── карточки KPI ───────────────────────────────────────────────
         if cur:
             sel_end = min(date.today(), cur.date_to)
-            balance_sub = f"с начала данных по {sel_end:%d.%m.%Y}"
+            start_str = (f"{data.data_start_date:%d.%m.%Y}"
+                         if data.data_start_date else "начала данных")
+            balance_sub = f"с {start_str} по {sel_end:%d.%m.%Y}"
         else:
             balance_sub = ""
 
@@ -1029,12 +1031,6 @@ class HomeWidget(QWidget):
             trend=((data.spent_trend, False, data.spent_diff)
                    if has_comp else None))
 
-        self._kpi_electro.set(
-            _money(data.electricity),
-            subtitle=f"за период {period_label}",
-            trend=((data.electricity_trend, False, data.electricity_diff)
-                   if has_comp else None))
-
         d = data.debt
         debt_sub = (
             f"{d.debtor_count} "
@@ -1042,7 +1038,10 @@ class HomeWidget(QWidget):
             f" из {d.plot_count}"
             if d.debtor_count else "должников нет"
         )
-        self._kpi_debt.set(_money(d.total_debt), subtitle=debt_sub)
+        self._kpi_debt.set(
+            _money(d.total_debt),
+            subtitle=debt_sub,
+            trend=((data.debt_trend, False, data.debt_diff) if has_comp else None))
 
         # ── подпись периода на графиках ────────────────────────────────
         if cur:
