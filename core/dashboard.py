@@ -226,22 +226,39 @@ class DebtSummary:
 
 
 def vznosy_debt_summary(df: Optional[pd.DataFrame], as_of: date) -> DebtSummary:
-    """Суммарный долг по ЧВ и число участков-должников на дату as_of."""
+    """Суммарный долг (ЧВ + электроэнергия) и число должников на дату as_of.
+
+    Переплата по одной статье или у одного участка не уменьшает итог:
+    для каждого участка берётся max(0, долг_ЧВ) + max(0, долг_электро).
+    """
     rates = vznosy.load_rates()
     adj = vznosy.load_adjustments()
     areas = vznosy.plot_area_map()
     plots = [str(p.get("num", "")) for p in energy.load_plots() if p.get("num")]
 
+    e_meters = energy.load_meters()
+    e_rates = energy.load_rates()
+    e_replacements = energy.load_replacements()
+    e_baseline = energy.load_baseline()
+
     total = 0.0
     debtors = 0
     for plot in plots:
+        plot_debt = 0.0
         try:
-            bal = vznosy.balance_for_plot(
+            vznosy_bal = vznosy.balance_for_plot(
                 plot, areas.get(plot), as_of, rates, adj, df)
+            plot_debt += max(0.0, vznosy_bal.debt)
         except Exception:
-            continue
-        total += bal.debt
-        if bal.debt > 0.5:
+            pass
+        try:
+            e_bal = energy.balance(
+                plot, as_of, e_meters, e_rates, e_replacements, e_baseline, df)
+            plot_debt += max(0.0, e_bal.debt)
+        except Exception:
+            pass
+        total += plot_debt
+        if plot_debt > 0.5:
             debtors += 1
     return DebtSummary(total, debtors, len(plots))
 
@@ -464,6 +481,14 @@ class DashboardData:
     income_slices_comp: list[CategorySlice] = field(default_factory=list)
     expense_slices_comp: list[CategorySlice] = field(default_factory=list)
 
+    # Данные для задолженности с поддержкой сравнения
+    debt_comp: Optional[DebtSummary] = None
+    debt_trend: Optional[float] = None
+    debt_diff: float = 0.0
+
+    # Дата первой транзакции в детализации (для подписи к Балансу)
+    data_start_date: Optional[date] = None
+
 
 def build(df: Optional[pd.DataFrame],
           as_of: Optional[date] = None,
@@ -480,8 +505,13 @@ def build(df: Optional[pd.DataFrame],
     as_of = as_of or date.today()
     df = _normalize_df(df)
 
+    data_start_date: Optional[date] = None
+    if df is not None and not df.empty:
+        _min_dt = df["Дата"].min()
+        if pd.notna(_min_dt):
+            data_start_date = _min_dt.date()
+
     all_perds = get_all_periods()
-    debt = vznosy_debt_summary(df, as_of)
 
     # ── выбор основного периода ───────────────────────────────────────
     if not all_perds:
@@ -519,6 +549,7 @@ def build(df: Optional[pd.DataFrame],
     has_comp = comp is not None
 
     if cur is None:
+        debt = vznosy_debt_summary(df, as_of)
         balance = _period_end_balance(df, as_of) if df is not None else 0.0
         return DashboardData(
             has_data=df is not None, as_of=as_of,
@@ -530,6 +561,7 @@ def build(df: Optional[pd.DataFrame],
             electricity=0.0, electricity_trend=None,
             debt=debt,
             comparison_period_idx=None,
+            data_start_date=data_start_date,
         )
 
     # ── окна дат ──────────────────────────────────────────────────────
@@ -547,13 +579,22 @@ def build(df: Optional[pd.DataFrame],
     balance = _period_end_balance(df, sel_end) if df is not None else 0.0
     cur_f = flow_sums(df, cur.date_from, sel_end)
 
+    # ── задолженность (считается на конец выбранного периода) ─────────
+    debt = vznosy_debt_summary(df, sel_end)
+
     # ── метрики периода сравнения ─────────────────────────────────────
     if has_comp:
         comp_f = flow_sums(df, comp.date_from, comp_end)
         balance_comp = _period_end_balance(df, comp_end) if df is not None else 0.0
+        debt_comp_obj = vznosy_debt_summary(df, comp_end)
+        debt_trend_val = trend_pct(debt.total_debt, debt_comp_obj.total_debt)
+        debt_diff_val = debt.total_debt - debt_comp_obj.total_debt
     else:
         comp_f = FlowSums(0.0, 0.0, 0.0)
         balance_comp = 0.0
+        debt_comp_obj = None
+        debt_trend_val = None
+        debt_diff_val = 0.0
 
     return DashboardData(
         has_data=df is not None,
@@ -573,6 +614,9 @@ def build(df: Optional[pd.DataFrame],
         electricity_trend=(trend_pct(cur_f.electricity, comp_f.electricity)
                            if has_comp else None),
         debt=debt,
+        debt_comp=debt_comp_obj,
+        debt_trend=debt_trend_val,
+        debt_diff=debt_diff_val,
 
         # Абсолютные значения и разницы
         balance_comp=balance_comp,
@@ -602,4 +646,6 @@ def build(df: Optional[pd.DataFrame],
                             if has_comp else []),
         expense_slices_comp=(category_breakdown(df, comp.date_from, comp_end, "expense")
                              if has_comp else []),
+
+        data_start_date=data_start_date,
     )
