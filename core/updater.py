@@ -54,7 +54,7 @@ APP_VERSION = "0.1.4"
 #: Как создать Gist: https://gist.github.com → New gist → Public.
 #: Скопируйте ссылку «Raw» и вставьте сюда.
 #: Пример: "https://gist.githubusercontent.com/Namba1337/<id>/raw/update.json"
-UPDATE_MANIFEST_URL: str = "https://gist.githubusercontent.com/Namba1337/39df34c920f5105092075ef4bc316c09/raw/983e240d5aa5295a38bd32b4bfc76a4ce718b3ad/update.json"
+UPDATE_MANIFEST_URL: str = "https://gist.githubusercontent.com/Namba1337/39df34c920f5105092075ef4bc316c09/raw/update.json"
 
 #: Таймаут сетевых запросов (секунды).
 NETWORK_TIMEOUT = 15
