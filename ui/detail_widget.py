@@ -9,13 +9,18 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen, QPolygon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog,
-    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
-    QStyle, QStyledItemDelegate, QTreeView, QVBoxLayout, QWidget,
+    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
+    QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QTreeView,
+    QVBoxLayout, QWidget,
 )
 
-from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization, categorize_row
-from ui.plot_detection import apply_plot_column, get_plot, _PLOTS_FILE
+from ui.categorization import (
+    CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization, categorize_row,
+    save_user_categories, save_user_category_color, rename_user_category,
+    delete_user_category, PROTECTED_CATEGORIES,
+)
+from ui.plot_detection import apply_plot_column, get_plot, _PLOTS_FILE, load_plot_numbers
 
 
 # =========================================================================== #
@@ -52,20 +57,11 @@ def _compute_hash(row: dict) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def _add_tag(tags_str: str, tag: str) -> str:
-    """Добавляет тег в строку тегов, не дублируя существующие."""
-    existing = {t.strip() for t in (tags_str or "").split(",") if t.strip()}
-    existing.add(tag)
-    return ", ".join(sorted(existing))
-
-
 def _ensure_meta_columns(df: "pd.DataFrame") -> "pd.DataFrame":
-    """Добавляет _hash, Теги и _breakdown, если их ещё нет."""
+    """Добавляет _hash и _breakdown, если их ещё нет."""
     df = df.copy()
     if "_hash" not in df.columns:
         df["_hash"] = df.apply(lambda r: _compute_hash(r.to_dict()), axis=1)
-    if "Теги" not in df.columns:
-        df["Теги"] = ""
     if "_breakdown" not in df.columns:
         df["_breakdown"] = None
     return df
@@ -296,8 +292,6 @@ class OperationsTreeModel(QAbstractItemModel):
                 if num is not None and num < 0:
                     return QColor("#DC2626")
                 return QColor("#374151")
-            if col == "Теги" and "Дубль" in str(node.data.get(col) or ""):
-                return QColor("#D97706")
 
         if role == Qt.ItemDataRole.BackgroundRole:
             cat = str(node.data.get("Категория", ""))
@@ -445,8 +439,49 @@ class _CategoryDelegate(_CellDelegate):
     def setEditorData(self, editor, index):
         current = index.data(Qt.ItemDataRole.EditRole)
         if isinstance(editor, QComboBox):
-            pos = editor.findText(str(current)) if current else -1
+            pos = -1
+            if current:
+                for i in range(len(self._items)):
+                    if editor.itemText(i) == str(current):
+                        pos = i
+                        break
             editor.setCurrentIndex(pos if pos >= 0 else 0)
+
+    def setModelData(self, editor, model, index):
+        if isinstance(editor, QComboBox):
+            model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
+
+class _PlotDelegate(_CellDelegate):
+    """Делегат колонки «Участок»: выпадающий список номеров участков из БД."""
+
+    def __init__(self, items: list[str], parent=None):
+        super().__init__(parent)
+        self._items = items
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.addItem("")           # пустой пункт — участок не указан
+        combo.addItems(self._items)
+        combo.activated.connect(lambda: self.commitData.emit(combo))
+        return combo
+
+    def setEditorData(self, editor, index):
+        current = index.data(Qt.ItemDataRole.EditRole)
+        if isinstance(editor, QComboBox):
+            text = str(current).strip() if current else ""
+            if text:
+                pos = editor.findText(text)
+                if pos < 0:
+                    # Значения нет в базе — вставляем как первый пункт
+                    editor.insertItem(1, text)
+                    pos = 1
+                editor.setCurrentIndex(pos)
+            else:
+                editor.setCurrentIndex(0)
 
     def setModelData(self, editor, model, index):
         if isinstance(editor, QComboBox):
@@ -657,6 +692,329 @@ class _BranchColumnDelegate(_CellDelegate):
                 self.deleteBranchRequested.emit(index)
                 return True
         return super().editorEvent(event, model, option, index)
+
+
+# =========================================================================== #
+#  Вспомогательные UI-виджеты                                                 #
+# =========================================================================== #
+
+class _ElidedLabel(QLabel):
+    """QLabel с усечением '...' при нехватке места.
+    Ключевое отличие от QLabel: minimumWidth = 0, поэтому соседние виджеты
+    в QHBoxLayout не «уезжают» за границу при длинном тексте."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self._full = text
+        self.setMinimumWidth(0)
+
+    def setText(self, text: str):
+        self._full = text
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setPen(QColor("#1F2937"))
+        p.setFont(self.font())
+        elided = p.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, self.width()
+        )
+        p.drawText(
+            self.rect(),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            elided,
+        )
+
+
+# =========================================================================== #
+#  Всплывающая палитра цветов                                                 #
+# =========================================================================== #
+
+class _ColorPickerPopup(QFrame):
+    """Всплывающая панель выбора цвета из предустановленной палитры."""
+
+    colorSelected = pyqtSignal(QColor)
+
+    # Палитра из 16 цветов (2 строки × 8): светлые + тёмные тона
+    PALETTE: list[QColor] = [
+        QColor(217, 217, 217), QColor(244, 204, 204), QColor(252, 229, 205), QColor(255, 242, 204),
+        QColor(217, 234, 211), QColor(208, 224, 227), QColor(207, 226, 255), QColor(217, 210, 233),
+        QColor( 68,  68,  68), QColor(153,   0,   0), QColor(180,  95,   6), QColor(120,  63,   4),
+        QColor( 39,  78,  19), QColor( 12,  52,  61), QColor( 28,  69, 135), QColor( 53,  28, 117),
+    ]
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setStyleSheet("""
+            QFrame {
+                background: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+            }
+        """)
+        grid = QGridLayout(self)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setSpacing(5)
+        for i, color in enumerate(self.PALETTE):
+            btn = QPushButton()
+            btn.setFixedSize(22, 22)
+            r, g, b = color.red(), color.green(), color.blue()
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgb({r},{g},{b});
+                    border: 1.5px solid rgba(0,0,0,0.12);
+                    border-radius: 11px;
+                }}
+                QPushButton:hover {{ border: 2.5px solid #4F46E5; }}
+            """)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.clicked.connect(lambda checked, c=color: self._pick(c))
+            grid.addWidget(btn, i // 8, i % 8)
+
+    def _pick(self, color: QColor):
+        self.colorSelected.emit(color)
+        self.close()
+
+    def show_near(self, widget: QWidget):
+        pos = widget.mapToGlobal(QPoint(0, widget.height() + 2))
+        self.adjustSize()
+        self.move(pos)
+        self.show()
+        self.raise_()
+
+
+# =========================================================================== #
+#  Панель редактора категорий                                                 #
+# =========================================================================== #
+
+class CategoryEditorPanel(QDialog):
+    """Диалог редактирования списка категорий."""
+
+    categoriesChanged = pyqtSignal(list)
+    categoryRenamed   = pyqtSignal(str, str)   # (old_name, new_name)
+
+    _PANEL_STYLE = """
+        QDialog {
+            background: #FFFFFF;
+        }
+        QPushButton#addCatBtn {
+            background: #4F46E5; color: white; border: none;
+            border-radius: 6px; padding: 7px 12px; font-size: 12px; font-weight: 600;
+        }
+        QPushButton#addCatBtn:hover { background: #6366F1; }
+        QLineEdit#newCatInput {
+            background: #F8F9FA; border: 1px solid #D1D5DB;
+            border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 12px;
+        }
+        QLineEdit#newCatInput:focus { border: 1px solid #6366F1; }
+        QScrollArea { background: transparent; border: none; }
+        QWidget#scrollContents { background: transparent; }
+    """
+
+    def __init__(self, categories: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Редактор категорий")
+        self.setModal(False)
+        self.setMinimumSize(360, 480)
+        self._categories = list(categories)
+        self._active_color_cat: str | None = None
+        self._color_popup = _ColorPickerPopup()
+        self._color_popup.colorSelected.connect(self._on_color_selected)
+        self._setup_ui()
+        self.setStyleSheet(self._PANEL_STYLE)
+
+    def set_categories(self, cats: list[str]):
+        self._categories = list(cats)
+        self._rebuild_list()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        # Scrollable category list
+        self._scroll_contents = QWidget(objectName="scrollContents")
+        self._list_layout = QVBoxLayout(self._scroll_contents)
+        self._list_layout.setContentsMargins(0, 2, 0, 2)
+        self._list_layout.setSpacing(3)
+
+        scroll = QScrollArea()
+        scroll.setWidget(self._scroll_contents)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(scroll, stretch=1)
+
+        # Add new category row
+        add_row = QHBoxLayout()
+        add_row.setSpacing(6)
+        self._new_input = QLineEdit(objectName="newCatInput")
+        self._new_input.setPlaceholderText("Новая категория...")
+        self._new_input.returnPressed.connect(self._on_add)
+        add_btn = QPushButton("Добавить", objectName="addCatBtn")
+        add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        add_btn.clicked.connect(self._on_add)
+        add_row.addWidget(self._new_input, stretch=1)
+        add_row.addWidget(add_btn)
+        layout.addLayout(add_row)
+
+        self._rebuild_list()
+
+    def _rebuild_list(self):
+        while self._list_layout.count():
+            item = self._list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for cat in self._categories:
+            self._list_layout.addWidget(self._make_cat_row(cat))
+        self._list_layout.addStretch()
+
+    def _make_cat_row(self, cat: str) -> QWidget:
+        row = QWidget()
+        row.setStyleSheet(
+            "QWidget { background: #F8F9FA; border-radius: 5px; }"
+            "QWidget:hover { background: #EEF2FF; }"
+        )
+        hl = QHBoxLayout(row)
+        hl.setContentsMargins(8, 4, 5, 4)
+        hl.setSpacing(6)
+
+        color = CATEGORY_COLORS.get(cat, _DEFAULT_ROW_COLOR)
+        r, g, b = color.red(), color.green(), color.blue()
+
+        # Кнопка-кружок: отображает текущий цвет, по клику открывает палитру
+        color_btn = QPushButton()
+        color_btn.setFixedSize(22, 22)
+        color_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgb({r},{g},{b});
+                border: 1.5px solid rgba(0,0,0,0.15);
+                border-radius: 11px;
+            }}
+            QPushButton:hover {{ border: 2px solid #4F46E5; }}
+        """)
+        color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        color_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        color_btn.setToolTip("Изменить цвет")
+        color_btn.clicked.connect(lambda checked, c=cat, b=color_btn: self._open_color_picker(c, b))
+
+        is_protected = cat in PROTECTED_CATEGORIES
+
+        lbl = QLineEdit(cat)
+        lbl.setMinimumWidth(0)
+        lbl.setReadOnly(is_protected)
+        lbl.setStyleSheet("""
+            QLineEdit {
+                background: transparent; border: none;
+                font-size: 12px; color: #1F2937; padding: 1px 2px;
+            }
+            QLineEdit:focus {
+                background: #FFFFFF; border: 1px solid #6366F1;
+                border-radius: 3px; padding: 1px 4px;
+            }
+            QLineEdit:read-only { color: #6B7280; }
+        """)
+        if not is_protected:
+            lbl.editingFinished.connect(
+                lambda e=lbl, old=cat: self._on_rename(old, e.text().strip(), e)
+            )
+
+        if is_protected:
+            action_btn = QLabel("🔒")
+            action_btn.setFixedSize(26, 26)
+            action_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            action_btn.setStyleSheet("background: transparent; font-size: 13px;")
+            action_btn.setToolTip("Обязательная категория — удаление недоступно")
+        else:
+            action_btn = QPushButton("✕")
+            action_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent; border: none;
+                    color: #9CA3AF; font-size: 14px; font-weight: 600;
+                    border-radius: 4px;
+                }
+                QPushButton:hover { background: #FEE2E2; color: #B91C1C; }
+            """)
+            action_btn.setFixedSize(26, 26)
+            action_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            action_btn.setToolTip("Удалить категорию")
+            action_btn.clicked.connect(lambda checked, c=cat: self._on_delete(c))
+
+        hl.addWidget(color_btn)
+        hl.addWidget(lbl, stretch=1)
+        hl.addWidget(action_btn)
+        return row
+
+    def _on_rename(self, old_name: str, new_name: str, editor: "QLineEdit"):
+        if old_name in PROTECTED_CATEGORIES:
+            editor.setText(old_name)
+            return
+        if not new_name or new_name == old_name:
+            editor.setText(old_name)
+            return
+        if new_name in self._categories:
+            editor.setText(old_name)
+            reply = QMessageBox.question(
+                self,
+                "Объединить категории?",
+                f"Категория «{new_name}» уже существует.\n\n"
+                f"Объединить «{old_name}» с «{new_name}»?\n"
+                f"Все строки с категорией «{old_name}» получат категорию «{new_name}»,\n"
+                f"а «{old_name}» будет удалена из списка.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._do_merge(old_name, new_name)
+            return
+        rename_user_category(old_name, new_name)
+        self._categories[self._categories.index(old_name)] = new_name
+        self._rebuild_list()
+        self.categoryRenamed.emit(old_name, new_name)
+
+    def _do_merge(self, old_name: str, new_name: str):
+        """Удаляет old_name из списка; все строки df с этой категорией
+        получат new_name через сигнал categoryRenamed."""
+        delete_user_category(old_name)
+        if old_name in self._categories:
+            self._categories.remove(old_name)
+        self._rebuild_list()
+        self.categoryRenamed.emit(old_name, new_name)
+
+    def _open_color_picker(self, cat: str, btn: QPushButton):
+        self._active_color_cat = cat
+        self._color_popup.show_near(btn)
+
+    def _on_color_selected(self, color: QColor):
+        if not self._active_color_cat:
+            return
+        import ui.categorization as _cat_mod
+        _cat_mod.CATEGORY_COLORS[self._active_color_cat] = color
+        save_user_category_color(self._active_color_cat, color)
+        self._active_color_cat = None
+        self._rebuild_list()
+        self.categoriesChanged.emit(list(self._categories))
+
+    def _on_add(self):
+        name = self._new_input.text().strip()
+        if not name or name in self._categories:
+            return
+        self._categories.append(name)
+        self._new_input.clear()
+        self._rebuild_list()
+        self._persist_and_emit()
+
+    def _on_delete(self, cat: str):
+        if cat in self._categories:
+            self._categories.remove(cat)
+            self._rebuild_list()
+            self._persist_and_emit()
+
+    def _persist_and_emit(self):
+        save_user_categories(self._categories)
+        self.categoriesChanged.emit(list(self._categories))
 
 
 # =========================================================================== #
@@ -994,6 +1352,8 @@ class DetailWidget(QWidget):
         self._manual_cells: set[tuple[int, str]] = set()
         self._cat_col: int | None = None
         self._cont_col: int | None = None
+        self._plot_col: int | None = None
+        self._active_warning: str | None = None
         self._setup_ui()
 
     # ----------------------------------------------------------------- UI -- #
@@ -1013,6 +1373,10 @@ class DetailWidget(QWidget):
         btn_add_row.setObjectName("btnSecondary")
         btn_add_row.clicked.connect(self._add_row)
         top_bar.addWidget(btn_add_row)
+
+        btn_cat = QPushButton("Категории", objectName="btnSecondary")
+        btn_cat.clicked.connect(self._show_cat_editor)
+        top_bar.addWidget(btn_cat)
 
         btn_excel = QPushButton("Экспорт в Excel", objectName="btnSecondary")
         btn_excel.clicked.connect(self._export_excel)
@@ -1066,8 +1430,12 @@ class DetailWidget(QWidget):
 
         layout.addWidget(filter_frame)
 
-        self.status_label = QLabel("Файл не загружен", objectName="statusLabel")
-        layout.addWidget(self.status_label)
+        self._warnings_bar = QWidget()
+        self._warnings_bar.setVisible(False)
+        self._warnings_layout = QHBoxLayout(self._warnings_bar)
+        self._warnings_layout.setContentsMargins(0, 0, 0, 0)
+        self._warnings_layout.setSpacing(6)
+        layout.addWidget(self._warnings_bar)
 
         # --- дерево (Model-View) --------------------------------------- #
         self.model = OperationsTreeModel(self._manual_cells, self)
@@ -1092,6 +1460,7 @@ class DetailWidget(QWidget):
 
         self._cell_delegate = _CellDelegate(self.tree)
         self._category_delegate = _CategoryDelegate(ALL_CATEGORIES, self.tree)
+        self._plot_delegate = _PlotDelegate(load_plot_numbers(), self.tree)
         self._ctrl_delegate = _CtrlDelegate(self.tree)
         self._ctrl_delegate.addBranchRequested.connect(self._on_add_branch)
         self._ctrl_delegate.toggleRequested.connect(self._on_toggle)
@@ -1100,14 +1469,17 @@ class DetailWidget(QWidget):
         self.tree.setItemDelegate(self._cell_delegate)
         self.tree.setItemDelegateForColumn(0, self._ctrl_delegate)
 
+        # Панель редактора категорий — скрыта по умолчанию, выезжает справа.
+        self._cat_editor_panel = CategoryEditorPanel(ALL_CATEGORIES, self)
+        self._cat_editor_panel.categoriesChanged.connect(self._on_categories_changed)
+        self._cat_editor_panel.categoryRenamed.connect(self._on_category_renamed)
+
         layout.addWidget(self.tree)
 
         summary_layout = QHBoxLayout()
-        self.lbl_income  = QLabel("Поступления: —", objectName="summaryIncome")
-        self.lbl_expense = QLabel("Списания: —",    objectName="summaryExpense")
-        summary_layout.addWidget(self.lbl_income)
+        self.lbl_records = QLabel("Записей: —", objectName="summaryRecords")
+        summary_layout.addWidget(self.lbl_records)
         summary_layout.addStretch()
-        summary_layout.addWidget(self.lbl_expense)
         layout.addLayout(summary_layout)
 
     # QTreeView нуждается в собственных правилах: глобальный QSS целит в
@@ -1131,9 +1503,58 @@ class DetailWidget(QWidget):
         }
     """
 
+    # ------------------------------------------ редактор категорий ---------- #
+    def _show_cat_editor(self):
+        self._cat_editor_panel.set_categories(list(ALL_CATEGORIES))
+        self._cat_editor_panel.show()
+        self._cat_editor_panel.raise_()
+        self._cat_editor_panel.activateWindow()
+
+    def _on_categories_changed(self, new_cats: list[str]):
+        import ui.categorization as _cat_mod
+        _cat_mod.ALL_CATEGORIES[:] = new_cats
+        self._category_delegate._items = list(new_cats)
+
+        current = self.combo_cat.currentText()
+        self.combo_cat.blockSignals(True)
+        self.combo_cat.clear()
+        self.combo_cat.addItem("Все категории")
+        self.combo_cat.addItems(new_cats)
+        idx = self.combo_cat.findText(current)
+        self.combo_cat.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_cat.blockSignals(False)
+
+        self.apply_filters()
+
+    def _on_category_renamed(self, old_name: str, new_name: str):
+        import ui.categorization as _cat_mod
+        # Переименовываем во всех строках df_full
+        if self.df_full is not None and "Категория" in self.df_full.columns:
+            self.df_full.loc[self.df_full["Категория"] == old_name, "Категория"] = new_name
+        # Делегат уже обновлён через rename_user_category → ALL_CATEGORIES
+        self._category_delegate._items = list(_cat_mod.ALL_CATEGORIES)
+        # Комбобокс фильтра: меняем только изменившийся пункт
+        current = self.combo_cat.currentText()
+        if current == old_name:
+            current = new_name
+        self.combo_cat.blockSignals(True)
+        self.combo_cat.clear()
+        self.combo_cat.addItem("Все категории")
+        self.combo_cat.addItems(_cat_mod.ALL_CATEGORIES)
+        idx = self.combo_cat.findText(current)
+        self.combo_cat.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_cat.blockSignals(False)
+        self.apply_filters()
+
     # --------------------------------------------------- наполнение модели -- #
+    # Желаемый порядок видимых столбцов по умолчанию.
+    _COLUMN_ORDER = ["Дата", "Контрагент", "Назначение", "Сумма", "Категория", "Участок"]
+
     def _rebuild_model(self, df: "pd.DataFrame"):
-        columns = [c for c in df.columns if not str(c).startswith("_")]
+        visible = [c for c in df.columns if not str(c).startswith("_")]
+        ordered = [c for c in self._COLUMN_ORDER if c in visible]
+        ordered += [c for c in visible if c not in self._COLUMN_ORDER]
+        columns = ordered
         records = []
         for df_idx, row in df.iterrows():
             data = {c: row[c] for c in columns}
@@ -1160,12 +1581,20 @@ class DetailWidget(QWidget):
             self.tree.setItemDelegateForColumn(cont, self._branch_delegate)
         self._cont_col = cont
 
+        # Делегат выпадающего списка — на колонку «Участок».
+        plot = cols.index("Участок") if "Участок" in cols else -1
+        if self._plot_col is not None and self._plot_col != plot:
+            self.tree.setItemDelegateForColumn(self._plot_col, self._cell_delegate)
+        if plot >= 0:
+            self.tree.setItemDelegateForColumn(plot, self._plot_delegate)
+        self._plot_col = plot
+
         self._refresh_summary()
 
     def _apply_header_layout(self, columns: list[str]):
         col_widths = {
             _CTRL_COL: 84, "Дата": 95, "Контрагент": 260, "Сумма": 140,
-            "Назначение": 340, "Категория": 210, "Участок": 80, "Теги": 120,
+            "Назначение": 340, "Категория": 210, "Участок": 80,
         }
         header = self.tree.header()
         for col_idx, col in enumerate(columns):
@@ -1176,19 +1605,141 @@ class DetailWidget(QWidget):
             else:
                 header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.ResizeToContents)
 
+    # -------------------------------------------------- замечания ----------- #
+    def _compute_warnings(self) -> dict:
+        """Считает ошибки по всему df_full (не только по отфильтрованным строкам).
+        Возвращает {dupes, split_mismatch, no_cat, total} где total — кол-во
+        уникальных строк с хотя бы одной ошибкой."""
+        out = {"dupes": 0, "split_mismatch": 0, "no_cat": 0, "need_split": 0, "no_plot": 0, "total": 0}
+        if self.df_full is None or self.df_full.empty:
+            return out
+
+        issue_idx: set = set()
+
+        if "_hash" in self.df_full.columns:
+            mask = self.df_full.duplicated(subset=["_hash"], keep=False)
+            out["dupes"] = int(mask.sum())
+            issue_idx.update(self.df_full.index[mask].tolist())
+
+        if "Категория" in self.df_full.columns:
+            mask = (
+                self.df_full["Категория"].isna() |
+                (self.df_full["Категория"].astype(str).str.strip() == "")
+            )
+            out["no_cat"] = int(mask.sum())
+            issue_idx.update(self.df_full.index[mask].tolist())
+
+        if "_breakdown" in self.df_full.columns:
+            _empty = {"", "None", "nan", "[]"}
+            has_bd = (
+                self.df_full["_breakdown"].notna() &
+                ~self.df_full["_breakdown"].astype(str).str.strip().isin(_empty)
+            )
+            for idx, row in self.df_full[has_bd].iterrows():
+                items = _parse_breakdown(row.get("_breakdown"))
+                if not items:
+                    continue
+                parent = _to_num(row.get("Сумма")) or 0.0
+                child  = sum(_to_num(it.get("Сумма")) or 0.0 for it in items)
+                if abs(parent - child) > 0.005:
+                    out["split_mismatch"] += 1
+                    issue_idx.add(idx)
+
+        if "Категория" in self.df_full.columns:
+            mask = self.df_full["Категория"].astype(str) == "Членские взносы + Электроэнергия (авто)"
+            out["need_split"] = int(mask.sum())
+            issue_idx.update(self.df_full.index[mask].tolist())
+
+        if "Категория" in self.df_full.columns and "Участок" in self.df_full.columns:
+            known_plots = set(self._plot_delegate._items)
+            _member_electro_mask = (
+                self.df_full["Категория"].astype(str).str.startswith("Членские взносы") |
+                self.df_full["Категория"].astype(str).str.startswith("Электроэнергия (от садоводов)")
+            )
+            _plot_str = self.df_full["Участок"].astype(str).str.strip()
+            _bad_plot_mask = (
+                self.df_full["Участок"].isna() |
+                (_plot_str == "") |
+                ~_plot_str.isin(known_plots)
+            )
+            mask = _member_electro_mask & _bad_plot_mask
+            out["no_plot"] = int(mask.sum())
+            issue_idx.update(self.df_full.index[mask].tolist())
+
+        out["total"] = len(issue_idx)
+        return out
+
     def _refresh_summary(self):
-        total_in = total_out = 0.0
-        for op in self.model.top_nodes():
-            num = _to_num(op.data.get("Сумма"))
-            if num is None:
-                continue
-            if num > 0:
-                total_in += num
-            elif num < 0:
-                total_out += abs(num)
-        self.lbl_income.setText(f"✅  Поступления: {total_in:,.2f} ₽".replace(",", " "))
-        self.lbl_expense.setText(f"🔴  Списания: {total_out:,.2f} ₽".replace(",", " "))
-        self.status_label.setText(f"Показано записей: {len(self.model.top_nodes())}")
+        nodes = self.model.top_nodes()
+        self.lbl_records.setText(f"Записей: {len(nodes)}")
+        self._rebuild_warnings_bar()
+
+    def _rebuild_warnings_bar(self):
+        # Очищаем старые чипы
+        while self._warnings_layout.count():
+            item = self._warnings_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        w = self._compute_warnings()
+        chips: list[tuple[str, str]] = []
+        if w["dupes"]:
+            chips.append(("dupes",         f"Дубли ({w['dupes']})"))
+        if w["split_mismatch"]:
+            chips.append(("split_mismatch", f"Сумма дочерних строк ({w['split_mismatch']})"))
+        if w["no_cat"]:
+            chips.append(("no_cat",         f"Нет категории ({w['no_cat']})"))
+        if w["need_split"]:
+            chips.append(("need_split",     f"Необходимо распределить операцию ({w['need_split']})"))
+        if w["no_plot"]:
+            chips.append(("no_plot",        f"Неизвестный участок ({w['no_plot']})"))
+
+        if not chips:
+            self._active_warning = None
+            self._warnings_bar.setVisible(False)
+            return
+
+        # Сбрасываем активный фильтр, если его замечание исчезло
+        if self._active_warning not in {k for k, _ in chips}:
+            self._active_warning = None
+
+        lbl = QLabel(f"⚠  Замечания ({w['total']}):")
+        lbl.setStyleSheet(
+            "color:#D97706; font-size:12px; font-weight:600; background:transparent;"
+        )
+        self._warnings_layout.addWidget(lbl)
+
+        for key, text in chips:
+            btn = QPushButton(text)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            if self._active_warning == key:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: #F59E0B; color: #FFFFFF;
+                        border: 1px solid #D97706; border-radius: 11px;
+                        padding: 3px 12px; font-size: 11px; font-weight: 600;
+                    }
+                    QPushButton:hover { background: #D97706; }
+                """)
+            else:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: #FEF3C7; color: #92400E;
+                        border: 1px solid #F59E0B; border-radius: 11px;
+                        padding: 3px 12px; font-size: 11px;
+                    }
+                    QPushButton:hover { background: #FDE68A; }
+                """)
+            btn.clicked.connect(lambda checked, k=key: self._on_warning_tag_clicked(k))
+            self._warnings_layout.addWidget(btn)
+
+        self._warnings_layout.addStretch()
+        self._warnings_bar.setVisible(True)
+
+    def _on_warning_tag_clicked(self, key: str):
+        self._active_warning = None if self._active_warning == key else key
+        self.apply_filters()
 
     # --------------------------------------------------------- разбивка --- #
     def _set_breakdown(self, df_idx, items: list):
@@ -1267,12 +1818,7 @@ class DetailWidget(QWidget):
         new_idx = int(self.df_full.index.max()) + 1 if len(self.df_full) > 0 else 0
 
         new_hash = _compute_hash(row_data)
-        existing_hashes = (
-            set(self.df_full["_hash"])
-            if "_hash" in self.df_full.columns else set()
-        )
         row_data["_hash"] = new_hash
-        row_data["Теги"] = _add_tag("", "Дубль") if new_hash in existing_hashes else ""
 
         new_row = {
             col: row_data.get(col, "" if col != "Сумма" else float("nan"))
@@ -1345,32 +1891,11 @@ class DetailWidget(QWidget):
 
             if merge_mode and self.df_full is not None:
                 existing = _ensure_meta_columns(self.df_full)
-                existing_hashes = set(existing["_hash"])
-                seen = set(existing_hashes)
-                tags_list = []
-                for _, row in df.iterrows():
-                    h = row["_hash"]
-                    if h in seen:
-                        tags_list.append(_add_tag("", "Дубль"))
-                    else:
-                        tags_list.append("")
-                        seen.add(h)
-                df["Теги"] = tags_list
                 new_start = int(existing.index.max()) + 1 if len(existing) > 0 else 0
                 df = df.reset_index(drop=True)
                 df.index = df.index + new_start
                 self.df_full = pd.concat([existing, df])
             else:
-                seen: set[str] = set()
-                tags_list = []
-                for _, row in df.iterrows():
-                    h = row["_hash"]
-                    if h in seen:
-                        tags_list.append(_add_tag("", "Дубль"))
-                    else:
-                        tags_list.append("")
-                        seen.add(h)
-                df["Теги"] = tags_list
                 self._manual_rows.clear()
                 self._manual_cells.clear()
                 self.df_full = df
@@ -1390,7 +1915,7 @@ class DetailWidget(QWidget):
         """Восстанавливает DataFrame из сохранённого проекта без диалога выбора файла."""
         self._manual_rows.clear()
         self._manual_cells.clear()
-        drop_cols = {"Номер", "Номер счёта", "Контрагент счёт", "Контрагент cчёт"}
+        drop_cols = {"Номер", "Номер счёта", "Контрагент счёт", "Контрагент cчёт", "Теги"}
         df = df.drop(columns=[c for c in drop_cols if c in df.columns])
         df = _merge_to_summa(df)
         df = _ensure_meta_columns(df)
@@ -1421,6 +1946,8 @@ class DetailWidget(QWidget):
     def refresh_plot_column(self):
         """Пересчитывает столбец «Участок» по актуальным данным из snt_plots.json.
         Строки, вручную отредактированные пользователем, не перезаписываются."""
+        # Обновляем список в делегате — вдруг добавились новые участки
+        self._plot_delegate._items = load_plot_numbers()
         if self.df_full is None:
             return
         df_new = apply_plot_column(self.df_full)
@@ -1456,6 +1983,54 @@ class DetailWidget(QWidget):
                 df["Назначение"].astype(str).str.lower().str.contains(search, na=False)
             )
             df = df[mask]
+
+        # Фильтр по активному замечанию
+        if self._active_warning == "dupes":
+            if "_hash" in df.columns:
+                df = df[df.duplicated(subset=["_hash"], keep=False)]
+        elif self._active_warning == "no_cat":
+            if "Категория" in df.columns:
+                df = df[
+                    df["Категория"].isna() |
+                    (df["Категория"].astype(str).str.strip() == "")
+                ]
+        elif self._active_warning == "need_split":
+            if "Категория" in df.columns:
+                df = df[
+                    df["Категория"].astype(str) == "Членские взносы + Электроэнергия (авто)"
+                ]
+        elif self._active_warning == "no_plot":
+            if "Категория" in df.columns and "Участок" in df.columns:
+                known_plots = set(self._plot_delegate._items)
+                _plot_str = df["Участок"].astype(str).str.strip()
+                df = df[
+                    (
+                        df["Категория"].astype(str).str.startswith("Членские взносы") |
+                        df["Категория"].astype(str).str.startswith("Электроэнергия (от садоводов)")
+                    ) & (
+                        df["Участок"].isna() |
+                        (_plot_str == "") |
+                        ~_plot_str.isin(known_plots)
+                    )
+                ]
+        elif self._active_warning == "split_mismatch":
+            if "_breakdown" in df.columns:
+                _empty = {"", "None", "nan", "[]"}
+                has_bd = (
+                    df["_breakdown"].notna() &
+                    ~df["_breakdown"].astype(str).str.strip().isin(_empty)
+                )
+                bad = []
+                for idx, row in df[has_bd].iterrows():
+                    items = _parse_breakdown(row.get("_breakdown"))
+                    if not items:
+                        continue
+                    parent = _to_num(row.get("Сумма")) or 0.0
+                    child  = sum(_to_num(it.get("Сумма")) or 0.0 for it in items)
+                    if abs(parent - child) > 0.005:
+                        bad.append(idx)
+                df = df[df.index.isin(bad)]
+
         return df
 
     def apply_filters(self):

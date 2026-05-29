@@ -46,6 +46,23 @@ def _build_plot_lookup(sadovods):
 
 _SURNAME_MAP, _FIO_MAP = _build_plot_lookup(_load_sadovods())
 
+
+def load_plot_numbers() -> list[str]:
+    """Возвращает отсортированный список номеров участков из snt_plots.json."""
+    try:
+        if os.path.exists(_PLOTS_FILE):
+            with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            nums = sorted(
+                {str(e.get("num", "")) for e in data if e.get("num")},
+                key=lambda s: (0, int(s)) if s.isdigit() else (1, s),
+            )
+            return nums
+    except Exception:
+        pass
+    return []
+
+
 _PAT_PLOT = [
     re.compile(r'участ[а-яё]*\s*[№#]?\s*(\d+(?:/\d+)?)', re.I),
     re.compile(r'\bуч[.:№#]?\s*(\d+(?:/\d+)?)', re.I),
@@ -110,16 +127,28 @@ def _find_by_contragent(c):
 
 
 def get_plot(row: dict) -> str:
+    """Возвращает первый найденный номер участка или пустую строку.
+    При нескольких кандидатах берётся первый — строка попадёт в замечание
+    «Неизвестный участок», если значение отсутствует в базе."""
     text = str(row.get("Назначение", "") or "")
     cont = str(row.get("Контрагент",  "") or "")
+
     p = _find_in_text(text)
-    if p: return ", ".join(str(x) for x in p)
+    if p:
+        return str(p[0])
+
     p = _find_by_name(text)
-    if p: return ", ".join(str(x) for x in p[:2])
+    if p:
+        return str(p[0])
+
     p = _find_by_name(cont)
-    if p: return ", ".join(str(x) for x in p[:2])
+    if p:
+        return str(p[0])
+
     p = _find_by_contragent(cont)
-    if p: return ", ".join(str(x) for x in p[:2])
+    if p:
+        return str(p[0])
+
     return ""
 
 
