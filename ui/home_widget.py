@@ -309,12 +309,33 @@ class _MultiCatButton(QWidget):
         n = len(self._categories)
         s = len(self._selected)
         if s == n:
-            text = "Все"
+            self._btn.setText("Все  ▾")
+            self._btn.setStyleSheet("""
+                QPushButton {
+                    background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
+                    color: #374151; padding: 2px 8px; font-size: 12px;
+                }
+                QPushButton:hover { background: #F3F4F6; }
+            """)
         elif s == 0:
-            text = "Ничего"
+            self._btn.setText("Ничего  ▾")
+            self._btn.setStyleSheet("""
+                QPushButton {
+                    background: #FEE2E2; border: 1px solid #FCA5A5; border-radius: 11px;
+                    color: #991B1B; padding: 2px 10px; font-size: 11px; font-weight: 500;
+                }
+                QPushButton:hover { background: #FECACA; }
+            """)
         else:
-            text = f"{s} из {n}"
-        self._btn.setText(text + " ▾")
+            self._btn.setText(f"{s} из {n}  ▾")
+            self._btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(7,65,79,0.1); border: 1px solid rgba(7,65,79,0.35);
+                    border-radius: 11px; color: #07414F;
+                    padding: 2px 10px; font-size: 11px; font-weight: 500;
+                }
+                QPushButton:hover { background: rgba(7,65,79,0.18); }
+            """)
 
     def _open_menu(self):
         menu = QMenu(self)
@@ -324,18 +345,6 @@ class _MultiCatButton(QWidget):
                 border-radius: 8px; padding: 4px;
             }
             QMenu::item { padding: 0px; margin: 1px 0px; }
-            QCheckBox {
-                padding: 5px 14px; color: #374151; font-size: 12px; spacing: 8px;
-                background: transparent;
-            }
-            QCheckBox:hover { background: #F3F4F6; border-radius: 4px; }
-            QCheckBox::indicator {
-                width: 14px; height: 14px;
-                border: 1px solid #D1D5DB; border-radius: 3px; background: #FFFFFF;
-            }
-            QCheckBox::indicator:checked {
-                background: #2F7D55; border-color: #2F7D55;
-            }
         """)
 
         # Быстрые кнопки «Выбрать все / Снять все»
@@ -354,11 +363,20 @@ class _MultiCatButton(QWidget):
 
         menu.addSeparator()
 
-        # Чекбоксы категорий (меню остаётся открытым при клике)
+        # Чекбоксы категорий с цветными индикаторами
         for name, color in self._categories:
             wa = QWidgetAction(menu)
             cb = QCheckBox(f"  {name}")
             cb.setChecked(name in self._selected)
+            cb.setStyleSheet(
+                f"QCheckBox {{ padding: 5px 14px; color: #374151; font-size: 12px;"
+                f"  spacing: 8px; background: transparent; }}"
+                f"QCheckBox:hover {{ background: #F3F4F6; border-radius: 4px; }}"
+                f"QCheckBox::indicator {{ width: 14px; height: 14px;"
+                f"  border: 1px solid #D1D5DB; border-radius: 3px; background: #FFFFFF; }}"
+                f"QCheckBox::indicator:checked {{"
+                f"  background: {color}; border-color: {color}; }}"
+            )
             cb.toggled.connect(lambda checked, n=name: self._toggle(n, checked))
             wa.setDefaultWidget(cb)
             menu.addAction(wa)
