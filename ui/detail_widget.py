@@ -3,18 +3,24 @@ import json
 import os
 
 import pandas as pd
-from PyQt6.QtCore import Qt, QDate, QPoint, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QFont
+from PyQt6.QtCore import (
+    Qt, QDate, QEvent, QPoint, QRect, QModelIndex, QAbstractItemModel, pyqtSignal,
+)
+from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen, QPolygon
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
-    QMessageBox, QPushButton, QStyledItemDelegate, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog,
+    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
+    QStyle, QStyledItemDelegate, QTreeView, QVBoxLayout, QWidget,
 )
 
 from ui.categorization import CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization, categorize_row
 from ui.plot_detection import apply_plot_column, get_plot, _PLOTS_FILE
 
+
+# =========================================================================== #
+#  Вспомогательные функции для DataFrame                                      #
+# =========================================================================== #
 
 def _merge_to_summa(df: "pd.DataFrame") -> "pd.DataFrame":
     """Если в DataFrame есть Поступление/Списание — объединяет их в Сумма.
@@ -54,47 +60,346 @@ def _add_tag(tags_str: str, tag: str) -> str:
 
 
 def _ensure_meta_columns(df: "pd.DataFrame") -> "pd.DataFrame":
-    """Добавляет _hash и Теги, если их ещё нет."""
+    """Добавляет _hash, Теги и _breakdown, если их ещё нет."""
     df = df.copy()
     if "_hash" not in df.columns:
         df["_hash"] = df.apply(lambda r: _compute_hash(r.to_dict()), axis=1)
     if "Теги" not in df.columns:
         df["Теги"] = ""
+    if "_breakdown" not in df.columns:
+        df["_breakdown"] = None
     return df
 
 
-class _SortItem(QTableWidgetItem):
-    """QTableWidgetItem с корректной числовой и датовой сортировкой."""
-    _DATE_FMT = "%d.%m.%Y"
-
-    def __lt__(self, other: "QTableWidgetItem") -> bool:
-        a, b = self.text().strip(), other.text().strip()
-        if not a:
-            return False  # пустые значения — в конец
-        if not b:
-            return True
+def _parse_breakdown(value) -> list:
+    """Читает разбивку операции (хранится в колонке _breakdown как JSON-строка).
+    Возвращает список словарей вида {Назначение, Сумма, Категория}."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
         try:
-            def _num(s: str) -> float:
-                return float(
-                    s.replace(" ", "").replace(" ", "")
-                     .replace("₽", "").replace(",", ".")
-                )
-            return _num(a) < _num(b)
-        except ValueError:
-            pass
-        try:
-            from datetime import datetime
-            return datetime.strptime(a, self._DATE_FMT) < datetime.strptime(b, self._DATE_FMT)
-        except ValueError:
-            pass
-        return a < b
+            data = json.loads(value)
+            return data if isinstance(data, list) else []
+        except (ValueError, TypeError):
+            return []
+    return []
 
 
-class _EditMarkDelegate(QStyledItemDelegate):
-    """Рисует иконку карандаша (Material Icons e3c9) в правой части ячейки,
-    если ячейка была отредактирована вручную."""
+def _dump_breakdown(items: list) -> str:
+    """Сериализует разбивку в JSON-строку для хранения в _breakdown."""
+    if not items:
+        return ""
+    return json.dumps(items, ensure_ascii=False)
 
-    _CHAR = ""
+
+# =========================================================================== #
+#  Парсинг и форматирование значений                                          #
+# =========================================================================== #
+
+def _to_num(v):
+    """Приводит значение к float или None (для пустых/нечисловых)."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return None if (isinstance(v, float) and pd.isna(v)) else float(v)
+    try:
+        return float(
+            str(v).replace(" ", "").replace(" ", "")
+                  .replace("−", "-").replace("₽", "").replace(",", ".")
+        )
+    except ValueError:
+        return None
+
+
+def _parse_money(text: str) -> float:
+    n = _to_num(text)
+    return float("nan") if n is None else n
+
+
+def _fmt_money(num: float) -> str:
+    if num > 0:
+        return f"{num:,.2f} ₽".replace(",", " ")
+    if num < 0:
+        return f"−{abs(num):,.2f} ₽".replace(",", " ")
+    return ""
+
+
+def _num_edit_str(num: float) -> str:
+    """Чистое строковое представление числа для редактора (без ₽ и пробелов)."""
+    return ("%g" % num)
+
+
+def _to_ts(v):
+    if v is None:
+        return None
+    if isinstance(v, float) and pd.isna(v):
+        return None
+    try:
+        ts = pd.Timestamp(v)
+        return None if pd.isna(ts) else ts
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_date(text: str):
+    try:
+        ts = pd.to_datetime(text, dayfirst=True)
+        return None if pd.isna(ts) else ts
+    except (ValueError, TypeError):
+        return None
+
+
+# =========================================================================== #
+#  Узел дерева и модель                                                        #
+# =========================================================================== #
+
+# Роль, по которой делегат понимает, что ячейка была отредактирована вручную.
+MANUAL_ROLE = Qt.ItemDataRole.UserRole + 1
+
+_DEFAULT_ROW_COLOR = QColor(55, 55, 60)
+# Служебный столбец управления (стрелка/＋/корзина). Хранится первым в модели.
+_CTRL_COL = "\x00ctrl"
+# Колонки, отображаемые в строке-ветке (split). «Контрагент» — копия из операции.
+_SPLIT_DISPLAY_COLS = ("Контрагент", "Сумма", "Категория", "Участок")
+# Из них реально редактируемые в ветке.
+_SPLIT_EDIT_COLS = ("Сумма", "Категория", "Участок")
+
+
+class _Node:
+    """Узел дерева. kind="op" — операция (строка выписки),
+    kind="split" — распределение внутри операции."""
+
+    __slots__ = ("kind", "data", "df_idx", "parent", "children")
+
+    def __init__(self, kind: str, data: dict, df_idx=None, parent=None):
+        self.kind = kind
+        self.data = data          # словарь {имя_колонки: значение}
+        self.df_idx = df_idx      # индекс в df_full (только для операций)
+        self.parent = parent
+        self.children: list[_Node] = []
+
+    def row(self) -> int:
+        if self.parent is not None:
+            return self.parent.children.index(self)
+        return 0
+
+
+class OperationsTreeModel(QAbstractItemModel):
+    """Двухуровневая модель: операции -> распределения по категориям.
+
+    Сумма операции НЕ вычисляется из детей — она остаётся исходным значением
+    выписки. Дети-распределения это аннотация (на что пошли деньги)."""
+
+    # Эмитится при ручном редактировании ячейки: (узел, имя_колонки).
+    cellEdited = pyqtSignal(object, str)
+
+    def __init__(self, manual_cells: set, parent=None):
+        super().__init__(parent)
+        self._manual = manual_cells
+        self._columns: list[str] = []
+        self._root = _Node("root", {})
+        self._sort_col: int | None = None
+        self._sort_order = Qt.SortOrder.AscendingOrder
+
+    # -- наполнение --------------------------------------------------------- #
+    def load(self, columns: list[str], records: list[tuple]):
+        """records: список (df_idx, data_dict, breakdown_list)."""
+        self.beginResetModel()
+        self._columns = [_CTRL_COL] + list(columns)
+        root = _Node("root", {})
+        for df_idx, data, breakdown in records:
+            op = _Node("op", data, df_idx=df_idx, parent=root)
+            for b in breakdown:
+                op.children.append(_Node("split", dict(b), parent=op))
+            root.children.append(op)
+        self._root = root
+        self._apply_sort_internal()
+        self.endResetModel()
+
+    def top_nodes(self) -> list:
+        return self._root.children
+
+    def category_column(self) -> int:
+        return self._columns.index("Категория") if "Категория" in self._columns else -1
+
+    def columns(self) -> list:
+        return self._columns
+
+    def index_for_df_idx(self, df_idx) -> QModelIndex:
+        for i, op in enumerate(self._root.children):
+            if op.df_idx == df_idx:
+                return self.createIndex(i, 0, op)
+        return QModelIndex()
+
+    # -- ядро дерева -------------------------------------------------------- #
+    def index(self, row, column, parent=QModelIndex()):
+        if not self.hasIndex(row, column, parent):
+            return QModelIndex()
+        parent_node = parent.internalPointer() if parent.isValid() else self._root
+        if 0 <= row < len(parent_node.children):
+            return self.createIndex(row, column, parent_node.children[row])
+        return QModelIndex()
+
+    def parent(self, index):
+        if not index.isValid():
+            return QModelIndex()
+        node = index.internalPointer()
+        p = node.parent
+        if p is None or p is self._root:
+            return QModelIndex()
+        return self.createIndex(p.row(), 0, p)
+
+    def rowCount(self, parent=QModelIndex()):
+        if parent.column() > 0:
+            return 0
+        node = parent.internalPointer() if parent.isValid() else self._root
+        return len(node.children)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self._columns)
+
+    # -- чтение ------------------------------------------------------------- #
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        node = index.internalPointer()
+        col = self._columns[index.column()]
+
+        # Служебный столбец — всё рисует делегат, модель данных не отдаёт.
+        if col == _CTRL_COL:
+            return None
+
+        if role == MANUAL_ROLE:
+            return node.kind == "op" and (node.df_idx, col) in self._manual
+
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+            if node.kind == "split" and col not in _SPLIT_DISPLAY_COLS:
+                return ""
+            val = node.data.get(col)
+            if col == "Сумма":
+                num = _to_num(val)
+                if role == Qt.ItemDataRole.EditRole:
+                    return "" if num is None else _num_edit_str(num)
+                return "" if not num else _fmt_money(num)
+            if col == "Дата":
+                ts = _to_ts(val)
+                return "" if ts is None else ts.strftime("%d.%m.%Y")
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return ""
+            return str(val)
+
+        if role == Qt.ItemDataRole.ForegroundRole:
+            if col == "Сумма":
+                num = _to_num(node.data.get(col))
+                if num is not None and num > 0:
+                    return QColor("#059669")
+                if num is not None and num < 0:
+                    return QColor("#DC2626")
+                return QColor("#374151")
+            if col == "Теги" and "Дубль" in str(node.data.get(col) or ""):
+                return QColor("#D97706")
+
+        if role == Qt.ItemDataRole.BackgroundRole:
+            cat = str(node.data.get("Категория", ""))
+            return CATEGORY_COLORS.get(cat, _DEFAULT_ROW_COLOR)
+
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if col == "Сумма":
+                return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        return None
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            if 0 <= section < len(self._columns):
+                name = self._columns[section]
+                return "" if name == _CTRL_COL else name
+        return None
+
+    # -- редактирование ----------------------------------------------------- #
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        node = index.internalPointer()
+        col = self._columns[index.column()]
+        f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        if col == _CTRL_COL:
+            return f
+        if node.kind == "op":
+            f |= Qt.ItemFlag.ItemIsEditable
+        elif col in _SPLIT_EDIT_COLS:
+            f |= Qt.ItemFlag.ItemIsEditable
+        return f
+
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+        if role != Qt.ItemDataRole.EditRole or not index.isValid():
+            return False
+        if not (self.flags(index) & Qt.ItemFlag.ItemIsEditable):
+            return False
+        node = index.internalPointer()
+        col = self._columns[index.column()]
+        text = str(value).strip()
+
+        if col == "Сумма":
+            node.data["Сумма"] = _parse_money(text)
+        elif col == "Дата":
+            ts = _parse_date(text)
+            if ts is None:
+                return False
+            node.data["Дата"] = ts
+        else:
+            node.data[col] = text
+
+        # Перерисовываем всю строку — фон зависит от категории, которая могла измениться.
+        left = self.index(index.row(), 0, index.parent())
+        right = self.index(index.row(), self.columnCount() - 1, index.parent())
+        self.dataChanged.emit(left, right)
+        self.cellEdited.emit(node, col)
+        return True
+
+    # -- сортировка --------------------------------------------------------- #
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        if 0 <= column < len(self._columns) and self._columns[column] == _CTRL_COL:
+            return
+        self._sort_col = column
+        self._sort_order = order
+        self.beginResetModel()
+        self._apply_sort_internal()
+        self.endResetModel()
+
+    def _apply_sort_internal(self):
+        if self._sort_col is None or not (0 <= self._sort_col < len(self._columns)):
+            return
+        col = self._columns[self._sort_col]
+        if col == _CTRL_COL:
+            return
+        reverse = self._sort_order == Qt.SortOrder.DescendingOrder
+
+        def key(node):
+            v = node.data.get(col)
+            if col == "Сумма":
+                num = _to_num(v)
+                return (num is None, num if num is not None else 0.0)
+            if col == "Дата":
+                ts = _to_ts(v)
+                return (ts is None, ts if ts is not None else pd.Timestamp.min)
+            return (False, str(v or "").lower())
+
+        self._root.children.sort(key=key, reverse=reverse)
+        for op in self._root.children:
+            op.children.sort(key=key, reverse=reverse)
+
+
+# =========================================================================== #
+#  Делегаты                                                                   #
+# =========================================================================== #
+
+class _CellDelegate(QStyledItemDelegate):
+    """Базовый делегат: рисует иконку карандаша (Material Icons) в ячейках,
+    отредактированных вручную."""
+
+    _CHAR = ""
     _ICON_FONT: QFont | None = None
 
     @classmethod
@@ -105,25 +410,10 @@ class _EditMarkDelegate(QStyledItemDelegate):
             cls._ICON_FONT = f
         return cls._ICON_FONT
 
-    def __init__(self, manual_cells: set, table: QTableWidget, parent=None):
-        super().__init__(parent)
-        self._manual_cells = manual_cells
-        self._table = table
-
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
-
-        item = self._table.item(index.row(), index.column())
-        if item is None:
+        if not index.data(MANUAL_ROLE):
             return
-        df_idx = item.data(Qt.ItemDataRole.UserRole)
-        hdr = self._table.horizontalHeaderItem(index.column())
-        if df_idx is None or hdr is None:
-            return
-        if (df_idx, hdr.text()) not in self._manual_cells:
-            return
-
-        from PyQt6.QtWidgets import QStyle
         painter.save()
         painter.setFont(self._icon_font())
         if option.state & QStyle.StateFlag.State_Selected:
@@ -137,6 +427,241 @@ class _EditMarkDelegate(QStyledItemDelegate):
         )
         painter.restore()
 
+
+class _CategoryDelegate(_CellDelegate):
+    """Делегат колонки «Категория»: выпадающий список создаётся «на лету»
+    только в момент редактирования и уничтожается сразу после."""
+
+    def __init__(self, items: list[str], parent=None):
+        super().__init__(parent)
+        self._items = items
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.addItems(self._items)
+        combo.activated.connect(lambda: self.commitData.emit(combo))
+        return combo
+
+    def setEditorData(self, editor, index):
+        current = index.data(Qt.ItemDataRole.EditRole)
+        if isinstance(editor, QComboBox):
+            pos = editor.findText(str(current)) if current else -1
+            editor.setCurrentIndex(pos if pos >= 0 else 0)
+
+    def setModelData(self, editor, model, index):
+        if isinstance(editor, QComboBox):
+            model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
+
+# =========================================================================== #
+#  Делегат служебного столбца (стрелка / ＋ / корзина)                          #
+# =========================================================================== #
+
+class _CtrlDelegate(QStyledItemDelegate):
+    """Рисует кнопки управления в первом (служебном) столбце для операций:
+    стрелку сворачивания (если есть ветки) и зелёную «＋» (добавить ветку).
+    Корзина веток живёт в колонке «Контрагент» (см. _BranchColumnDelegate).
+
+    Клики ловятся в editorEvent и транслируются наружу сигналами. Геометрия
+    кнопок одинакова для всех строк (indentation у дерева = 0)."""
+
+    addBranchRequested = pyqtSignal(QModelIndex)
+    toggleRequested = pyqtSignal(QModelIndex)
+
+    _ARROW_COLOR = QColor("#5B6675")
+    _PLUS_BG = QColor("#D6F0DC")
+    _PLUS_FG = QColor("#15803D")
+    _BG = QColor("#F9FAFB")
+    _BG_HOVER = QColor("#DDE4EE")
+    _BG_SEL = QColor("#C9D8E2")
+    _BORDER = QColor("#D8DDE6")
+    _PLUS_W, _PLUS_H = 24, 20
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view = view
+
+    @staticmethod
+    def _icon_font(px: int = 15) -> QFont:
+        f = QFont("Material Icons")
+        f.setPixelSize(px)
+        return f
+
+    # -- геометрия кнопок (от левого края ячейки) --------------------------- #
+    def _arrow_rect(self, rect) -> QRect:
+        return QRect(rect.left() + 2, rect.top(), 22, rect.height())
+
+    def _plus_rect(self, rect) -> QRect:
+        y = rect.top() + (rect.height() - self._PLUS_H) // 2
+        return QRect(rect.left() + 26, y, self._PLUS_W, self._PLUS_H)
+
+    # -- отрисовка ---------------------------------------------------------- #
+    def paint(self, painter, option, index):
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, self._BG_SEL)
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(option.rect, self._BG_HOVER)
+        else:
+            painter.fillRect(option.rect, self._BG)
+        painter.setPen(self._BORDER)
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+
+        node = index.internalPointer()
+        if node is None:
+            painter.restore()
+            return
+        rect = option.rect
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if node.kind == "op":
+            model = self._view.model()
+            if model is not None and model.hasChildren(index):
+                self._paint_arrow(painter, self._arrow_rect(rect), self._view.isExpanded(index))
+            self._paint_btn(painter, self._plus_rect(rect), "", self._PLUS_BG, self._PLUS_FG)
+        painter.restore()
+
+    def _paint_arrow(self, painter, rect, expanded):
+        painter.save()
+        painter.setBrush(self._ARROW_COLOR)
+        painter.setPen(Qt.PenStyle.NoPen)
+        cx = rect.left() + rect.width() // 2
+        cy = rect.top() + rect.height() // 2
+        if expanded:
+            pts = [QPoint(cx - 4, cy - 2), QPoint(cx + 4, cy - 2), QPoint(cx, cy + 3)]
+        else:
+            pts = [QPoint(cx - 2, cy - 4), QPoint(cx + 3, cy), QPoint(cx - 2, cy + 4)]
+        painter.drawPolygon(QPolygon(pts))
+        painter.restore()
+
+    def _paint_btn(self, painter, rect, glyph, bg, fg):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(bg)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(rect, 5, 5)
+        painter.setPen(fg)
+        painter.setFont(self._icon_font(15))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, glyph)
+        painter.restore()
+
+    # -- клики -------------------------------------------------------------- #
+    def editorEvent(self, event, model, option, index):
+        if (event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton):
+            node = index.internalPointer()
+            pos = event.position().toPoint()
+            rect = option.rect
+            if node is not None:
+                if node.kind == "op":
+                    if model.hasChildren(index) and self._arrow_rect(rect).contains(pos):
+                        self.toggleRequested.emit(index)
+                        return True
+                    if self._plus_rect(rect).contains(pos):
+                        self.addBranchRequested.emit(index)
+                        return True
+        return super().editorEvent(event, model, option, index)
+
+
+class _BranchColumnDelegate(_CellDelegate):
+    """Делегат колонки «Контрагент». Для строк-веток (split) рисует слева
+    соединительные линии дерева (├─ / └─) и кнопку-корзину, а сам текст
+    контрагента сдвигает вправо — так визуально видно вложенность ветки в
+    операцию. Для строк-операций ведёт себя как обычный _CellDelegate
+    (текст + карандаш ручной правки)."""
+
+    deleteBranchRequested = pyqtSignal(QModelIndex)
+
+    _LINE_COLOR = QColor("#9AA4B5")
+    _TRASH_BG = QColor("#FEE2E2")
+    _TRASH_FG = QColor("#B91C1C")
+    _BG = QColor("#F9FAFB")
+    _BG_HOVER = QColor("#DDE4EE")
+    _BG_SEL = QColor("#C9D8E2")
+    _BORDER = QColor("#D8DDE6")
+    _TXT = QColor("#1F2937")
+    _TXT_SEL = QColor("#07414F")
+    _TRUNK_X = 16        # X вертикального «ствола» от левого края ячейки
+    _ELBOW_END = 30      # докуда идёт горизонтальное «ответвление»
+    _TRASH_X, _TRASH_W, _TRASH_H = 34, 24, 20
+    _TEXT_PAD = 64       # отступ текста контрагента вправо
+
+    def _trash_rect(self, rect) -> QRect:
+        y = rect.top() + (rect.height() - self._TRASH_H) // 2
+        return QRect(rect.left() + self._TRASH_X, y, self._TRASH_W, self._TRASH_H)
+
+    def paint(self, painter, option, index):
+        node = index.internalPointer()
+        if node is None or node.kind != "split":
+            super().paint(painter, option, index)
+            return
+
+        rect = option.rect
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # фон + нижняя граница строки (как у соседних ячеек)
+        if selected:
+            painter.fillRect(rect, self._BG_SEL)
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(rect, self._BG_HOVER)
+        else:
+            painter.fillRect(rect, self._BG)
+        painter.setPen(self._BORDER)
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+        # соединительные линии дерева: ствол + ответвление (└─ для последней ветки)
+        model = index.model()
+        is_last = index.row() == model.rowCount(index.parent()) - 1
+        midy = rect.top() + rect.height() // 2
+        tx = rect.left() + self._TRUNK_X
+        painter.setPen(QPen(self._LINE_COLOR, 1.4))
+        painter.drawLine(tx, rect.top(), tx, midy if is_last else rect.bottom())
+        painter.drawLine(tx, midy, rect.left() + self._ELBOW_END, midy)
+
+        # кнопка-корзина
+        tr = self._trash_rect(rect)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._TRASH_BG)
+        painter.drawRoundedRect(tr, 5, 5)
+        painter.setPen(self._TRASH_FG)
+        f = QFont("Material Icons")
+        f.setPixelSize(15)
+        painter.setFont(f)
+        painter.drawText(tr, Qt.AlignmentFlag.AlignCenter, "")
+
+        # текст контрагента — со сдвигом вправо
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        if text:
+            painter.setFont(option.font)
+            painter.setPen(self._TXT_SEL if selected else self._TXT)
+            txt_rect = rect.adjusted(self._TEXT_PAD, 0, -6, 0)
+            elided = painter.fontMetrics().elidedText(
+                str(text), Qt.TextElideMode.ElideRight, txt_rect.width())
+            painter.drawText(
+                txt_rect,
+                int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                elided,
+            )
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        node = index.internalPointer()
+        if (node is not None and node.kind == "split"
+                and event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton):
+            if self._trash_rect(option.rect).contains(event.position().toPoint()):
+                self.deleteBranchRequested.emit(index)
+                return True
+        return super().editorEvent(event, model, option, index)
+
+
+# =========================================================================== #
+#  Диалоги (без изменений)                                                    #
+# =========================================================================== #
 
 class LoadSettingsDialog(QDialog):
     """Диалог настроек перед загрузкой файла выписки."""
@@ -454,6 +979,10 @@ class AddRowDialog(QDialog):
         """)
 
 
+# =========================================================================== #
+#  Виджет вкладки «Детализация»                                               #
+# =========================================================================== #
+
 class DetailWidget(QWidget):
     dataLoaded = pyqtSignal(object)
 
@@ -463,11 +992,11 @@ class DetailWidget(QWidget):
         self.df_full = None
         self._manual_rows: set[int] = set()
         self._manual_cells: set[tuple[int, str]] = set()
+        self._cat_col: int | None = None
+        self._cont_col: int | None = None
         self._setup_ui()
-        self.table.setItemDelegate(
-            _EditMarkDelegate(self._manual_cells, self.table, self)
-        )
 
+    # ----------------------------------------------------------------- UI -- #
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -540,18 +1069,38 @@ class DetailWidget(QWidget):
         self.status_label = QLabel("Файл не загружен", objectName="statusLabel")
         layout.addWidget(self.status_label)
 
-        self.table = QTableWidget(objectName="mainTable")
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSortingEnabled(True)
-        self.table.setShowGrid(True)
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._show_context_menu)
-        self.table.itemChanged.connect(self._on_item_changed)
-        layout.addWidget(self.table)
+        # --- дерево (Model-View) --------------------------------------- #
+        self.model = OperationsTreeModel(self._manual_cells, self)
+        self.model.cellEdited.connect(self._on_cell_edited)
+
+        self.tree = QTreeView(objectName="mainTable")
+        self.tree.setModel(self.model)
+        self.tree.setUniformRowHeights(True)
+        # Стрелка/＋/корзина живут в служебном столбце-делегате, поэтому штатную
+        # «ёлочку» дерева отключаем, а отступ обнуляем — геометрия кнопок едина.
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(0)
+        self.tree.setAlternatingRowColors(False)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.tree.setSortingEnabled(True)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree.setMouseTracking(True)
+        self.tree.header().setStretchLastSection(True)
+        self.tree.setStyleSheet(self._TREE_STYLE)
+
+        self._cell_delegate = _CellDelegate(self.tree)
+        self._category_delegate = _CategoryDelegate(ALL_CATEGORIES, self.tree)
+        self._ctrl_delegate = _CtrlDelegate(self.tree)
+        self._ctrl_delegate.addBranchRequested.connect(self._on_add_branch)
+        self._ctrl_delegate.toggleRequested.connect(self._on_toggle)
+        self._branch_delegate = _BranchColumnDelegate(self.tree)
+        self._branch_delegate.deleteBranchRequested.connect(self._on_delete_branch)
+        self.tree.setItemDelegate(self._cell_delegate)
+        self.tree.setItemDelegateForColumn(0, self._ctrl_delegate)
+
+        layout.addWidget(self.tree)
 
         summary_layout = QHBoxLayout()
         self.lbl_income  = QLabel("Поступления: —", objectName="summaryIncome")
@@ -561,6 +1110,145 @@ class DetailWidget(QWidget):
         summary_layout.addWidget(self.lbl_expense)
         layout.addLayout(summary_layout)
 
+    # QTreeView нуждается в собственных правилах: глобальный QSS целит в
+    # QTableWidget#mainTable и на дерево не распространяется.
+    _TREE_STYLE = """
+        QTreeView#mainTable {
+            background: #F9FAFB; border: 1px solid #D8DDE6; border-radius: 8px;
+            color: #1F2937; font-size: 12px;
+            selection-background-color: #C9D8E2; selection-color: #07414F;
+            outline: 0;
+        }
+        QTreeView#mainTable::item {
+            padding: 5px 8px; border-bottom: 1px solid #D8DDE6;
+        }
+        QTreeView#mainTable::item:hover { background: #DDE4EE; }
+        QTreeView#mainTable::item:selected { background: #C9D8E2; color: #07414F; }
+        QHeaderView::section {
+            background: #E9EDF5; color: #4B5563; border: none;
+            border-right: 1px solid #CDD3DC; border-bottom: 2px solid #C4CBD7;
+            padding: 8px 10px; font-size: 12px; font-weight: 600;
+        }
+    """
+
+    # --------------------------------------------------- наполнение модели -- #
+    def _rebuild_model(self, df: "pd.DataFrame"):
+        columns = [c for c in df.columns if not str(c).startswith("_")]
+        records = []
+        for df_idx, row in df.iterrows():
+            data = {c: row[c] for c in columns}
+            breakdown = _parse_breakdown(row.get("_breakdown"))
+            records.append((df_idx, data, breakdown))
+
+        self.model.load(columns, records)
+        self._apply_header_layout(self.model.columns())
+
+        # Делегат комбобокса — только на колонку «Категория».
+        cat = self.model.category_column()
+        if self._cat_col is not None and self._cat_col != cat:
+            self.tree.setItemDelegateForColumn(self._cat_col, self._cell_delegate)
+        if cat >= 0:
+            self.tree.setItemDelegateForColumn(cat, self._category_delegate)
+        self._cat_col = cat
+
+        # Делегат с линиями дерева и корзиной — на колонку «Контрагент».
+        cols = self.model.columns()
+        cont = cols.index("Контрагент") if "Контрагент" in cols else -1
+        if self._cont_col is not None and self._cont_col != cont:
+            self.tree.setItemDelegateForColumn(self._cont_col, self._cell_delegate)
+        if cont >= 0:
+            self.tree.setItemDelegateForColumn(cont, self._branch_delegate)
+        self._cont_col = cont
+
+        self._refresh_summary()
+
+    def _apply_header_layout(self, columns: list[str]):
+        col_widths = {
+            _CTRL_COL: 84, "Дата": 95, "Контрагент": 260, "Сумма": 140,
+            "Назначение": 340, "Категория": 210, "Участок": 80, "Теги": 120,
+        }
+        header = self.tree.header()
+        for col_idx, col in enumerate(columns):
+            w = col_widths.get(col)
+            if w:
+                header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.Interactive)
+                self.tree.setColumnWidth(col_idx, w)
+            else:
+                header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.ResizeToContents)
+
+    def _refresh_summary(self):
+        total_in = total_out = 0.0
+        for op in self.model.top_nodes():
+            num = _to_num(op.data.get("Сумма"))
+            if num is None:
+                continue
+            if num > 0:
+                total_in += num
+            elif num < 0:
+                total_out += abs(num)
+        self.lbl_income.setText(f"✅  Поступления: {total_in:,.2f} ₽".replace(",", " "))
+        self.lbl_expense.setText(f"🔴  Списания: {total_out:,.2f} ₽".replace(",", " "))
+        self.status_label.setText(f"Показано записей: {len(self.model.top_nodes())}")
+
+    # --------------------------------------------------------- разбивка --- #
+    def _set_breakdown(self, df_idx, items: list):
+        if self.df_full is None:
+            return
+        if "_breakdown" not in self.df_full.columns:
+            self.df_full["_breakdown"] = None
+        self.df_full.at[df_idx, "_breakdown"] = _dump_breakdown(items)
+
+    def _add_split(self, op_node: _Node):
+        if self.df_full is None or op_node.df_idx not in self.df_full.index:
+            return
+        items = _parse_breakdown(self.df_full.loc[op_node.df_idx].get("_breakdown"))
+        # Правила ветки: «Контрагент» копируется из операции; «Назначение» не
+        # используется; «Сумма»/«Категория»/«Участок» заполняются вручную.
+        items.append({
+            "Контрагент": str(op_node.data.get("Контрагент") or ""),
+            "Сумма": 0.0,
+            "Категория": ALL_CATEGORIES[0],
+            "Участок": "",
+        })
+        self._set_breakdown(op_node.df_idx, items)
+        target = op_node.df_idx
+        self.apply_filters()
+        idx = self.model.index_for_df_idx(target)
+        if idx.isValid():
+            self.tree.expand(idx)
+        # Разбивка — аннотация, на суммы/долги не влияет: dataLoaded не эмитим.
+
+    def _delete_split(self, split_node: _Node):
+        parent = split_node.parent
+        if parent is None or self.df_full is None or parent.df_idx not in self.df_full.index:
+            return
+        items = [dict(c.data) for c in parent.children if c is not split_node]
+        self._set_breakdown(parent.df_idx, items)
+        target = parent.df_idx
+        self.apply_filters()
+        idx = self.model.index_for_df_idx(target)
+        if idx.isValid() and items:
+            self.tree.expand(idx)
+        # Разбивка — аннотация, на суммы/долги не влияет: dataLoaded не эмитим.
+
+    # ----------------------------------- клики по столбцу управления ------- #
+    def _on_add_branch(self, index: QModelIndex):
+        node = index.internalPointer()
+        if node is not None and node.kind == "op":
+            self._add_split(node)
+
+    def _on_delete_branch(self, index: QModelIndex):
+        node = index.internalPointer()
+        if node is not None and node.kind == "split":
+            self._delete_split(node)
+
+    def _on_toggle(self, index: QModelIndex):
+        if self.tree.isExpanded(index):
+            self.tree.collapse(index)
+        else:
+            self.tree.expand(index)
+
+    # ----------------------------------------------------- добавить строку -- #
     def _add_row(self):
         dlg = AddRowDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -608,6 +1296,7 @@ class DetailWidget(QWidget):
         self.apply_filters()
         self.dataLoaded.emit(self.df_full)
 
+    # --------------------------------------------------------- загрузка --- #
     def load_file(self):
         settings_dlg = LoadSettingsDialog(self, has_existing_data=self.df_full is not None)
         if settings_dlg.exec() != QDialog.DialogCode.Accepted:
@@ -727,7 +1416,7 @@ class DetailWidget(QWidget):
                 df_idx, col = int(item[0]), str(item[1])
                 self._manual_cells.add((df_idx, col))
                 self._manual_rows.add(df_idx)
-        self.table.viewport().update()
+        self.tree.viewport().update()
 
     def refresh_plot_column(self):
         """Пересчитывает столбец «Участок» по актуальным данным из snt_plots.json.
@@ -742,9 +1431,8 @@ class DetailWidget(QWidget):
             self.df_full.loc[auto_mask, "Участок"] = df_new.loc[auto_mask, "Участок"]
         self.apply_filters()
 
-    def apply_filters(self):
-        if self.df_full is None:
-            return
+    # ----------------------------------------------------------- фильтры -- #
+    def _filtered_df(self) -> "pd.DataFrame":
         df = self.df_full.copy()
 
         d_from = self.date_from.date().toPyDate()
@@ -768,8 +1456,12 @@ class DetailWidget(QWidget):
                 df["Назначение"].astype(str).str.lower().str.contains(search, na=False)
             )
             df = df[mask]
+        return df
 
-        self._fill_table(df)
+    def apply_filters(self):
+        if self.df_full is None:
+            return
+        self._rebuild_model(self._filtered_df())
 
     def reset_filters(self):
         self.search_input.clear()
@@ -783,34 +1475,13 @@ class DetailWidget(QWidget):
                 self.date_to.setDate(QDate(max_d.year, max_d.month, max_d.day))
         self.apply_filters()
 
+    # ------------------------------------------------------------ экспорт -- #
     def _export_excel(self):
         if self.df_full is None:
             QMessageBox.warning(self, "Нет данных", "Сначала загрузите файл выписки.")
             return
 
-        df = self.df_full.copy()
-        d_from = self.date_from.date().toPyDate()
-        d_to   = self.date_to.date().toPyDate()
-        df = df[(df["Дата"].dt.date >= d_from) & (df["Дата"].dt.date <= d_to)]
-
-        op_type = self.combo_type.currentText()
-        if op_type == "Поступления" and "Сумма" in df.columns:
-            df = df[pd.to_numeric(df["Сумма"], errors="coerce") > 0]
-        elif op_type == "Списания" and "Сумма" in df.columns:
-            df = df[pd.to_numeric(df["Сумма"], errors="coerce") < 0]
-
-        cat_filter = self.combo_cat.currentText()
-        if cat_filter != "Все категории":
-            df = df[df["Категория"] == cat_filter]
-
-        search = self.search_input.text().strip().lower()
-        if search:
-            mask = (
-                df["Контрагент"].astype(str).str.lower().str.contains(search, na=False) |
-                df["Назначение"].astype(str).str.lower().str.contains(search, na=False)
-            )
-            df = df[mask]
-
+        df = self._filtered_df()
         if df.empty:
             QMessageBox.information(self, "Нет данных", "После применения фильтров нет строк для экспорта.")
             return
@@ -871,262 +1542,95 @@ class DetailWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка экспорта", str(e))
 
-    def _fill_table(self, df: pd.DataFrame):
-        self.table.blockSignals(True)
-        self.table.setSortingEnabled(False)
-        self.table.clearContents()
-
-        # Скрываем служебные колонки (начинаются с "_")
-        columns = [c for c in df.columns if not str(c).startswith("_")]
-        self.table.setColumnCount(len(columns))
-        self.table.setRowCount(len(df))
-        self.table.setHorizontalHeaderLabels(columns)
-
-        col_widths = {
-            "Дата": 95, "Контрагент": 260, "Сумма": 140,
-            "Назначение": 340, "Категория": 210, "Участок": 80, "Теги": 120,
-        }
-
-        for row_idx, (df_idx, row) in enumerate(df.iterrows()):
-            cat       = str(row.get("Категория", "Прочее"))
-            row_color = CATEGORY_COLORS.get(cat, QColor(55, 55, 60))
-
-            for col_idx, col in enumerate(columns):
-                val = row[col]
-                if col == "Сумма":
-                    num = pd.to_numeric(val, errors="coerce")
-                    if pd.notna(num) and num > 0:
-                        text = f"{num:,.2f} ₽".replace(",", " ")
-                        fg   = QColor("#059669")
-                    elif pd.notna(num) and num < 0:
-                        text = f"−{abs(num):,.2f} ₽".replace(",", " ")
-                        fg   = QColor("#DC2626")
-                    else:
-                        text = ""
-                        fg   = QColor("#374151")
-                    item = _SortItem(text)
-                    item.setForeground(fg)
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-                elif col == "Дата" and pd.notna(val):
-                    text = val.strftime("%d.%m.%Y")
-                    item = _SortItem(text)
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-                elif col == "Теги":
-                    text = "" if pd.isna(val) else str(val)
-                    item = _SortItem(text)
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-                    if "Дубль" in text:
-                        item.setForeground(QColor("#D97706"))
-                else:
-                    text = "" if pd.isna(val) else str(val)
-                    item = _SortItem(text)
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-
-                item.setBackground(row_color)
-                item.setData(Qt.ItemDataRole.UserRole, df_idx)
-                self.table.setItem(row_idx, col_idx, item)
-
-        header = self.table.horizontalHeader()
-        for col_idx, col in enumerate(columns):
-            w = col_widths.get(col)
-            if w:
-                self.table.setColumnWidth(col_idx, w)
-                header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.Interactive)
-            else:
-                header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.ResizeToContents)
-
-        self.table.setSortingEnabled(True)
-        self.table.blockSignals(False)
-
-        if "Сумма" in df.columns:
-            s = pd.to_numeric(df["Сумма"], errors="coerce")
-            total_in  = s[s > 0].sum()
-            total_out = s[s < 0].abs().sum()
-        else:
-            total_in = total_out = 0.0
-        self.lbl_income.setText(f"✅  Поступления: {total_in:,.2f} ₽".replace(",", " "))
-        self.lbl_expense.setText(f"🔴  Списания: {total_out:,.2f} ₽".replace(",", " "))
-        self.status_label.setText(f"Показано записей: {len(df)}")
-
-    def _show_context_menu(self, pos: QPoint):
-        row = self.table.rowAt(pos.y())
-        if row < 0:
+    # ------------------------------------------------------ редактирование -- #
+    def _on_cell_edited(self, node: _Node, col: str):
+        """Слот модели: переносит правку ячейки обратно в df_full."""
+        if self.df_full is None:
             return
-        self.table.selectRow(row)
+
+        if node.kind == "op":
+            df_idx = node.df_idx
+            if df_idx is not None and df_idx in self.df_full.index:
+                if col == "Сумма":
+                    self.df_full.at[df_idx, "Сумма"] = node.data["Сумма"]
+                elif col == "Дата":
+                    self.df_full.at[df_idx, "Дата"] = node.data["Дата"]
+                else:
+                    self.df_full.at[df_idx, col] = node.data[col]
+                    if col == "Категория" and node.data[col]:
+                        if self.combo_cat.findText(node.data[col]) == -1:
+                            self.combo_cat.addItem(node.data[col])
+                self._manual_rows.add(df_idx)
+                self._manual_cells.add((df_idx, col))
+        else:  # split — сохраняем разбивку родителя
+            parent = node.parent
+            if parent is not None and parent.df_idx in self.df_full.index:
+                items = [dict(c.data) for c in parent.children]
+                self._set_breakdown(parent.df_idx, items)
+
+        # ВАЖНО: НЕ эмитим dataLoaded на каждую правку ячейки — на этом сигнале
+        # висят тяжёлые пересчёты долгов (взносы/электроэнергия/home), из-за чего
+        # после выхода из редактирования ПК зависал на 5-6 сек. Долги
+        # пересчитываются при загрузке/добавлении/удалении операций.
+        self._refresh_summary()
+
+    # -------------------------------------------------------- контекст-меню -- #
+    def _show_context_menu(self, pos: QPoint):
+        index = self.tree.indexAt(pos)
+        if not index.isValid():
+            return
+        node = index.internalPointer()
+        self.tree.setCurrentIndex(index)
 
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
-                background: #F8F9FA;
-                border: 1px solid #D1D5DB;
-                color: #374151;
-                font-size: 13px;
-                padding: 4px;
+                background: #F8F9FA; border: 1px solid #D1D5DB; color: #374151;
+                font-size: 13px; padding: 4px;
             }
-            QMenu::item {
-                padding: 8px 20px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background: #EEF2FF;
-                color: #6366F1;
-            }
-            QMenu::separator {
-                height: 1px;
-                background: #E5E7EB;
-                margin: 4px 8px;
-            }
+            QMenu::item { padding: 8px 20px; border-radius: 4px; }
+            QMenu::item:selected { background: #EEF2FF; color: #6366F1; }
+            QMenu::separator { height: 1px; background: #E5E7EB; margin: 4px 8px; }
         """)
 
-        act_dup = QAction("Дублировать строку", self)
-        act_dup.triggered.connect(lambda: self._duplicate_row(row))
-        menu.addAction(act_dup)
+        if node.kind == "op":
+            act_split = QAction("Добавить распределение", self)
+            act_split.triggered.connect(lambda: self._add_split(node))
+            menu.addAction(act_split)
+            menu.addSeparator()
+            act_dup = QAction("Дублировать операцию", self)
+            act_dup.triggered.connect(lambda: self._duplicate_op(node))
+            menu.addAction(act_dup)
+            act_del = QAction("Удалить операцию", self)
+            act_del.triggered.connect(lambda: self._delete_op(node))
+            menu.addAction(act_del)
+        else:
+            act_del = QAction("Удалить распределение", self)
+            act_del.triggered.connect(lambda: self._delete_split(node))
+            menu.addAction(act_del)
 
-        menu.addSeparator()
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
-        act_del = QAction("Удалить строку", self)
-        act_del.triggered.connect(lambda: self._delete_row(row))
-        menu.addAction(act_del)
+    def _duplicate_op(self, op_node: _Node):
+        if self.df_full is None or op_node.df_idx not in self.df_full.index:
+            return
+        new_idx = int(self.df_full.index.max()) + 1
+        self.df_full.loc[new_idx] = self.df_full.loc[op_node.df_idx].copy()
+        self.apply_filters()
+        idx = self.model.index_for_df_idx(new_idx)
+        if idx.isValid():
+            self.tree.setCurrentIndex(idx)
+        self.dataLoaded.emit(self.df_full)
 
-        menu.exec(self.table.viewport().mapToGlobal(pos))
-
-    def _duplicate_row(self, row: int):
-        """Вставляет копию строки row сразу под ней."""
-        col_count = self.table.columnCount()
-        insert_at = row + 1
-
-        src_item0 = self.table.item(row, 0)
-        src_df_idx = src_item0.data(Qt.ItemDataRole.UserRole) if src_item0 else None
-
-        new_df_idx = None
-        if self.df_full is not None and src_df_idx is not None and src_df_idx in self.df_full.index:
-            new_df_idx = int(self.df_full.index.max()) + 1
-            self.df_full.loc[new_df_idx] = self.df_full.loc[src_df_idx].copy()
-
-        # ВАЖНО: отключаем сортировку перед вставкой строки.
-        # При setSortingEnabled(True) вызов setItem() немедленно пересортировывает
-        # таблицу внутри самого вызова (blockSignals не помогает — сортировка
-        # не идёт через сигналы). Строка «улетает» на другую позицию, все
-        # последующие item(row, col) читают чужие данные → краш.
-        self.table.blockSignals(True)
-        self.table.setSortingEnabled(False)
-        self.table.insertRow(insert_at)
-        for col in range(col_count):
-            src_item = self.table.item(row, col)
-            if src_item:
-                new_item = _SortItem(src_item.text())
-                new_item.setBackground(src_item.background())
-                new_item.setForeground(src_item.foreground())
-                new_item.setTextAlignment(src_item.textAlignment())
-                if new_df_idx is not None:
-                    new_item.setData(Qt.ItemDataRole.UserRole, new_df_idx)
-                self.table.setItem(insert_at, col, new_item)
-        self.table.setSortingEnabled(True)
-        self.table.blockSignals(False)
-
-        self.table.selectRow(insert_at)
-        self._update_summary()
-
-    def _delete_row(self, row: int):
-        """Удаляет строку из таблицы с подтверждением."""
+    def _delete_op(self, op_node: _Node):
         reply = QMessageBox.question(
-            self, "Удаление строки",
-            "Удалить выбранную строку?",
+            self, "Удаление строки", "Удалить выбранную операцию?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.StandardButton.Yes:
-            item0 = self.table.item(row, 0)
-            df_idx = item0.data(Qt.ItemDataRole.UserRole) if item0 else None
-            self.table.removeRow(row)
-            if self.df_full is not None and df_idx is not None and df_idx in self.df_full.index:
-                self.df_full = self.df_full.drop(index=df_idx)
-            self._update_summary()
-
-    def _on_item_changed(self, item: QTableWidgetItem):
-        """Обновляет цвет и выравнивание после ручного редактирования."""
-        # Защита от рекурсии при programmatic setBackground/setForeground
-        if self.table.signalsBlocked():
+        if reply != QMessageBox.StandardButton.Yes:
             return
-
-        col_idx = item.column()
-        col_name = self.table.horizontalHeaderItem(col_idx)
-        if col_name is None:
-            return
-        col = col_name.text()
-
-        self.table.blockSignals(True)
-
-        if col == "Категория":
-            cat = item.text().strip()
-            row_color = CATEGORY_COLORS.get(cat, QColor(55, 55, 60))
-            for c in range(self.table.columnCount()):
-                cell = self.table.item(item.row(), c)
-                if cell:
-                    cell.setBackground(row_color)
-
-        if col == "Сумма":
-            item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-            raw_num = item.text().replace(" ", "").replace("−", "-").replace("₽", "").replace(",", ".")
-            try:
-                num_val = float(raw_num)
-                item.setForeground(QColor("#059669") if num_val > 0 else QColor("#DC2626"))
-            except ValueError:
-                item.setForeground(QColor("#374151"))
-
-        self.table.blockSignals(False)
-
-        if self.df_full is not None:
-            df_idx = item.data(Qt.ItemDataRole.UserRole)
-            if df_idx is not None and df_idx in self.df_full.index:
-                new_text = item.text().strip()
-                if col == "Сумма":
-                    raw = new_text.replace(" ", "").replace("−", "-").replace("₽", "").replace(",", ".")
-                    try:
-                        self.df_full.at[df_idx, "Сумма"] = float(raw) if raw else float("nan")
-                    except ValueError:
-                        pass
-                elif col == "Дата":
-                    try:
-                        self.df_full.at[df_idx, col] = pd.to_datetime(new_text, dayfirst=True)
-                    except Exception:
-                        pass
-                else:
-                    self.df_full.at[df_idx, col] = new_text
-                    if col == "Категория" and new_text:
-                        if self.combo_cat.findText(new_text) == -1:
-                            self.combo_cat.addItem(new_text)
-                self._manual_rows.add(df_idx)
-                self._manual_cells.add((df_idx, col))
-
-        self._update_summary()
-
-    def _update_summary(self):
-        """Пересчитывает итоги по текущему содержимому таблицы."""
-        col_headers = {
-            self.table.horizontalHeaderItem(c).text(): c
-            for c in range(self.table.columnCount())
-            if self.table.horizontalHeaderItem(c)
-        }
-        total_in  = 0.0
-        total_out = 0.0
-        rows = self.table.rowCount()
-
-        for r in range(rows):
-            for name, c in col_headers.items():
-                cell = self.table.item(r, c)
-                if cell:
-                    raw = cell.text().replace(" ", "").replace("₽", "").replace("−", "-").replace(",", ".")
-                    try:
-                        val = float(raw)
-                    except ValueError:
-                        continue
-                    if name == "Сумма":
-                        if val > 0:
-                            total_in  += val
-                        elif val < 0:
-                            total_out += abs(val)
-
-        self.lbl_income.setText(f"✅  Поступления: {total_in:,.2f} ₽".replace(",", " "))
-        self.lbl_expense.setText(f"🔴  Списания: {total_out:,.2f} ₽".replace(",", " "))
-        self.status_label.setText(f"Показано записей: {self.table.rowCount()}")
+        if self.df_full is not None and op_node.df_idx in self.df_full.index:
+            self.df_full = self.df_full.drop(index=op_node.df_idx)
+        self.apply_filters()
+        self.dataLoaded.emit(self.df_full)
