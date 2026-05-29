@@ -6,7 +6,7 @@ import pandas as pd
 from PyQt6.QtCore import (
     Qt, QDate, QEvent, QPoint, QRect, QModelIndex, QAbstractItemModel, pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen, QPolygon
+from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QPainter, QPen, QPolygon
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -153,6 +153,9 @@ def _parse_date(text: str):
 MANUAL_ROLE = Qt.ItemDataRole.UserRole + 1
 
 _DEFAULT_ROW_COLOR = QColor(55, 55, 60)
+# Заглушка для родительской строки, у которой есть дочерние строки-распределения.
+_MULTI_OP_LABEL = "Мультиоперация"
+_MULTI_OP_COLOR = QColor(110, 110, 118)   # приглушённый серый
 # Служебный столбец управления (стрелка/＋/корзина). Хранится первым в модели.
 _CTRL_COL = "\x00ctrl"
 # Колонки, отображаемые в строке-ветке (split). «Контрагент» — копия из операции.
@@ -271,6 +274,10 @@ class OperationsTreeModel(QAbstractItemModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             if node.kind == "split" and col not in _SPLIT_DISPLAY_COLS:
                 return ""
+            # Родительская строка с дочерними → Категория и Участок скрываются заглушкой
+            if (col in ("Категория", "Участок") and role == Qt.ItemDataRole.DisplayRole
+                    and node.kind == "op" and node.children):
+                return _MULTI_OP_LABEL
             val = node.data.get(col)
             if col == "Сумма":
                 num = _to_num(val)
@@ -321,7 +328,11 @@ class OperationsTreeModel(QAbstractItemModel):
         if col == _CTRL_COL:
             return f
         if node.kind == "op":
-            f |= Qt.ItemFlag.ItemIsEditable
+            # Категория и Участок недоступны для редактирования у строк с дочерними
+            if col in ("Категория", "Участок") and node.children:
+                pass
+            else:
+                f |= Qt.ItemFlag.ItemIsEditable
         elif col in _SPLIT_EDIT_COLS:
             f |= Qt.ItemFlag.ItemIsEditable
         return f
@@ -423,12 +434,133 @@ class _CellDelegate(QStyledItemDelegate):
 
 
 class _CategoryDelegate(_CellDelegate):
-    """Делегат колонки «Категория»: выпадающий список создаётся «на лету»
-    только в момент редактирования и уничтожается сразу после."""
+    """Делегат колонки «Категория»: рисует цветной овальный badge;
+    при редактировании создаёт QComboBox «на лету»."""
+
+    # Цвета фона/hover/выделения совпадают с _TREE_STYLE
+    _BG       = QColor("#F9FAFB")
+    _BG_HOVER = QColor("#DDE4EE")
+    _BG_SEL   = QColor("#C9D8E2")
+    _BORDER   = QColor("#D8DDE6")
+    _TXT_SEL  = QColor("#07414F")
 
     def __init__(self, items: list[str], parent=None):
         super().__init__(parent)
         self._items = items
+
+    # ---- отрисовка -------------------------------------------------------- #
+
+    def paint(self, painter, option, index):
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+
+        if text == _MULTI_OP_LABEL:
+            self._paint_hatched(painter, option)
+            return
+
+        color = CATEGORY_COLORS.get(text) if text else None
+        if color is None:
+            super().paint(painter, option, index)
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = option.rect
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
+
+        # 1. Фон ячейки
+        if selected:
+            painter.fillRect(rect, self._BG_SEL)
+        elif hovered:
+            painter.fillRect(rect, self._BG_HOVER)
+        else:
+            painter.fillRect(rect, self._BG)
+
+        # 2. Нижняя граница строки
+        painter.setPen(QPen(self._BORDER, 1))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+        # 3. Цвета овала из HSL базового цвета
+        h, s, l, _ = color.getHslF()
+        if h < 0:
+            h, s = 0.0, 0.0
+        pill_bg = QColor.fromHslF(h, min(s * 0.65, 1.0), 0.91)
+        pill_bd = QColor.fromHslF(h, min(s * 1.00, 1.0), 0.52)
+        pill_tx = QColor.fromHslF(h, min(s * 1.20, 1.0), 0.18)
+
+        # 4. Геометрия овала
+        v = max(3, (rect.height() - 20) // 2)
+        pill = rect.adjusted(6, v, -6, -v)
+        radius = pill.height() // 2
+
+        painter.setPen(QPen(pill_bd, 1))
+        painter.setBrush(pill_bg)
+        painter.drawRoundedRect(pill, radius, radius)
+
+        # 5. Текст
+        painter.setPen(self._TXT_SEL if selected else pill_tx)
+        painter.setFont(option.font)
+        painter.drawText(
+            pill.adjusted(8, 0, -4, 0),
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            text,
+        )
+
+        # 6. Карандаш (ручное редактирование)
+        if index.data(MANUAL_ROLE):
+            painter.setFont(self._icon_font())
+            painter.setPen(
+                QColor(255, 255, 255, 180) if selected else QColor("#9CA3AF")
+            )
+            painter.drawText(
+                rect.adjusted(0, 0, -4, 0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                self._CHAR,
+            )
+
+        painter.restore()
+
+    def _paint_hatched(self, painter, option):
+        """Овал с диагональной штриховкой для строки-мультиоперации."""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = option.rect
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
+
+        if selected:
+            painter.fillRect(rect, self._BG_SEL)
+        elif hovered:
+            painter.fillRect(rect, self._BG_HOVER)
+        else:
+            painter.fillRect(rect, self._BG)
+
+        painter.setPen(QPen(self._BORDER, 1))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+        v = max(3, (rect.height() - 20) // 2)
+        pill = rect.adjusted(6, v, -6, -v)
+        radius = pill.height() // 2
+
+        # Светлый фон овала
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(234, 234, 238))
+        painter.drawRoundedRect(pill, radius, radius)
+
+        # Диагональная штриховка
+        painter.setBrush(QBrush(QColor(185, 185, 193), Qt.BrushStyle.BDiagPattern))
+        painter.drawRoundedRect(pill, radius, radius)
+
+        # Граница
+        painter.setPen(QPen(QColor(165, 165, 173), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(pill, radius, radius)
+
+        painter.restore()
+
+    # ---- редактирование -------------------------------------------------- #
 
     def createEditor(self, parent, option, index):
         combo = QComboBox(parent)
@@ -455,12 +587,191 @@ class _CategoryDelegate(_CellDelegate):
         editor.setGeometry(option.rect)
 
 
+class _CategoryPillButton(QWidget):
+    """Кнопка-пилюля для выбора категории.
+
+    Внешне: нейтральная кнопка «Все категории ▾» → при выборе категории
+    превращается в цветной овал с её цветом из CATEGORY_COLORS.
+
+    Реализует подмножество API QComboBox, чтобы существующий код работал
+    без изменений: currentText(), blockSignals(), clear(), addItem(),
+    addItems(), findText(), setCurrentIndex().
+    """
+
+    currentTextChanged = pyqtSignal()
+
+    _NEUTRAL = "Все категории"
+
+    def __init__(self, neutral_label: str = "Все категории", parent=None):
+        super().__init__(parent)
+        self._NEUTRAL = neutral_label
+        self._items: list[str] = []
+        self._current_idx: int = 0
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self._btn = QPushButton()
+        self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn.clicked.connect(self._open_menu)
+        lay.addWidget(self._btn)
+
+        self._update_display()
+
+    # ---- QComboBox-compatible API ---------------------------------------- #
+
+    def currentText(self) -> str:
+        if 0 <= self._current_idx < len(self._items):
+            return self._items[self._current_idx]
+        return ""
+
+    def clear(self):
+        self._items.clear()
+        self._current_idx = 0
+        self._update_display()
+
+    def addItem(self, text: str):
+        self._items.append(text)
+
+    def addItems(self, texts):
+        self._items.extend(list(texts))
+
+    def findText(self, text: str) -> int:
+        try:
+            return self._items.index(text)
+        except ValueError:
+            return -1
+
+    def setCurrentIndex(self, idx: int):
+        if self._items:
+            idx = max(0, min(idx, len(self._items) - 1))
+        else:
+            idx = 0
+        self._current_idx = idx
+        self._update_display()
+        self.currentTextChanged.emit()
+
+    # ---- Display --------------------------------------------------------- #
+
+    def _chip_style(self, r: int, g: int, b: int) -> str:
+        return (
+            f"QPushButton {{"
+            f"  background: rgba({r},{g},{b},38);"
+            f"  border: 1px solid rgba({r},{g},{b},160);"
+            f"  border-radius: 11px;"
+            f"  color: rgb({max(0,r-40)},{max(0,g-40)},{max(0,b-40)});"
+            f"  padding: 4px 14px; font-size: 12px; font-weight: 500;"
+            f"  min-height: 22px;"
+            f"}}"
+            f"QPushButton:hover {{ background: rgba({r},{g},{b},70); }}"
+        )
+
+    def _neutral_style(self) -> str:
+        return (
+            "QPushButton {"
+            "  background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;"
+            "  color: #1F2937; padding: 6px 10px; font-size: 13px; min-height: 22px;"
+            "}"
+            "QPushButton:hover { background: #F9FAFB; }"
+        )
+
+    def _update_display(self):
+        text = self.currentText()
+        if not text or text == self._NEUTRAL:
+            self._btn.setText(f"{self._NEUTRAL}  ▾")
+            self._btn.setStyleSheet(self._neutral_style())
+            return
+
+        color = CATEGORY_COLORS.get(text)
+        if color:
+            self._btn.setStyleSheet(
+                self._chip_style(color.red(), color.green(), color.blue())
+            )
+        else:
+            self._btn.setStyleSheet(
+                "QPushButton {"
+                "  background: #EFF1F5; border: 1px solid #C4C9D4; border-radius: 11px;"
+                "  color: #374151; padding: 4px 14px; font-size: 12px; font-weight: 500;"
+                "  min-height: 22px;"
+                "}"
+                "QPushButton:hover { background: #E2E5EC; }"
+            )
+        self._btn.setText(text)
+
+    def _open_menu(self):
+        if not self._items:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu {"
+            "  background: #FFFFFF; border: 1px solid #D5DCE4;"
+            "  border-radius: 8px; padding: 4px;"
+            "}"
+            "QMenu::item {"
+            "  padding: 6px 16px; font-size: 13px; color: #1F2937; border-radius: 4px;"
+            "}"
+            "QMenu::item:selected { background: #F3F4F6; }"
+        )
+        for i, item in enumerate(self._items):
+            act = menu.addAction(item)
+            act.setCheckable(True)
+            act.setChecked(i == self._current_idx)
+            act.triggered.connect(lambda checked, idx=i: self.setCurrentIndex(idx))
+        menu.exec(
+            self._btn.mapToGlobal(self._btn.rect().bottomLeft() + QPoint(0, 2))
+        )
+
+
 class _PlotDelegate(_CellDelegate):
-    """Делегат колонки «Участок»: выпадающий список номеров участков из БД."""
+    """Делегат колонки «Участок»: выпадающий список номеров участков из БД.
+    Для строк-мультиопераций рисует заштрихованный овал вместо значения."""
+
+    _BG       = QColor("#F9FAFB")
+    _BG_HOVER = QColor("#DDE4EE")
+    _BG_SEL   = QColor("#C9D8E2")
+    _BORDER   = QColor("#D8DDE6")
 
     def __init__(self, items: list[str], parent=None):
         super().__init__(parent)
         self._items = items
+
+    def paint(self, painter, option, index):
+        if index.data(Qt.ItemDataRole.DisplayRole) == _MULTI_OP_LABEL:
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+            rect = option.rect
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.fillRect(rect, self._BG_SEL)
+            elif option.state & QStyle.StateFlag.State_MouseOver:
+                painter.fillRect(rect, self._BG_HOVER)
+            else:
+                painter.fillRect(rect, self._BG)
+
+            painter.setPen(QPen(self._BORDER, 1))
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+            v = max(3, (rect.height() - 20) // 2)
+            pill = rect.adjusted(6, v, -6, -v)
+            radius = pill.height() // 2
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(234, 234, 238))
+            painter.drawRoundedRect(pill, radius, radius)
+
+            painter.setBrush(QBrush(QColor(185, 185, 193), Qt.BrushStyle.BDiagPattern))
+            painter.drawRoundedRect(pill, radius, radius)
+
+            painter.setPen(QPen(QColor(165, 165, 173), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(pill, radius, radius)
+
+            painter.restore()
+            return
+
+        super().paint(painter, option, index)
 
     def createEditor(self, parent, option, index):
         combo = QComboBox(parent)
@@ -1227,9 +1538,11 @@ class AddRowDialog(QDialog):
 
         cat_row = QHBoxLayout()
         cat_row.setSpacing(6)
-        self.combo_cat = QComboBox()
+        self.combo_cat = _CategoryPillButton(neutral_label="")
         for cat in ALL_CATEGORIES:
             self.combo_cat.addItem(cat)
+        if ALL_CATEGORIES:
+            self.combo_cat.setCurrentIndex(0)
         cat_row.addWidget(self.combo_cat, stretch=1)
         btn_auto = QPushButton("Определить")
         btn_auto.setObjectName("btnSecondary")
@@ -1402,12 +1715,11 @@ class DetailWidget(QWidget):
         self.combo_type.currentIndexChanged.connect(self.apply_filters)
         fl.addWidget(self.combo_type, stretch=1)
 
-        self.combo_cat = QComboBox()
-        self.combo_cat.setObjectName("filterCombo")
+        self.combo_cat = _CategoryPillButton()
         self.combo_cat.addItem("Все категории")
         for cat in ALL_CATEGORIES:
             self.combo_cat.addItem(cat)
-        self.combo_cat.currentIndexChanged.connect(self.apply_filters)
+        self.combo_cat.currentTextChanged.connect(self.apply_filters)
         fl.addWidget(self.combo_cat, stretch=2)
 
         fl.addWidget(QLabel("с", objectName="filterLabel"))
@@ -1622,10 +1934,21 @@ class DetailWidget(QWidget):
             issue_idx.update(self.df_full.index[mask].tolist())
 
         if "Категория" in self.df_full.columns:
-            mask = (
-                self.df_full["Категория"].isna() |
-                (self.df_full["Категория"].astype(str).str.strip() == "")
-            )
+            _bd_empty = {"", "None", "nan", "[]"}
+
+            def _no_cat(row):
+                bd_raw = row.get("_breakdown")
+                bd = _parse_breakdown(bd_raw) if bd_raw else []
+                if bd:
+                    # Мультиоперация: считаем «нет категории», если хоть у одного ребёнка пусто
+                    return any(
+                        not str(it.get("Категория") or "").strip() for it in bd
+                    )
+                cat = row.get("Категория")
+                return cat is None or (isinstance(cat, float) and pd.isna(cat)) \
+                    or str(cat).strip() == ""
+
+            mask = self.df_full.apply(_no_cat, axis=1)
             out["no_cat"] = int(mask.sum())
             issue_idx.update(self.df_full.index[mask].tolist())
 
@@ -1652,17 +1975,27 @@ class DetailWidget(QWidget):
 
         if "Категория" in self.df_full.columns and "Участок" in self.df_full.columns:
             known_plots = set(self._plot_delegate._items)
-            _member_electro_mask = (
-                self.df_full["Категория"].astype(str).str.startswith("Членские взносы") |
-                self.df_full["Категория"].astype(str).str.startswith("Электроэнергия (от садоводов)")
-            )
-            _plot_str = self.df_full["Участок"].astype(str).str.strip()
-            _bad_plot_mask = (
-                self.df_full["Участок"].isna() |
-                (_plot_str == "") |
-                ~_plot_str.isin(known_plots)
-            )
-            mask = _member_electro_mask & _bad_plot_mask
+
+            def _needs_plot_cat(cat: str) -> bool:
+                return cat.startswith("Членские взносы") or \
+                       cat.startswith("Электроэнергия (от садоводов)")
+
+            def _bad_plot(plot) -> bool:
+                s = str(plot).strip() if plot is not None else ""
+                return not s or s not in known_plots
+
+            def _no_plot_row(row) -> bool:
+                bd = _parse_breakdown(row.get("_breakdown")) if row.get("_breakdown") else []
+                if bd:
+                    return any(
+                        _needs_plot_cat(str(it.get("Категория") or "")) and
+                        _bad_plot(it.get("Участок"))
+                        for it in bd
+                    )
+                return _needs_plot_cat(str(row.get("Категория") or "")) and \
+                       _bad_plot(row.get("Участок"))
+
+            mask = self.df_full.apply(_no_plot_row, axis=1)
             out["no_plot"] = int(mask.sum())
             issue_idx.update(self.df_full.index[mask].tolist())
 
@@ -1974,7 +2307,13 @@ class DetailWidget(QWidget):
 
         cat_filter = self.combo_cat.currentText()
         if cat_filter != "Все категории":
-            df = df[df["Категория"] == cat_filter]
+            def _cat_matches(row):
+                bd = _parse_breakdown(row.get("_breakdown"))
+                if bd:
+                    # Мультиоперация: ищем категорию среди дочерних
+                    return any(it.get("Категория") == cat_filter for it in bd)
+                return row.get("Категория") == cat_filter
+            df = df[df.apply(_cat_matches, axis=1)]
 
         search = self.search_input.text().strip().lower()
         if search:
@@ -1990,10 +2329,17 @@ class DetailWidget(QWidget):
                 df = df[df.duplicated(subset=["_hash"], keep=False)]
         elif self._active_warning == "no_cat":
             if "Категория" in df.columns:
-                df = df[
-                    df["Категория"].isna() |
-                    (df["Категория"].astype(str).str.strip() == "")
-                ]
+                def _no_cat_row(row):
+                    bd_raw = row.get("_breakdown")
+                    bd = _parse_breakdown(bd_raw) if bd_raw else []
+                    if bd:
+                        return any(
+                            not str(it.get("Категория") or "").strip() for it in bd
+                        )
+                    cat = row.get("Категория")
+                    return cat is None or (isinstance(cat, float) and pd.isna(cat)) \
+                        or str(cat).strip() == ""
+                df = df[df.apply(_no_cat_row, axis=1)]
         elif self._active_warning == "need_split":
             if "Категория" in df.columns:
                 df = df[
@@ -2002,17 +2348,23 @@ class DetailWidget(QWidget):
         elif self._active_warning == "no_plot":
             if "Категория" in df.columns and "Участок" in df.columns:
                 known_plots = set(self._plot_delegate._items)
-                _plot_str = df["Участок"].astype(str).str.strip()
-                df = df[
-                    (
-                        df["Категория"].astype(str).str.startswith("Членские взносы") |
-                        df["Категория"].astype(str).str.startswith("Электроэнергия (от садоводов)")
-                    ) & (
-                        df["Участок"].isna() |
-                        (_plot_str == "") |
-                        ~_plot_str.isin(known_plots)
+
+                def _no_plot_filter(row) -> bool:
+                    def _needs(cat): return (
+                        str(cat or "").startswith("Членские взносы") or
+                        str(cat or "").startswith("Электроэнергия (от садоводов)")
                     )
-                ]
+                    def _bad(plot):
+                        s = str(plot).strip() if plot is not None else ""
+                        return not s or s not in known_plots
+
+                    bd = _parse_breakdown(row.get("_breakdown")) if row.get("_breakdown") else []
+                    if bd:
+                        return any(_needs(it.get("Категория")) and _bad(it.get("Участок"))
+                                   for it in bd)
+                    return _needs(row.get("Категория")) and _bad(row.get("Участок"))
+
+                df = df[df.apply(_no_plot_filter, axis=1)]
         elif self._active_warning == "split_mismatch":
             if "_breakdown" in df.columns:
                 _empty = {"", "None", "nan", "[]"}
