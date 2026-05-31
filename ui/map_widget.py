@@ -155,7 +155,13 @@ class MapWidget(QWidget):
             if os.path.exists(os.path.join(DATA_DIR, "snt_plots.json")):
                 with open(os.path.join(DATA_DIR, "snt_plots.json"), "r", encoding="utf-8") as f:
                     data = json.load(f)
-                return {str(p["num"]): p.get("owners", []) for p in data}
+                return {
+                    str(p["num"]): [
+                        o["name"] if isinstance(o, dict) else o
+                        for o in (p.get("owners", []) or [])
+                    ]
+                    for p in data
+                }
         except Exception:
             pass
         return {}
