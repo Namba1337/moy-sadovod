@@ -2,13 +2,15 @@ import json
 import os
 
 import pandas as pd
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal
-from PyQt6.QtGui import QAction, QColor
+from PyQt6.QtCore import (
+    Qt, QEvent, QModelIndex, QAbstractItemModel, QPoint, QRect, pyqtSignal,
+)
+from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen, QPolygon
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
-    QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu,
+    QMessageBox, QPushButton, QStyle, QStyledItemDelegate, QTableWidget,
+    QTableWidgetItem, QTreeView, QVBoxLayout, QWidget,
 )
 
 from core.utils import DATA_DIR
@@ -35,6 +37,577 @@ def _load_plot_order() -> list[str]:
     return []
 
 
+# ============================================================================ #
+#  Отношение к участку                                                         #
+# ============================================================================ #
+
+RELATIONS = ["Главный собственник", "Собственник", "Контактное лицо"]
+DEFAULT_RELATION = "Собственник"
+
+_RELATION_BG = {
+    "Главный собственник": QColor("#EEF2FF"),
+    "Собственник":         QColor("#F0FDF4"),
+    "Контактное лицо":     QColor("#FFF7ED"),
+}
+_RELATION_FG = {
+    "Главный собственник": QColor("#4338CA"),
+    "Собственник":         QColor("#15803D"),
+    "Контактное лицо":     QColor("#C2410C"),
+}
+
+
+def _owner_name(owner) -> str:
+    if isinstance(owner, dict):
+        return owner.get("name", "")
+    return str(owner)
+
+
+def _owner_relation(owner) -> str:
+    if isinstance(owner, dict):
+        return owner.get("relation", DEFAULT_RELATION)
+    return DEFAULT_RELATION
+
+
+def _owner_area(owner) -> float | None:
+    if isinstance(owner, dict):
+        v = owner.get("area")
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _make_owner(name: str, relation: str = DEFAULT_RELATION,
+                area: float | None = None) -> dict:
+    d: dict = {"name": name, "relation": relation}
+    if area is not None:
+        d["area"] = area
+    return d
+
+
+# ============================================================================ #
+#  Узел дерева                                                                 #
+# ============================================================================ #
+
+class _PlotNode:
+    """Узел дерева. kind='plot' — строка участка, kind='owner' — строка владельца."""
+
+    __slots__ = ("kind", "plot_ref", "owner_idx", "parent", "children")
+
+    def __init__(self, kind: str, plot_ref: dict | None = None,
+                 owner_idx: int = -1, parent=None):
+        self.kind = kind
+        self.plot_ref = plot_ref
+        self.owner_idx = owner_idx
+        self.parent = parent
+        self.children: list["_PlotNode"] = []
+
+    def row(self) -> int:
+        if self.parent is not None:
+            return self.parent.children.index(self)
+        return 0
+
+
+# ============================================================================ #
+#  Модель дерева                                                               #
+# ============================================================================ #
+
+_ADD_COL = "\x00add"  # служебный столбец с кнопкой ＋
+
+
+class PlotsTreeModel(QAbstractItemModel):
+    COLUMNS = ["Участок", _ADD_COL, "ФИО", "Отношение", "Площадь, м²"]
+
+    # Эмитится только из setData (inline-редактирование), чтобы автосохранять.
+    ownerDataEdited = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._root = _PlotNode("root")
+
+    def load(self, plots: list):
+        self.beginResetModel()
+        root = _PlotNode("root")
+        for plot in plots:
+            plot_node = _PlotNode("plot", plot_ref=plot, parent=root)
+            for i in range(len(plot.get("owners", []))):
+                owner_node = _PlotNode("owner", plot_ref=plot, owner_idx=i, parent=plot_node)
+                plot_node.children.append(owner_node)
+            root.children.append(plot_node)
+        self._root = root
+        self.endResetModel()
+
+    def top_nodes(self) -> list:
+        return self._root.children
+
+    # -- core tree ----------------------------------------------------------- #
+
+    def index(self, row, column, parent=QModelIndex()):
+        if not self.hasIndex(row, column, parent):
+            return QModelIndex()
+        parent_node = parent.internalPointer() if parent.isValid() else self._root
+        if 0 <= row < len(parent_node.children):
+            return self.createIndex(row, column, parent_node.children[row])
+        return QModelIndex()
+
+    def parent(self, index):
+        if not index.isValid():
+            return QModelIndex()
+        node = index.internalPointer()
+        p = node.parent
+        if p is None or p is self._root:
+            return QModelIndex()
+        return self.createIndex(p.row(), 0, p)
+
+    def rowCount(self, parent=QModelIndex()):
+        if parent.column() > 0:
+            return 0
+        node = parent.internalPointer() if parent.isValid() else self._root
+        return len(node.children)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self.COLUMNS)
+
+    # -- read ---------------------------------------------------------------- #
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        node = index.internalPointer()
+        col = self.COLUMNS[index.column()]
+
+        if col == _ADD_COL:
+            return None
+
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+            if node.kind == "plot":
+                if col == "Участок":
+                    return f"уч. {node.plot_ref.get('num', '?')}"
+                if col == "ФИО":
+                    owners = node.plot_ref.get("owners", []) or []
+                    if not owners:
+                        return "—"
+                    main = next(
+                        (o for o in owners if _owner_relation(o) == "Главный собственник"),
+                        owners[0],
+                    )
+                    name = _owner_name(main)
+                    extra = len(owners) - 1
+                    return name if extra == 0 else f"{name}  (+{extra})"
+                if col == "Площадь, м²":
+                    area = node.plot_ref.get("area")
+                    try:
+                        v = float(area) if area not in (None, "") else None
+                    except (TypeError, ValueError):
+                        v = None
+                    return f"{v:g}" if v is not None else "—"
+                return ""
+            elif node.kind == "owner":
+                owners = node.plot_ref.get("owners", [])
+                owner = owners[node.owner_idx] if 0 <= node.owner_idx < len(owners) else None
+                if col == "ФИО":
+                    return _owner_name(owner) if owner is not None else ""
+                if col == "Отношение":
+                    return _owner_relation(owner) if owner is not None else ""
+                if col == "Площадь, м²":
+                    if owner is None:
+                        return ""
+                    v = _owner_area(owner)
+                    if role == Qt.ItemDataRole.EditRole:
+                        return f"{v:g}" if v is not None else ""
+                    return f"{v:g}" if v is not None else "—"
+                return ""
+
+        if role == Qt.ItemDataRole.ForegroundRole:
+            if node.kind == "plot":
+                if col == "Участок":
+                    return QColor("#6366F1")
+                if col == "Площадь, м²":
+                    area = node.plot_ref.get("area")
+                    return QColor("#9CA3AF") if area in (None, "") else QColor("#374151")
+                return QColor("#374151")
+            elif node.kind == "owner":
+                return QColor("#555F6D")
+
+        if role == Qt.ItemDataRole.FontRole:
+            if node.kind == "plot" and col == "Участок":
+                f = QFont()
+                f.setBold(True)
+                return f
+
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if col == "Площадь, м²":
+                return int(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        return None
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            col = self.COLUMNS[section]
+            return "" if col == _ADD_COL else col
+        return None
+
+    # -- edit ---------------------------------------------------------------- #
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        node = index.internalPointer()
+        col = self.COLUMNS[index.column()]
+        f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        if node.kind == "owner" and col in ("ФИО", "Отношение", "Площадь, м²"):
+            f |= Qt.ItemFlag.ItemIsEditable
+        return f
+
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+        if role != Qt.ItemDataRole.EditRole or not index.isValid():
+            return False
+        node = index.internalPointer()
+        col = self.COLUMNS[index.column()]
+        if node.kind == "owner" and col in ("ФИО", "Отношение", "Площадь, м²"):
+            text = str(value).strip()
+            owners = node.plot_ref.get("owners", [])
+            if not (0 <= node.owner_idx < len(owners)):
+                return False
+            old = owners[node.owner_idx]
+            if col == "ФИО":
+                if not text:
+                    return False
+                owners[node.owner_idx] = _make_owner(
+                    text, _owner_relation(old), _owner_area(old))
+                pn = node.parent
+                if pn is not None:
+                    fio_col = self.COLUMNS.index("ФИО")
+                    self.dataChanged.emit(self.createIndex(pn.row(), fio_col, pn),
+                                         self.createIndex(pn.row(), fio_col, pn))
+            elif col == "Отношение":
+                if text not in RELATIONS:
+                    return False
+                if text == "Главный собственник":
+                    # Разжалуем предыдущего главного собственника → Собственник
+                    rel_col = self.COLUMNS.index("Отношение")
+                    plot_node = node.parent
+                    for sibling in plot_node.children:
+                        if sibling is node:
+                            continue
+                        sidx = sibling.owner_idx
+                        if (0 <= sidx < len(owners)
+                                and _owner_relation(owners[sidx]) == "Главный собственник"):
+                            o = owners[sidx]
+                            owners[sidx] = _make_owner(
+                                _owner_name(o), "Собственник", _owner_area(o))
+                            sib_mi = self.createIndex(sibling.row(), rel_col, sibling)
+                            self.dataChanged.emit(sib_mi, sib_mi)
+                owners[node.owner_idx] = _make_owner(
+                    _owner_name(old), text, _owner_area(old))
+                pn = node.parent
+                if pn is not None:
+                    fio_col = self.COLUMNS.index("ФИО")
+                    self.dataChanged.emit(self.createIndex(pn.row(), fio_col, pn),
+                                         self.createIndex(pn.row(), fio_col, pn))
+            else:  # Площадь, м²
+                if text in ("", "—"):
+                    area = None
+                else:
+                    try:
+                        area = float(text.replace(",", "."))
+                        if area <= 0:
+                            return False
+                    except ValueError:
+                        return False
+                owners[node.owner_idx] = _make_owner(
+                    _owner_name(old), _owner_relation(old), area)
+            self.dataChanged.emit(index, index)
+            self.ownerDataEdited.emit()
+            return True
+        return False
+
+    # -- sort ---------------------------------------------------------------- #
+
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        if not (0 <= column < len(self.COLUMNS)):
+            return
+        col = self.COLUMNS[column]
+        if col == _ADD_COL:
+            return
+        self.beginResetModel()
+        reverse = order == Qt.SortOrder.DescendingOrder
+        if col == "Участок":
+            self._root.children.sort(
+                key=lambda n: _plot_num_key(str(n.plot_ref.get("num", ""))),
+                reverse=reverse,
+            )
+        elif col == "ФИО":
+            def _fio_key(n):
+                owners = n.plot_ref.get("owners") or []
+                main = next(
+                    (o for o in owners if _owner_relation(o) == "Главный собственник"),
+                    owners[0] if owners else {},
+                )
+                return _owner_name(main).lower()
+            self._root.children.sort(key=_fio_key, reverse=reverse)
+        elif col == "Площадь, м²":
+            def _area_key(n):
+                try:
+                    v = n.plot_ref.get("area")
+                    if v in (None, ""):
+                        return float("inf")
+                    return float(v)
+                except (TypeError, ValueError):
+                    return float("inf")
+            self._root.children.sort(key=_area_key, reverse=reverse)
+        self.endResetModel()
+
+    # -- mutations ----------------------------------------------------------- #
+
+    def add_owner(self, plot_node: "_PlotNode", name: str,
+                  relation: str = DEFAULT_RELATION) -> QModelIndex:
+        """Добавляет владельца в участок и возвращает индекс строки участка."""
+        plot = plot_node.plot_ref
+        owners = plot.setdefault("owners", [])
+        new_idx = len(owners)
+        owners.append(_make_owner(name, relation))
+        parent_mi = self.createIndex(plot_node.row(), 0, plot_node)
+        self.beginInsertRows(parent_mi, new_idx, new_idx)
+        owner_node = _PlotNode("owner", plot_ref=plot, owner_idx=new_idx, parent=plot_node)
+        plot_node.children.append(owner_node)
+        self.endInsertRows()
+        # Обновляем ФИО в родительской строке
+        fio_col = self.COLUMNS.index("ФИО")
+        fio_mi = self.createIndex(plot_node.row(), fio_col, plot_node)
+        self.dataChanged.emit(fio_mi, fio_mi)
+        return parent_mi
+
+    def remove_owner(self, owner_node: _PlotNode):
+        """Удаляет владельца из участка."""
+        plot_node = owner_node.parent
+        owners = owner_node.plot_ref.get("owners", [])
+        idx = owner_node.owner_idx
+        if idx >= len(owners):
+            return
+        owners.pop(idx)
+        parent_mi = self.createIndex(plot_node.row(), 0, plot_node)
+        child_row = owner_node.row()
+        self.beginRemoveRows(parent_mi, child_row, child_row)
+        plot_node.children.remove(owner_node)
+        for i, child in enumerate(plot_node.children):
+            child.owner_idx = i
+        self.endRemoveRows()
+        # Обновляем ФИО в родительской строке
+        fio_col = self.COLUMNS.index("ФИО")
+        fio_mi = self.createIndex(plot_node.row(), fio_col, plot_node)
+        self.dataChanged.emit(fio_mi, fio_mi)
+
+
+# ============================================================================ #
+#  Делегат служебного столбца ＋                                               #
+# ============================================================================ #
+
+class _AddOwnerDelegate(QStyledItemDelegate):
+    """Рисует стрелку свернуть/развернуть и кнопку ＋ для строк-участков."""
+
+    addOwnerRequested = pyqtSignal(QModelIndex)
+    toggleRequested   = pyqtSignal(QModelIndex)
+
+    _ARROW_COLOR = QColor("#5B6675")
+    _PLUS_BG  = QColor("#D6F0DC")
+    _PLUS_FG  = QColor("#15803D")
+    _BG       = QColor("#F9FAFB")
+    _BG_HOVER = QColor("#DDE4EE")
+    _BG_SEL   = QColor("#C9D8E2")
+    _BORDER   = QColor("#D8DDE6")
+    _ARROW_W          = 22
+    _BTN_W, _BTN_H    = 22, 20
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view = view
+
+    def _arrow_rect(self, cell_rect: QRect) -> QRect:
+        return QRect(cell_rect.left() + 2, cell_rect.top(),
+                     self._ARROW_W, cell_rect.height())
+
+    def _btn_rect(self, cell_rect: QRect) -> QRect:
+        y = cell_rect.top() + (cell_rect.height() - self._BTN_H) // 2
+        x = cell_rect.left() + self._ARROW_W + 4
+        return QRect(x, y, self._BTN_W, self._BTN_H)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, self._BG_SEL)
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(option.rect, self._BG_HOVER)
+        else:
+            painter.fillRect(option.rect, self._BG)
+        painter.setPen(QPen(self._BORDER, 1))
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+
+        node = index.internalPointer()
+        if node is not None and node.kind == "plot":
+            if node.children:
+                # isExpanded корректно работает через col-0 индекс
+                col0 = self._view.model().index(index.row(), 0,
+                                                self._view.model().parent(index))
+                self._paint_arrow(painter, self._arrow_rect(option.rect),
+                                  self._view.isExpanded(col0))
+            self._paint_plus(painter, self._btn_rect(option.rect))
+        painter.restore()
+
+    def _paint_arrow(self, painter, rect: QRect, expanded: bool):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(self._ARROW_COLOR)
+        painter.setPen(Qt.PenStyle.NoPen)
+        cx = rect.left() + rect.width() // 2
+        cy = rect.top() + rect.height() // 2
+        if expanded:
+            pts = [QPoint(cx - 4, cy - 2), QPoint(cx + 4, cy - 2), QPoint(cx, cy + 3)]
+        else:
+            pts = [QPoint(cx - 2, cy - 4), QPoint(cx + 3, cy), QPoint(cx - 2, cy + 4)]
+        painter.drawPolygon(QPolygon(pts))
+        painter.restore()
+
+    def _paint_plus(self, painter, rect: QRect):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(self._PLUS_BG)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(self._PLUS_FG)
+        f = QFont()
+        f.setPixelSize(13)
+        f.setBold(True)
+        painter.setFont(f)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "＋")
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if (event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton):
+            node = index.internalPointer()
+            pos = event.position().toPoint()
+            if node is not None and node.kind == "plot":
+                if node.children and self._arrow_rect(option.rect).contains(pos):
+                    self.toggleRequested.emit(index)
+                    return True
+                if self._btn_rect(option.rect).contains(pos):
+                    self.addOwnerRequested.emit(index)
+                    return True
+        return super().editorEvent(event, model, option, index)
+
+
+# ============================================================================ #
+#  Делегат столбца «Отношение»                                                 #
+# ============================================================================ #
+
+class _RelationDelegate(QStyledItemDelegate):
+    """Рисует цветной badge для значения отношения; на edit создаёт QComboBox."""
+
+    _BG       = QColor("#F9FAFB")
+    _BG_HOVER = QColor("#DDE4EE")
+    _BG_SEL   = QColor("#C9D8E2")
+    _BORDER   = QColor("#D8DDE6")
+
+    def paint(self, painter, option, index):
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, self._BG_SEL)
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(option.rect, self._BG_HOVER)
+        else:
+            painter.fillRect(option.rect, self._BG)
+        painter.setPen(QPen(self._BORDER, 1))
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+
+        node = index.internalPointer()
+        if node is None or node.kind != "owner":
+            painter.restore()
+            return
+
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        if not text:
+            painter.restore()
+            return
+
+        bg = _RELATION_BG.get(text, QColor("#F3F4F6"))
+        fg = _RELATION_FG.get(text, QColor("#374151"))
+
+        rect = option.rect.adjusted(6, 4, -6, -4)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(bg)
+        painter.setPen(Qt.PenStyle.NoPen)
+        radius = rect.height() // 2
+        painter.drawRoundedRect(rect, radius, radius)
+
+        painter.setPen(fg)
+        f = QFont()
+        f.setPixelSize(12)
+        f.setBold(True)
+        painter.setFont(f)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
+
+    def createEditor(self, parent, option, index):
+        node = index.internalPointer()
+        if node is None or node.kind != "owner":
+            return None
+        combo = QComboBox(parent)
+        combo.addItems(RELATIONS)
+        combo.setStyleSheet(
+            "QComboBox{background:#FFFFFF;border:1px solid #6366F1;border-radius:5px;"
+            "padding:4px 8px;font-size:13px;color:#374151;}"
+            "QComboBox::drop-down{border:none;width:20px;}"
+            "QComboBox QAbstractItemView{background:#FFFFFF;border:1px solid #D1D5DB;"
+            "border-radius:4px;selection-background-color:#EEF2FF;color:#374151;}"
+        )
+        return combo
+
+    def setEditorData(self, editor, index):
+        val = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        idx = editor.findText(val)
+        editor.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
+
+# ============================================================================ #
+#  Стиль дерева                                                                #
+# ============================================================================ #
+
+_TREE_STYLE = """
+    QTreeView#mainTable {
+        background: #F9FAFB; border: 1px solid #D8DDE6; border-radius: 8px;
+        color: #1F2937; font-size: 13px;
+        selection-background-color: #C9D8E2; selection-color: #07414F;
+        outline: 0;
+    }
+    QTreeView#mainTable::item {
+        padding: 5px 8px; border-bottom: 1px solid #D8DDE6;
+    }
+    QTreeView#mainTable::item:hover { background: #DDE4EE; }
+    QTreeView#mainTable::item:selected { background: #C9D8E2; color: #07414F; }
+    QHeaderView::section {
+        background: #E9EDF5; color: #4B5563; border: none;
+        border-right: 1px solid #CDD3DC; border-bottom: 2px solid #C4CBD7;
+        padding: 8px 10px; font-size: 12px; font-weight: 600;
+    }
+    QHeaderView::section:last { border-right: none; }
+"""
+
+
+# ============================================================================ #
+#  PlotsWidget                                                                 #
+# ============================================================================ #
+
 class PlotsWidget(QWidget):
     """Вкладка участков: ручное добавление и управление списком."""
 
@@ -46,8 +619,6 @@ class PlotsWidget(QWidget):
         super().__init__()
         self.setAutoFillBackground(True)
         self._plots: list = self._load()
-        self._sort_col: int = 0
-        self._sort_asc: bool = True
         self._setup_ui()
         self._rebuild_table()
 
@@ -55,7 +626,14 @@ class PlotsWidget(QWidget):
         try:
             if os.path.exists(self.DATA_FILE):
                 with open(self.DATA_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                # Нормализуем: старый формат owners — list[str], новый — list[dict]
+                for plot in data:
+                    plot["owners"] = [
+                        o if isinstance(o, dict) else _make_owner(o)
+                        for o in plot.get("owners", [])
+                    ]
+                return data
         except Exception:
             pass
         return []
@@ -93,134 +671,160 @@ class PlotsWidget(QWidget):
         self.status_label = QLabel("", objectName="statusLabel")
         layout.addWidget(self.status_label)
 
-        self.table = QTableWidget(objectName="mainTable")
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSortingEnabled(False)
-        self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
-        self.table.horizontalHeader().setCursor(Qt.CursorShape.PointingHandCursor)
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._context_menu)
-        layout.addWidget(self.table)
+        self.model = PlotsTreeModel(self)
+        self.model.ownerDataEdited.connect(self._save)
 
-    def _on_header_clicked(self, col: int):
-        if self._sort_col == col:
-            self._sort_asc = not self._sort_asc
-        else:
-            self._sort_col = col
-            self._sort_asc = True
-        self._rebuild_table()
+        self.tree = QTreeView(objectName="mainTable")
+        self.tree.setModel(self.model)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(0)
+        self.tree.setAlternatingRowColors(False)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.tree.setSortingEnabled(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setMouseTracking(True)
+        self.tree.setStyleSheet(_TREE_STYLE)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._context_menu)
 
-    def _sorted_plots(self) -> list:
-        col = self._sort_col
-        asc = self._sort_asc
-        if col == 0:
-            key = lambda p: _plot_num_key(str(p.get("num", "")))
-        elif col == 1:
-            key = lambda p: ((p.get("owners") or [""])[0].lower())
-        else:
-            def key(p):
-                try:
-                    v = p.get("area")
-                    if v in (None, ""):
-                        return float("inf") if asc else float("-inf")
-                    return float(v)
-                except (TypeError, ValueError):
-                    return float("inf") if asc else float("-inf")
-        return sorted(self._plots, key=key, reverse=not asc)
+        add_col_idx = PlotsTreeModel.COLUMNS.index(_ADD_COL)
+        self._add_delegate = _AddOwnerDelegate(self.tree)
+        self._add_delegate.addOwnerRequested.connect(self._on_add_owner)
+        self._add_delegate.toggleRequested.connect(self._on_toggle)
+        self.tree.setItemDelegateForColumn(add_col_idx, self._add_delegate)
+
+        rel_col_idx = PlotsTreeModel.COLUMNS.index("Отношение")
+        self._relation_delegate = _RelationDelegate(self.tree)
+        self.tree.setItemDelegateForColumn(rel_col_idx, self._relation_delegate)
+
+        layout.addWidget(self.tree)
 
     def _rebuild_table(self):
-        self.table.blockSignals(True)
-        self.table.clearContents()
+        hdr = self.tree.header()
+        sort_col = hdr.sortIndicatorSection()
+        sort_order = hdr.sortIndicatorOrder()
 
-        plots_sorted = self._sorted_plots()
+        self.model.load(self._plots)
 
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Участок", "Собственники", "Площадь, м²"])
-        hdr = self.table.horizontalHeader()
+        # Восстанавливаем сортировку (по умолчанию — по номеру участка по возрастанию)
+        if sort_col < 0 or sort_col >= len(PlotsTreeModel.COLUMNS):
+            sort_col = 0
+            sort_order = Qt.SortOrder.AscendingOrder
+        self.model.sort(sort_col, sort_order)
+
+        hdr.setSortIndicator(sort_col, sort_order)
         hdr.setSortIndicatorShown(True)
-        hdr.setSortIndicator(
-            self._sort_col,
-            Qt.SortOrder.AscendingOrder if self._sort_asc else Qt.SortOrder.DescendingOrder,
-        )
-        self.table.setRowCount(len(plots_sorted))
-
-        for r_idx, plot in enumerate(plots_sorted):
-            num_item = QTableWidgetItem(f"уч. {plot.get('num', '?')}")
-            num_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            num_item.setForeground(QColor("#6366F1"))
-            f = num_item.font(); f.setBold(True); num_item.setFont(f)
-            self.table.setItem(r_idx, 0, num_item)
-
-            owner_widget = self._build_owners_cell(plot)
-            self.table.setCellWidget(r_idx, 1, owner_widget)
-
-            area_raw = plot.get("area")
-            try:
-                area_v = float(area_raw) if area_raw not in (None, "") else None
-            except (TypeError, ValueError):
-                area_v = None
-            area_item = QTableWidgetItem(f"{area_v:g}" if area_v is not None else "—")
-            area_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            area_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            area_item.setForeground(QColor("#374151" if area_v is not None else "#9CA3AF"))
-            self.table.setItem(r_idx, 2, area_item)
-
-            self.table.setRowHeight(r_idx, 28)
-
-        hdr = self.table.horizontalHeader()
         hdr.setStretchLastSection(False)
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
 
-        self.table.blockSignals(False)
-        self.status_label.setText(f"Участков: {len(plots_sorted)}")
+        col_участок = 0
+        col_add = PlotsTreeModel.COLUMNS.index(_ADD_COL)
+        col_fio = PlotsTreeModel.COLUMNS.index("ФИО")
+        col_rel = PlotsTreeModel.COLUMNS.index("Отношение")
+        col_area = PlotsTreeModel.COLUMNS.index("Площадь, м²")
 
-    def _build_owners_cell(self, plot: dict) -> QWidget:
-        owners = plot.get("owners", []) or []
-        container = QWidget()
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(6, 0, 6, 0)
-        layout.setSpacing(8)
+        hdr.setSectionResizeMode(col_участок, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(col_add, QHeaderView.ResizeMode.Fixed)
+        self.tree.setColumnWidth(col_add, 56)
+        hdr.setSectionResizeMode(col_fio, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(col_rel, QHeaderView.ResizeMode.Fixed)
+        self.tree.setColumnWidth(col_rel, 180)
+        hdr.setSectionResizeMode(col_area, QHeaderView.ResizeMode.ResizeToContents)
 
-        if owners:
-            first_owner = owners[0]
-            first_label = QLabel(first_owner)
-            first_label.setStyleSheet("color:#374151;font-size:13px;")
-            first_label.setToolTip("\n".join(owners))
-            layout.addWidget(first_label, 1)
+        self.status_label.setText(f"Участков: {len(self._plots)}")
 
-            extra = len(owners) - 1
-            if extra > 0:
-                btn_more = QPushButton(f"+{extra}")
-                btn_more.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn_more.setStyleSheet(
-                    "QPushButton{background:transparent;color:#82cfff;border:none;"
-                    "font-weight:700;padding:0px;margin:0px;}"
-                    "QPushButton:hover{text-decoration:underline;}"
-                )
-                btn_more.clicked.connect(lambda _, p=plot: self._show_owners_popup(p))
-                layout.addWidget(btn_more, 0, Qt.AlignmentFlag.AlignRight)
+    def _on_toggle(self, index: QModelIndex):
+        col0 = self.model.index(index.row(), 0, self.model.parent(index))
+        if self.tree.isExpanded(col0):
+            self.tree.collapse(col0)
         else:
-            label = QLabel("—")
-            label.setStyleSheet("color:#9CA3AF;font-size:13px;")
-            layout.addWidget(label)
+            self.tree.expand(col0)
 
-        return container
+    def _on_add_owner(self, index: QModelIndex):
+        node = index.internalPointer()
+        if node is None or node.kind != "plot":
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "Добавить владельца",
+            f"ФИО для участка № {node.plot_ref.get('num', '?')}:",
+            QLineEdit.EchoMode.Normal,
+            "",
+        )
+        if ok and name.strip():
+            plot_mi = self.model.add_owner(node, name.strip())
+            self._save()
+            self.tree.expand(plot_mi)
 
-    def _show_owners_popup(self, plot: dict):
-        dlg = OwnersPopup(plot.get("num", "?"), plot.get("owners", []), self)
+    def _context_menu(self, pos: QPoint):
+        index = self.tree.indexAt(pos)
+        if not index.isValid():
+            return
+        node = index.internalPointer()
+        if node is None:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu{background:#F8F9FA;border:1px solid #D1D5DB;color:#374151;
+                  font-size:13px;padding:4px;}
+            QMenu::item{padding:8px 20px;border-radius:4px;}
+            QMenu::item:selected{background:#EEF2FF;color:#DC2626;}
+        """)
+
+        if node.kind == "plot":
+            act_edit = QAction("✏️  Редактировать", self)
+            act_edit.triggered.connect(lambda: self._edit_plot(node.plot_ref))
+            menu.addAction(act_edit)
+            act_del = QAction("Удалить участок", self)
+            act_del.triggered.connect(lambda: self._delete_plot(node.plot_ref))
+            menu.addAction(act_del)
+        elif node.kind == "owner":
+            act_del = QAction("Удалить владельца", self)
+            act_del.triggered.connect(lambda: self._delete_owner(node))
+            menu.addAction(act_del)
+
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _edit_plot(self, plot: dict):
+        dlg = PlotEditDialog(plot_data=plot, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            updated = dlg.get_owners()
-            if updated != plot.get("owners", []):
-                idx = self._plots.index(plot)
-                self._plots[idx] = {**plot, "owners": updated}
+            result = dlg.get_result()
+            if result:
+                for i, p in enumerate(self._plots):
+                    if p is plot:
+                        self._plots[i] = result
+                        break
                 self._save()
                 self._rebuild_table()
+
+    def _delete_plot(self, plot: dict):
+        reply = QMessageBox.question(
+            self, "Удаление участка",
+            f"Удалить участок № {plot.get('num', '?')}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._plots = [p for p in self._plots if p is not plot]
+            self._save()
+            self._rebuild_table()
+
+    def _delete_owner(self, owner_node: _PlotNode):
+        owners = owner_node.plot_ref.get("owners", [])
+        idx = owner_node.owner_idx
+        if idx >= len(owners):
+            return
+        name = owners[idx]
+        reply = QMessageBox.question(
+            self, "Удаление владельца",
+            f"Удалить «{name}» из участка № {owner_node.plot_ref.get('num', '?')}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.model.remove_owner(owner_node)
+            self._save()
 
     def _import_from_excel(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -264,8 +868,9 @@ class PlotsWidget(QWidget):
             if not num or num.lower() in ("nan", "none", "") or not name or name.lower() in ("nan", "none", ""):
                 continue
             entry = imported.setdefault(num, {"owners": [], "area": None})
-            if name not in entry["owners"]:
-                entry["owners"].append(name)
+            existing_names = [_owner_name(o) for o in entry["owners"]]
+            if name not in existing_names:
+                entry["owners"].append(_make_owner(name))
             if col_area is not None and entry["area"] is None:
                 raw = str(row[col_area]).strip().replace(",", ".")
                 if raw and raw.lower() not in ("nan", "none"):
@@ -311,8 +916,9 @@ class PlotsWidget(QWidget):
                 area = entry["area"]
                 if num in existing:
                     current_owners = existing[num].get("owners", [])
+                    current_names = [_owner_name(o) for o in current_owners]
                     for o in owners:
-                        if o not in current_owners:
+                        if _owner_name(o) not in current_names:
                             current_owners.append(o)
                     existing[num]["owners"] = current_owners
                     if area is not None and existing[num].get("area") in (None, "", 0):
@@ -340,159 +946,10 @@ class PlotsWidget(QWidget):
                 self._save()
                 self._rebuild_table()
 
-    def _context_menu(self, pos: QPoint):
-        row = self.table.rowAt(pos.y())
-        if row < 0:
-            return
 
-        plots_sorted = self._sorted_plots()
-        if row >= len(plots_sorted):
-            return
-
-        plot = plots_sorted[row]
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu{background:#F8F9FA;border:1px solid #D1D5DB;color:#374151;
-                  font-size:13px;padding:4px;}
-            QMenu::item{padding:8px 20px;border-radius:4px;}
-            QMenu::item:selected{background:#EEF2FF;color:#DC2626;}
-        """)
-
-        act_edit = QAction("✏️  Редактировать", self)
-        act_edit.triggered.connect(lambda: self._edit_plot(row, plot))
-        menu.addAction(act_edit)
-
-        act_del = QAction("Удалить", self)
-        act_del.triggered.connect(lambda: self._delete_plot(row, plot))
-        menu.addAction(act_del)
-
-        menu.exec(self.table.viewport().mapToGlobal(pos))
-
-    def _edit_plot(self, row: int, plot: dict):
-        dlg = PlotEditDialog(plot_data=plot, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            result = dlg.get_result()
-            if result:
-                idx = self._plots.index(plot)
-                self._plots[idx] = result
-                self._save()
-                self._rebuild_table()
-
-    def _delete_plot(self, row: int, plot: dict):
-        reply = QMessageBox.question(
-            self, "Удаление участка",
-            f"Удалить участок № {plot.get('num', '?')}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self._plots = [p for p in self._plots if p is not plot]
-            self._save()
-            self._rebuild_table()
-
-
-class OwnersPopup(QDialog):
-    """Диалог просмотра/редактирования списка собственников участка."""
-
-    def __init__(self, plot_num: str, owners: list[str], parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"Собственники — уч. {plot_num}")
-        self.setMinimumWidth(420)
-        self.setModal(True)
-        self._owners = list(owners)
-        self._inputs: list[QLineEdit] = []
-        self._setup_ui()
-        self._apply_styles()
-
-    def _setup_ui(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 20, 20, 20)
-        lay.setSpacing(10)
-
-        title = QLabel("Список собственников")
-        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
-        lay.addWidget(title)
-
-        self._scroll_widget = QWidget()
-        self._form_lay = QVBoxLayout(self._scroll_widget)
-        self._form_lay.setSpacing(6)
-        self._form_lay.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self._scroll_widget)
-        scroll.setStyleSheet(
-            "QScrollArea{background:#F8F9FA;border:1px solid #E5E7EB;border-radius:6px;}"
-        )
-        scroll.setMinimumHeight(140)
-        scroll.setMaximumHeight(300)
-        lay.addWidget(scroll)
-
-        for name in self._owners:
-            self._add_owner_row(name)
-
-        btn_add = QPushButton("＋  Добавить собственника")
-        btn_add.setObjectName("btnSecondary")
-        btn_add.clicked.connect(lambda: self._add_owner_row(""))
-        lay.addWidget(btn_add)
-
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        btns.setStyleSheet(
-            "QPushButton{background:#4F46E5;color:white;border:none;border-radius:6px;"
-            "padding:7px 18px;font-size:13px;font-weight:600;}"
-            "QPushButton:hover{background:#6366F1;}"
-            "QPushButton[text='Cancel']{background:#E5E7EB;color:#6B7280;}"
-        )
-        lay.addWidget(btns)
-
-    def _add_owner_row(self, name: str):
-        row_widget = QWidget()
-        row_widget.setStyleSheet("background:transparent;")
-        rlay = QHBoxLayout(row_widget)
-        rlay.setContentsMargins(6, 2, 6, 2)
-        rlay.setSpacing(6)
-
-        inp = QLineEdit(name)
-        inp.setPlaceholderText("Фамилия Имя Отчество")
-        inp.setStyleSheet(
-            "background:#F8F9FA;border:1px solid #D1D5DB;border-radius:5px;"
-            "color:#374151;padding:6px 10px;font-size:13px;"
-        )
-        self._inputs.append(inp)
-        rlay.addWidget(inp, stretch=1)
-
-        btn_del = QPushButton("✕")
-        btn_del.setFixedSize(28, 28)
-        btn_del.setStyleSheet(
-            "QPushButton{background:#2a1a1a;border:1px solid #5a2a2a;"
-            "border-radius:5px;color:#DC2626;font-size:13px;}"
-            "QPushButton:hover{background:#3a2020;}"
-        )
-        btn_del.clicked.connect(lambda _, w=row_widget, i=inp: self._remove_row(w, i))
-        rlay.addWidget(btn_del)
-
-        self._form_lay.addWidget(row_widget)
-
-    def _remove_row(self, row_widget: QWidget, inp: QLineEdit):
-        if inp in self._inputs:
-            self._inputs.remove(inp)
-        row_widget.setParent(None)
-        row_widget.deleteLater()
-
-    def get_owners(self) -> list[str]:
-        return [inp.text().strip() for inp in self._inputs if inp.text().strip()]
-
-    def _apply_styles(self):
-        self.setStyleSheet(
-            "QDialog{background:#FFFFFF;color:#374151;}"
-            "QLabel{background:transparent;color:#374151;}"
-        )
-
+# ============================================================================ #
+#  PlotEditDialog                                                              #
+# ============================================================================ #
 
 class PlotEditDialog(QDialog):
     """Диалог добавления / редактирования участка."""
@@ -502,9 +959,11 @@ class PlotEditDialog(QDialog):
         self._is_edit = plot_data is not None
         self._plot_data = plot_data or {}
         self.setWindowTitle("Редактировать участок" if self._is_edit else "Новый участок")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(520)
         self.setModal(True)
         self._owner_inputs: list[QLineEdit] = []
+        self._owner_combos: list[QComboBox] = []
+        self._owner_areas:  list[QLineEdit] = []
         self._setup_ui()
         self._apply_styles()
 
@@ -539,7 +998,7 @@ class PlotEditDialog(QDialog):
         form.addRow("Площадь, м²:", self.inp_area)
         lay.addLayout(form)
 
-        own_label = QLabel("Собственники:")
+        own_label = QLabel("ФИО:")
         own_label.setStyleSheet("color:#9CA3AF;")
         lay.addWidget(own_label)
 
@@ -549,17 +1008,17 @@ class PlotEditDialog(QDialog):
         self._owners_vlay.setSpacing(6)
         self._owners_vlay.setContentsMargins(0, 0, 0, 0)
 
-        existing_owners = self._plot_data.get("owners", [""])
+        existing_owners = self._plot_data.get("owners", [])
         if not existing_owners:
-            existing_owners = [""]
-        for name in existing_owners:
-            self._add_owner_field(name)
+            existing_owners = [_make_owner("")]
+        for owner in existing_owners:
+            self._add_owner_field(_owner_name(owner), _owner_relation(owner), _owner_area(owner))
 
         lay.addWidget(self._owners_container)
 
-        btn_add_owner = QPushButton("＋  Добавить собственника")
+        btn_add_owner = QPushButton("＋  Добавить")
         btn_add_owner.setObjectName("btnSecondary")
-        btn_add_owner.clicked.connect(lambda: self._add_owner_field(""))
+        btn_add_owner.clicked.connect(lambda: self._add_owner_field("", DEFAULT_RELATION, None))
         lay.addWidget(btn_add_owner)
 
         sep = QFrame()
@@ -577,7 +1036,8 @@ class PlotEditDialog(QDialog):
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
-    def _add_owner_field(self, name: str):
+    def _add_owner_field(self, name: str, relation: str = DEFAULT_RELATION,
+                         area: float | None = None):
         row = QWidget()
         row.setStyleSheet("background:transparent;")
         rlay = QHBoxLayout(row)
@@ -587,7 +1047,28 @@ class PlotEditDialog(QDialog):
         inp = QLineEdit(name)
         inp.setPlaceholderText("Фамилия Имя Отчество")
         self._owner_inputs.append(inp)
-        rlay.addWidget(inp, stretch=1)
+        rlay.addWidget(inp, stretch=3)
+
+        combo = QComboBox()
+        combo.addItems(RELATIONS)
+        idx = combo.findText(relation)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.setStyleSheet(
+            "QComboBox{background:#F8F9FA;border:1px solid #D1D5DB;border-radius:5px;"
+            "padding:6px 8px;font-size:12px;color:#374151;min-width:150px;}"
+            "QComboBox::drop-down{border:none;width:20px;}"
+        )
+        self._owner_combos.append(combo)
+        combo.currentIndexChanged.connect(
+            lambda _, c=combo: self._enforce_single_main(c)
+        )
+        rlay.addWidget(combo, stretch=2)
+
+        area_inp = QLineEdit("" if area is None else f"{area:g}")
+        area_inp.setPlaceholderText("м² (необяз.)")
+        area_inp.setFixedWidth(80)
+        self._owner_areas.append(area_inp)
+        rlay.addWidget(area_inp)
 
         btn = QPushButton("✕")
         btn.setFixedSize(28, 28)
@@ -596,16 +1077,31 @@ class PlotEditDialog(QDialog):
             "border-radius:5px;color:#DC2626;font-size:12px;}"
             "QPushButton:hover{background:#3a2020;}"
         )
-        btn.clicked.connect(lambda _, r=row, i=inp: self._remove_owner_field(r, i))
+        btn.clicked.connect(
+            lambda _, r=row, i=inp, c=combo, a=area_inp: self._remove_owner_field(r, i, c, a)
+        )
         rlay.addWidget(btn)
         self._owners_vlay.addWidget(row)
 
-    def _remove_owner_field(self, row: QWidget, inp: QLineEdit):
+    def _enforce_single_main(self, changed: QComboBox):
+        if changed.currentText() != "Главный собственник":
+            return
+        for c in self._owner_combos:
+            if c is not changed and c.currentText() == "Главный собственник":
+                c.blockSignals(True)
+                c.setCurrentIndex(c.findText("Собственник"))
+                c.blockSignals(False)
+
+    def _remove_owner_field(self, row: QWidget, inp: QLineEdit,
+                             combo: QComboBox, area_inp: QLineEdit):
         if len(self._owner_inputs) <= 1:
             inp.clear()
             return
-        if inp in self._owner_inputs:
-            self._owner_inputs.remove(inp)
+        for lst, item in ((self._owner_inputs, inp),
+                          (self._owner_combos, combo),
+                          (self._owner_areas,  area_inp)):
+            if item in lst:
+                lst.remove(item)
         row.setParent(None)
         row.deleteLater()
 
@@ -614,7 +1110,22 @@ class PlotEditDialog(QDialog):
         if not num:
             QMessageBox.warning(self, "Ошибка", "Укажите номер участка")
             return
-        owners = [i.text().strip() for i in self._owner_inputs if i.text().strip()]
+        owners = []
+        for inp, combo, area_inp in zip(
+                self._owner_inputs, self._owner_combos, self._owner_areas):
+            name = inp.text().strip()
+            if not name:
+                continue
+            raw = area_inp.text().strip().replace(",", ".")
+            area: float | None = None
+            if raw:
+                try:
+                    v = float(raw)
+                    if v > 0:
+                        area = v
+                except ValueError:
+                    pass
+            owners.append(_make_owner(name, combo.currentText(), area))
 
         area_raw = self.inp_area.text().strip().replace(",", ".")
         area_val: float | None = None
@@ -661,6 +1172,10 @@ class PlotEditDialog(QDialog):
             }
         """)
 
+
+# ============================================================================ #
+#  DocCell / DocsWidget                                                        #
+# ============================================================================ #
 
 class DocCell(QWidget):
     """

@@ -73,7 +73,13 @@ def load_plots() -> list:
 
 
 def owners_map() -> dict:
-    return {str(p.get("num", "")): list(p.get("owners", []) or []) for p in load_plots()}
+    """Возвращает {num: [str, ...]} — всегда строки, независимо от формата хранения."""
+    result = {}
+    for p in load_plots():
+        num = str(p.get("num", ""))
+        owners = p.get("owners", []) or []
+        result[num] = [o["name"] if isinstance(o, dict) else o for o in owners]
+    return result
 
 
 # ── базовые утилиты ───────────────────────────────────────────────────

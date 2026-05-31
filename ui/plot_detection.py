@@ -22,8 +22,9 @@ def _load_sadovods():
             for entry in data:
                 num = entry.get("num", "")
                 for owner in entry.get("owners", []):
-                    if owner.strip():
-                        result.append((num, owner))
+                    name = owner["name"] if isinstance(owner, dict) else owner
+                    if name.strip():
+                        result.append((num, name))
             return result
     except Exception:
         pass
