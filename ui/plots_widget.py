@@ -776,6 +776,19 @@ class PlotsWidget(QWidget):
             act_edit = QAction("✏️  Редактировать", self)
             act_edit.triggered.connect(lambda: self._edit_plot(node.plot_ref))
             menu.addAction(act_edit)
+
+            act_dist = QAction("⚖️  Распределить площадь", self)
+            act_dist.triggered.connect(lambda: self._distribute_area(node))
+            owners = node.plot_ref.get("owners", [])
+            eligible = sum(
+                1 for o in owners
+                if _owner_relation(o) in ("Собственник", "Главный собственник")
+            )
+            act_dist.setEnabled(
+                bool(node.plot_ref.get("area")) and eligible > 0
+            )
+            menu.addAction(act_dist)
+
             act_del = QAction("Удалить участок", self)
             act_del.triggered.connect(lambda: self._delete_plot(node.plot_ref))
             menu.addAction(act_del)
@@ -825,6 +838,42 @@ class PlotsWidget(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self.model.remove_owner(owner_node)
             self._save()
+
+    def _distribute_area(self, plot_node: _PlotNode):
+        plot = plot_node.plot_ref
+        try:
+            total = float(plot.get("area") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if total <= 0:
+            QMessageBox.warning(self, "Нет площади",
+                                "У участка не указана площадь.")
+            return
+
+        owners = plot.get("owners", [])
+        eligible_idx = [
+            i for i, o in enumerate(owners)
+            if _owner_relation(o) in ("Собственник", "Главный собственник")
+        ]
+        if not eligible_idx:
+            QMessageBox.warning(self, "Нет собственников",
+                                "Нет владельцев с тегом «Собственник» "
+                                "или «Главный собственник».")
+            return
+
+        share = round(total / len(eligible_idx), 2)
+        area_col = PlotsTreeModel.COLUMNS.index("Площадь, м²")
+
+        for child in plot_node.children:
+            if child.owner_idx not in eligible_idx:
+                continue
+            o = owners[child.owner_idx]
+            owners[child.owner_idx] = _make_owner(
+                _owner_name(o), _owner_relation(o), share)
+            mi = self.model.createIndex(child.row(), area_col, child)
+            self.model.dataChanged.emit(mi, mi)
+
+        self._save()
 
     def _import_from_excel(self):
         path, _ = QFileDialog.getOpenFileName(
