@@ -1082,6 +1082,14 @@ class MainWindow(QMainWindow):
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
 
+    # Миграция: все участки без типа расчёта получают тип 1 (счётчик).
+    # Действующие начисления при этом не изменяются.
+    try:
+        from core import energy
+        energy.migrate_billing_types()
+    except Exception:
+        pass
+
     if sys.platform == "win32":
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("moy.sadovod.app")

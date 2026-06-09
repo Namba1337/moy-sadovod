@@ -1191,6 +1191,13 @@ class PlotEditDialog(QDialog):
         result = {"num": num, "owners": owners}
         if area_val is not None:
             result["area"] = area_val
+        # Тип расчёта редактируется на вкладке «Электричество» — здесь поля
+        # переносятся без изменений, чтобы не затереть конфигурацию начисления.
+        for k in ("billing_type", "meter_commission_date", "meter_act_number",
+                  "meter_location", "norm_kw", "norm_start_date",
+                  "direct_contract_date", "direct_contract_number", "billing_history"):
+            if k in self._plot_data:
+                result[k] = self._plot_data[k]
         self._result = result
         self.accept()
 

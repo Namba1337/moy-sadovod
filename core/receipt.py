@@ -41,8 +41,9 @@ def _build_html(plot: str, df, as_of: date,
     owners = energy.owners_map().get(str(plot), [])
     owner_text = ", ".join(owners) if owners else "—"
 
+    bt = energy.billing_type_of(str(plot))
     bal = energy.balance(plot, as_of, meters, rates, repls, baseline, df)
-    charges = energy.all_charges(plot, meters, rates, repls, up_to=as_of)
+    charges = energy.charges_for_plot(plot, meters, rates, repls, up_to=as_of)
 
     # Фильтр по начальной дате периода
     if since is not None:
@@ -105,7 +106,7 @@ def _build_html(plot: str, df, as_of: date,
     for c in charges:
         period = f"{_MONTHS[c['month']-1]} {c['year']}"
         prev_text = f"{c['prev_value']:g}" if c["prev_value"] is not None else "—"
-        curr_text = f"{c['value']:g}"
+        curr_text = f"{c['value']:g}" if c.get("value") is not None else "—"
         rate_text = f"{c['rate']:.2f}" if c["rate"] is not None else "—"
         amount_text = fmt_money(c["amount"])
         paid = bucketed.get((c["year"], c["month"]), 0.0)
@@ -142,6 +143,22 @@ def _build_html(plot: str, df, as_of: date,
         ly, lm, lv = bal.last_reading
         last_text = f"{lv:g}  ({_MONTHS[lm-1]} {ly})"
 
+    method_note = ""
+    if bt == energy.BILLING_CALCULATED:
+        method_note = (
+            "<div style='margin:0 0 12px 0; padding:8px 12px; background:#FEF3C7; "
+            "border:1px solid #FCD34D; border-radius:5px; color:#92400E; font-size:10pt;'>"
+            "Расчётный метод — прибор учёта не введён в эксплуатацию. "
+            "Начисление по нормативу (норматив × 24 ч × дни × тариф).</div>"
+        )
+    elif bt == energy.BILLING_DIRECT:
+        method_note = (
+            "<div style='margin:0 0 12px 0; padding:8px 12px; background:#EEF2FF; "
+            "border:1px solid #C7D2FE; border-radius:5px; color:#3730A3; font-size:10pt;'>"
+            "Расчёты ведутся напрямую с Пермэнергосбытом. "
+            "Начисление через СНТ не производится.</div>"
+        )
+
     th = ("background:#eef3f9; font-size:9pt; padding:4px 5px; "
           "border:1px solid #bbb; text-align:center;")
     td_style = "font-size:9pt; padding:4px 5px;"
@@ -153,6 +170,8 @@ def _build_html(plot: str, df, as_of: date,
       <div style="color:#666; font-size:11pt; margin-bottom:14px;">
         {period_subtitle}
       </div>
+
+      {method_note}
 
       <table style="margin-bottom:14px; font-size:11pt;">
         <tr><td><b>Участок №:</b></td><td>&nbsp;&nbsp;{html.escape(str(plot))}</td></tr>

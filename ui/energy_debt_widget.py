@@ -99,13 +99,14 @@ class EnergyDebtWidget(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
         self.table.setSortingEnabled(True)
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
             "Участок", "Владелец", "Последнее показание", "Дата показ.",
             "Начислено", "Оплачено", "Стартовое", "Долг / Аванс", "Без оплаты, мес.",
+            "Тип расчёта",
         ])
         hdr = self.table.horizontalHeader()
-        for c, w in enumerate([85, 240, 140, 105, 120, 120, 100, 130, 110]):
+        for c, w in enumerate([85, 240, 140, 105, 120, 120, 100, 130, 110, 130]):
             hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
             self.table.setColumnWidth(c, w)
         hdr.setStretchLastSection(True)
@@ -185,8 +186,14 @@ class EnergyDebtWidget(QWidget):
         debt_count = 0
         avg_monthly: list[float] = []
         debts_map: dict[str, dict] = {}
+        type_counts = {energy.BILLING_METER: 0, energy.BILLING_CALCULATED: 0,
+                       energy.BILLING_DIRECT: 0}
+        type_charged = {energy.BILLING_METER: 0.0, energy.BILLING_CALCULATED: 0.0}
+        direct_debt_total = 0.0
 
         for r, plot in enumerate(plots):
+            bt = energy.billing_type_of(plot)
+            type_counts[bt] = type_counts.get(bt, 0) + 1
             bal = energy.balance(plot, as_of, meters, rates, repls, baseline, self._df)
             owner = ", ".join(owners.get(plot, [])) or "—"
             last_reading_text = "—"
@@ -207,13 +214,19 @@ class EnergyDebtWidget(QWidget):
 
             color = energy.debt_color(bal.debt, monthly_avg=300.0)
             debts_map[plot] = {"debt": bal.debt, "color": color,
-                                "charged": bal.charged, "paid": bal.paid}
+                                "charged": bal.charged, "paid": bal.paid,
+                                "billing_type": bt}
 
-            total_debt += bal.debt
-            total_charged += bal.charged
-            total_paid += bal.paid
-            if bal.debt > 0.5:
-                debt_count += 1
+            # Тип 3 (прямой договор) — вне суммарного баланса СНТ
+            if bt == energy.BILLING_DIRECT:
+                direct_debt_total += bal.debt
+            else:
+                total_debt += bal.debt
+                total_charged += bal.charged
+                total_paid += bal.paid
+                type_charged[bt] = type_charged.get(bt, 0.0) + bal.charged
+                if bal.debt > 0.5:
+                    debt_count += 1
 
             try:
                 plot_sort = float(str(plot).split(",")[0])
@@ -238,6 +251,9 @@ class EnergyDebtWidget(QWidget):
                 ("—" if bal.months_without_payment is None else str(bal.months_without_payment),
                  bal.months_without_payment or 0, None,
                  "#DC2626" if (bal.months_without_payment or 0) > 3 else "#374151", False),
+                (energy.BILLING_LABELS.get(bt, bt), bt,
+                 "#EEF2FF" if bt == energy.BILLING_DIRECT else None,
+                 "#4338CA" if bt == energy.BILLING_DIRECT else "#6B7280", False),
             ]
             for c, (text, value, bg, fg, bold) in enumerate(cells):
                 if isinstance(value, (int, float)):
@@ -258,9 +274,20 @@ class EnergyDebtWidget(QWidget):
         self.table.setSortingEnabled(True)
         self._last_debts = debts_map
 
+        direct_note = ""
+        if type_counts.get(energy.BILLING_DIRECT):
+            direct_note = (
+                f"  ·  прямой договор: {type_counts[energy.BILLING_DIRECT]} "
+                f"(вне баланса СНТ, долг {fmt_money(direct_debt_total)} закрывается вручную)"
+            )
         self.status_lbl.setText(
-            f"Участков: {len(plots)}  ·  должников: {debt_count}  ·  "
-            f"общий долг: {fmt_money(total_debt)}"
+            f"Участков: {len(plots)}  ·  "
+            f"счётчик: {type_counts.get(energy.BILLING_METER, 0)} "
+            f"({fmt_money(type_charged.get(energy.BILLING_METER, 0.0))}), "
+            f"расчётный: {type_counts.get(energy.BILLING_CALCULATED, 0)} "
+            f"({fmt_money(type_charged.get(energy.BILLING_CALCULATED, 0.0))})"
+            f"{direct_note}  ·  должников: {debt_count}  ·  "
+            f"общий долг (тип 1+2): {fmt_money(total_debt)}"
         )
 
         # Сверка

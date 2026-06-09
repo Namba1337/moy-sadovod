@@ -72,6 +72,12 @@ def load_plots() -> list:
     return _read_json(PLOTS_FILE, [])
 
 
+def save_plots(data: list) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(PLOTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def owners_map() -> dict:
     """Возвращает {num: [str, ...]} — всегда строки, независимо от формата хранения."""
     result = {}
@@ -80,6 +86,84 @@ def owners_map() -> dict:
         owners = p.get("owners", []) or []
         result[num] = [o["name"] if isinstance(o, dict) else o for o in owners]
     return result
+
+
+# ── тип расчёта за электроэнергию ─────────────────────────────────────
+# meter      — счётчик введён в эксплуатацию через СНТ, расчёт по показаниям
+# calculated — расчётный метод (норматив × 24 × дни × тариф)
+# direct     — прямой договор с Пермэнергосбытом, через СНТ не начисляется
+BILLING_METER = "meter"
+BILLING_CALCULATED = "calculated"
+BILLING_DIRECT = "direct"
+BILLING_TYPES = (BILLING_METER, BILLING_CALCULATED, BILLING_DIRECT)
+BILLING_LABELS = {
+    BILLING_METER: "Счётчик",
+    BILLING_CALCULATED: "Расчётный метод",
+    BILLING_DIRECT: "Прямой договор",
+}
+
+
+def plots_by_num(plots: Optional[list] = None) -> dict:
+    """{num(str): plot_dict}. Загружает реестр, если plots не передан."""
+    src = plots if plots is not None else load_plots()
+    return {str(p.get("num", "")): p for p in src}
+
+
+def plot_record(plot: str, plots: Optional[list] = None) -> dict:
+    return plots_by_num(plots).get(str(plot), {}) or {}
+
+
+def billing_type_of(plot: str, plots: Optional[list] = None) -> str:
+    """Текущий тип расчёта участка. Неизвестные/пустые → meter (по умолчанию)."""
+    bt = plot_record(plot, plots).get("billing_type") or BILLING_METER
+    return bt if bt in BILLING_TYPES else BILLING_METER
+
+
+def migrate_billing_types() -> int:
+    """Проставляет billing_type=meter всем участкам без него.
+    Действующие начисления не меняются. Возвращает число изменённых записей."""
+    plots = load_plots()
+    changed = 0
+    for p in plots:
+        if not p.get("billing_type"):
+            p["billing_type"] = BILLING_METER
+            changed += 1
+    if changed:
+        save_plots(plots)
+    return changed
+
+
+def billing_segments(plot: str, plots: Optional[list] = None) -> list[tuple]:
+    """История применения типов расчёта во времени.
+
+    Возвращает список (date_from|None, date_to|None, billing_type),
+    отсортированный по времени. Если истории смен нет — один сегмент
+    (None, None, текущий_тип). Границы берутся из billing_history:
+    [{"date": "YYYY-MM-DD", "from": тип, "to": тип, ...}] — дата = момент,
+    с которого действует новый тип.
+    """
+    rec = plot_record(plot, plots)
+    cur = billing_type_of(plot, plots)
+    hist = []
+    for h in rec.get("billing_history", []) or []:
+        d = _parse_iso(h.get("date", ""))
+        to = h.get("to")
+        if d is None or to not in BILLING_TYPES:
+            continue
+        hist.append((d, h.get("from") if h.get("from") in BILLING_TYPES else None, to))
+    hist.sort(key=lambda x: x[0])
+
+    if not hist:
+        return [(None, None, cur)]
+
+    from datetime import timedelta
+    segs: list[tuple] = []
+    first_from = hist[0][1] or BILLING_METER
+    segs.append((None, hist[0][0] - timedelta(days=1), first_from))
+    for i, (d, _frm, to) in enumerate(hist):
+        end = (hist[i + 1][0] - timedelta(days=1)) if i + 1 < len(hist) else None
+        segs.append((d, end, to))
+    return segs
 
 
 # ── базовые утилиты ───────────────────────────────────────────────────
@@ -251,6 +335,99 @@ def all_charges(plot: str, meters: dict, rates: list, replacements: dict,
     return out
 
 
+# ── расчётный метод (норматив) ────────────────────────────────────────
+
+def _days_in_month_within(year: int, month: int,
+                          start: date, end: date) -> int:
+    """Кол-во дней месяца (year, month), попадающих в [start, end] включительно."""
+    last_day = calendar.monthrange(year, month)[1]
+    m_start = date(year, month, 1)
+    m_end = date(year, month, last_day)
+    seg_start = max(m_start, start)
+    seg_end = min(m_end, end)
+    if seg_end < seg_start:
+        return 0
+    return (seg_end - seg_start).days + 1
+
+
+def calculated_charges(plot: str, norm_kw: Optional[float], start: Optional[date],
+                       rates: list, up_to: Optional[date] = None) -> list[dict]:
+    """Помесячные начисления расчётным методом.
+
+    amount = норматив(кВт) × 24 × дни_в_периоде × тариф.
+    Формат строк совместим с all_charges (+ флаг calculated и поле days).
+    """
+    out: list[dict] = []
+    if norm_kw is None or start is None:
+        return out
+    up_to = up_to or date.today()
+    if up_to < start:
+        return out
+
+    y, m = start.year, start.month
+    while (y, m) <= (up_to.year, up_to.month):
+        days = _days_in_month_within(y, m, start, up_to)
+        rd = reading_date(y, m)
+        rate = rate_at(rd, rates)
+        kwh = norm_kw * 24 * days
+        amount = kwh * rate if rate is not None else None
+        out.append({
+            "year": y, "month": m, "prev_value": None, "value": None,
+            "kwh": kwh, "rate": rate, "amount": amount,
+            "calculated": True, "days": days,
+        })
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+# ── диспетчер начислений по типу расчёта ──────────────────────────────
+
+def charges_for_plot(plot: str, meters: dict, rates: list, replacements: dict,
+                     up_to: Optional[date] = None,
+                     plots: Optional[list] = None) -> list[dict]:
+    """Начисления участка с учётом типа расчёта и истории его смены.
+
+    Тип 1 (meter)      — по показаниям прибора учёта.
+    Тип 2 (calculated) — по нормативу.
+    Тип 3 (direct)     — пусто (через СНТ не начисляется).
+    Каждый сегмент истории считается своим методом, что корректно
+    обрабатывает смену типа в середине истории.
+    """
+    up_to = up_to or date.today()
+    rec = plot_record(plot, plots)
+    norm = _to_float(rec.get("norm_kw"))
+    norm_start = _parse_iso(rec.get("norm_start_date", ""))
+
+    out: list[dict] = []
+    for seg_from, seg_to, bt in billing_segments(plot, plots):
+        seg_end = up_to if seg_to is None else min(seg_to, up_to)
+        if seg_end < (seg_from or date.min):
+            continue
+        if bt == BILLING_DIRECT:
+            continue
+        if bt == BILLING_CALCULATED:
+            c_start = norm_start or seg_from
+            if seg_from is not None and (c_start is None or c_start < seg_from):
+                c_start = seg_from
+            out += calculated_charges(plot, norm, c_start, rates, up_to=seg_end)
+        else:  # meter
+            for c in all_charges(plot, meters, rates, replacements, up_to=seg_end):
+                rd = reading_date(c["year"], c["month"])
+                if seg_from is not None and rd < seg_from:
+                    continue
+                out.append(c)
+    out.sort(key=lambda c: (c["year"], c["month"]))
+    return out
+
+
+def waiting_for_readings(plot: str, meters: dict,
+                         plots: Optional[list] = None) -> bool:
+    """Тип 1 без переданных показаний — статус «ожидание показаний»."""
+    if billing_type_of(plot, plots) != BILLING_METER:
+        return False
+    return not plot_readings(plot, meters)
+
+
 # ── платежи из выписки ────────────────────────────────────────────────
 
 def _row_amount_for_plot(row: pd.Series, plot: str) -> float:
@@ -324,16 +501,19 @@ class Balance:
 
 
 def balance(plot: str, as_of: date, meters: dict, rates: list,
-            replacements: dict, baseline: dict, df) -> Balance:
+            replacements: dict, baseline: dict, df,
+            plots: Optional[list] = None) -> Balance:
     base = _to_float(baseline.get("balances", {}).get(str(plot))) or 0.0
     base_start = _parse_iso(baseline.get("start_date", ""))
 
     charged = 0.0
     last: Optional[tuple[int, int, float]] = None
-    for c in all_charges(plot, meters, rates, replacements, up_to=as_of):
+    for c in charges_for_plot(plot, meters, rates, replacements,
+                              up_to=as_of, plots=plots):
         if c["amount"] is not None:
             charged += c["amount"]
-        last = (c["year"], c["month"], c["value"])
+        if c["value"] is not None:
+            last = (c["year"], c["month"], c["value"])
 
     paid = payments_total(plot, df, date_from=base_start, date_to=as_of)
     debt = base + charged - paid
@@ -452,12 +632,14 @@ class Reconciliation:
 
 def reconcile(date_from: date, date_to: date, plots: list[str],
               meters: dict, rates: list, replacements: dict,
-              common_meter: dict, df) -> Reconciliation:
-    # Начислено всем
+              common_meter: dict, df,
+              plot_records: Optional[list] = None) -> Reconciliation:
+    # Начислено всем (участки на прямом договоре исключаются автоматически)
     charged_total = 0.0
     private_kwh = 0.0
     for p in plots:
-        for c in all_charges(p, meters, rates, replacements, up_to=date_to):
+        for c in charges_for_plot(p, meters, rates, replacements,
+                                  up_to=date_to, plots=plot_records):
             rd = reading_date(c["year"], c["month"])
             if rd < date_from or rd > date_to:
                 continue

@@ -1,6 +1,7 @@
 """Карточки и диалоги для вкладки «Долги по электроэнергии»."""
 from __future__ import annotations
 
+import getpass
 from datetime import date
 
 from PyQt6.QtCore import Qt, QDate
@@ -9,11 +10,17 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
-    QVBoxLayout,
+    QVBoxLayout, QWidget,
 )
 
 from core import energy
 from core.utils import fmt_money
+
+
+def _next_period_start(today: date | None = None) -> date:
+    """Первое число следующего месяца — момент применения нового типа расчёта."""
+    today = today or date.today()
+    return date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
 
 
 class _NumItem(QTableWidgetItem):
@@ -209,6 +216,213 @@ class MeterReplacementDialog(QDialog):
         return self._result
 
 
+class BillingTypeDialog(QDialog):
+    """Редактирование типа расчёта за электроэнергию для участка.
+
+    Изменения сохраняются прямо в snt_plots.json. Смена типа применяется
+    со следующего расчётного периода, фиксируется в истории участка.
+    """
+
+    def __init__(self, plot: str, parent=None):
+        super().__init__(parent)
+        self._plot = str(plot)
+        self._plots = energy.load_plots()
+        self._rec = next(
+            (p for p in self._plots if str(p.get("num", "")) == self._plot), None
+        )
+        self._created = self._rec is None
+        if self._rec is None:
+            self._rec = {"num": self._plot}
+        cur = self._rec.get("billing_type") or energy.BILLING_METER
+        if cur not in energy.BILLING_TYPES:
+            cur = energy.BILLING_METER
+        self._orig = cur
+
+        self.setWindowTitle(f"Тип расчёта — уч. {self._plot}")
+        self.setMinimumWidth(460)
+        self.setModal(True)
+        self._saved = False
+        self._setup_ui(cur)
+        self._apply_styles()
+
+    def _make_date_edit(self, iso: str | None) -> QDateEdit:
+        de = QDateEdit(calendarPopup=True)
+        de.setDisplayFormat("dd.MM.yyyy")
+        d = energy._parse_iso(iso or "")
+        de.setDate(QDate(d.year, d.month, d.day) if d else QDate.currentDate())
+        return de
+
+    def _setup_ui(self, cur: str):
+        rec = self._rec
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 20, 20, 18)
+        lay.setSpacing(12)
+
+        title = QLabel(f"Тип расчёта за электроэнергию — участок {self._plot}")
+        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
+        lay.addWidget(title)
+
+        self.cb_billing = QComboBox()
+        for bt in energy.BILLING_TYPES:
+            self.cb_billing.addItem(energy.BILLING_LABELS[bt], bt)
+        self.cb_billing.setCurrentIndex(max(self.cb_billing.findData(cur), 0))
+        lay.addWidget(self.cb_billing)
+
+        # Тип 1 — Счётчик
+        self._g_meter = QWidget()
+        fm = QFormLayout(self._g_meter)
+        fm.setContentsMargins(0, 4, 0, 0)
+        self.de_meter_date = self._make_date_edit(rec.get("meter_commission_date"))
+        self.inp_meter_act = QLineEdit(str(rec.get("meter_act_number", "")))
+        self.inp_meter_loc = QLineEdit(str(rec.get("meter_location", "")))
+        fm.addRow("Дата ввода в эксплуатацию:", self.de_meter_date)
+        fm.addRow("Номер акта:", self.inp_meter_act)
+        fm.addRow("Место установки:", self.inp_meter_loc)
+        lay.addWidget(self._g_meter)
+
+        # Тип 2 — Расчётный метод
+        self._g_calc = QWidget()
+        fc = QFormLayout(self._g_calc)
+        fc.setContentsMargins(0, 4, 0, 0)
+        norm_raw = rec.get("norm_kw")
+        self.inp_norm = QLineEdit("" if norm_raw in (None, "") else f"{float(norm_raw):g}")
+        self.inp_norm.setPlaceholderText("обязательно, например: 1.5")
+        self.de_norm_start = self._make_date_edit(
+            rec.get("norm_start_date") or _next_period_start().isoformat()
+        )
+        fc.addRow("Норматив мощности, кВт:", self.inp_norm)
+        fc.addRow("Дата начала применения:", self.de_norm_start)
+        note = QLabel("Начисление: норматив × 24 ч × дни в периоде × тариф.\n"
+                      "Показания прибора учёта игнорируются.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#9CA3AF;font-size:11px;")
+        fc.addRow(note)
+        lay.addWidget(self._g_calc)
+
+        # Тип 3 — Прямой договор
+        self._g_direct = QWidget()
+        fd = QFormLayout(self._g_direct)
+        fd.setContentsMargins(0, 4, 0, 0)
+        self.de_direct_date = self._make_date_edit(rec.get("direct_contract_date"))
+        self.inp_direct_num = QLineEdit(str(rec.get("direct_contract_number", "")))
+        fd.addRow("Дата заключения договора:", self.de_direct_date)
+        fd.addRow("Номер договора с энергосбытом:", self.inp_direct_num)
+        note_d = QLabel("Начисление через СНТ не производится; участок исключён "
+                        "из суммарного баланса СНТ.")
+        note_d.setWordWrap(True)
+        note_d.setStyleSheet("color:#9CA3AF;font-size:11px;")
+        fd.addRow(note_d)
+        lay.addWidget(self._g_direct)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+        self.cb_billing.currentIndexChanged.connect(self._on_billing_changed)
+        self._on_billing_changed()
+
+    def _on_billing_changed(self):
+        bt = self.cb_billing.currentData()
+        self._g_meter.setVisible(bt == energy.BILLING_METER)
+        self._g_calc.setVisible(bt == energy.BILLING_CALCULATED)
+        self._g_direct.setVisible(bt == energy.BILLING_DIRECT)
+        self.adjustSize()
+
+    def _on_accept(self):
+        rec = self._rec
+        bt = self.cb_billing.currentData()
+
+        # Сбор полей и валидация
+        if bt == energy.BILLING_METER:
+            rec["meter_commission_date"] = self.de_meter_date.date().toString("yyyy-MM-dd")
+            rec["meter_act_number"] = self.inp_meter_act.text().strip()
+            rec["meter_location"] = self.inp_meter_loc.text().strip()
+        elif bt == energy.BILLING_CALCULATED:
+            raw = self.inp_norm.text().strip().replace(",", ".")
+            try:
+                nv = float(raw)
+            except ValueError:
+                nv = 0.0
+            if nv <= 0:
+                QMessageBox.warning(self, "Расчётный метод",
+                                    "Для расчётного метода обязательно укажите "
+                                    "норматив мощности (положительное число, кВт).")
+                return
+            rec["norm_kw"] = nv
+            rec["norm_start_date"] = self.de_norm_start.date().toString("yyyy-MM-dd")
+        else:  # direct
+            rec["direct_contract_date"] = self.de_direct_date.date().toString("yyyy-MM-dd")
+            rec["direct_contract_number"] = self.inp_direct_num.text().strip()
+
+        # Смена типа — подтверждение + запись в историю
+        if bt != self._orig:
+            old_lbl = energy.BILLING_LABELS.get(self._orig, self._orig)
+            new_lbl = energy.BILLING_LABELS.get(bt, bt)
+            eff = _next_period_start()
+            msg = (f"Сменить тип расчёта «{old_lbl}» → «{new_lbl}»?\n\n"
+                   f"Изменение применяется со следующего расчётного периода "
+                   f"({eff.strftime('%d.%m.%Y')}). Текущий период закрывается "
+                   f"по действующему методу.")
+            if bt == energy.BILLING_DIRECT:
+                msg += ("\n\nВнимание: имеющаяся задолженность по СНТ остаётся "
+                        "за участком и закрывается вручную.")
+            reply = QMessageBox.question(
+                self, "Смена типа расчёта", msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                user = getpass.getuser()
+            except Exception:
+                user = "admin"
+            history = list(rec.get("billing_history", []) or [])
+            history.append({
+                "date": eff.isoformat(), "from": self._orig, "to": bt,
+                "user": user, "ts": date.today().isoformat(), "reason": "",
+            })
+            rec["billing_history"] = history
+
+        rec["billing_type"] = bt
+        if self._created:
+            self._plots.append(rec)
+        energy.save_plots(self._plots)
+        self._saved = True
+        self.accept()
+
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            QDialog { background: #FFFFFF; color: #374151; }
+            QLabel  { background: transparent; color: #374151; font-size: 13px; }
+            QLineEdit, QDateEdit {
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
+            }
+            QLineEdit:focus, QDateEdit:focus { border: 1px solid #6366F1; }
+            QComboBox {
+                background: #F8F9FA; border: 1px solid #D1D5DB; border-radius: 5px;
+                padding: 7px 10px; font-size: 13px; color: #374151;
+            }
+            QComboBox::drop-down { border: none; width: 20px; }
+            QComboBox QAbstractItemView {
+                background: #FFFFFF; border: 1px solid #D1D5DB;
+                color: #374151; selection-background-color: #EEF2FF;
+            }
+            QDialogButtonBox QPushButton {
+                background: #4F46E5; color: white; border: none;
+                border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
+            }
+            QDialogButtonBox QPushButton:hover { background: #6366F1; }
+            QDialogButtonBox QPushButton[text='Отмена'] { background: #E5E7EB; color: #6B7280; }
+        """)
+
+
 class PlotCardDialog(QDialog):
     """Карточка участка: сводка показаний/начислений/платежей + ввод и правка показаний."""
 
@@ -244,8 +458,14 @@ class PlotCardDialog(QDialog):
         self.summary_lbl.setStyleSheet("color:#9CA3AF;background:transparent;font-size:12px;")
         lay.addWidget(self.summary_lbl)
 
+        # Плашка типа расчёта (расчётный метод / прямой договор / ожидание показаний)
+        self.banner_lbl = QLabel("")
+        self.banner_lbl.setWordWrap(True)
+        self.banner_lbl.setVisible(False)
+        lay.addWidget(self.banner_lbl)
+
         # ── Панель ввода нового показания ──────────────────────────
-        entry = QFrame(objectName="entryBox")
+        self._entry = entry = QFrame(objectName="entryBox")
         eh = QHBoxLayout(entry)
         eh.setContentsMargins(12, 8, 12, 8)
         eh.setSpacing(8)
@@ -317,6 +537,11 @@ class PlotCardDialog(QDialog):
 
         # ── Кнопки внизу ───────────────────────────────────────────
         bottom = QHBoxLayout()
+        self.btn_billing = QPushButton("⚙  Тип расчёта")
+        self.btn_billing.setObjectName("btnSecondary")
+        self.btn_billing.clicked.connect(self._on_billing_type)
+        bottom.addWidget(self.btn_billing)
+
         self.btn_replace = QPushButton("Зарегистрировать замену счётчика")
         self.btn_replace.setObjectName("btnSecondary")
         self.btn_replace.clicked.connect(self._on_replace)
@@ -387,8 +612,13 @@ class PlotCardDialog(QDialog):
         base = energy._to_float(baseline.get("balances", {}).get(self._plot)) or 0.0
         base_start = energy._parse_iso(baseline.get("start_date", ""))
 
+        # Тип расчёта определяет логику начисления и доступность ввода показаний
+        bt = energy.billing_type_of(self._plot)
+        self._entry.setVisible(bt == energy.BILLING_METER)
+        self._configure_banner(bt, meters)
+
         # ── Хронология: каждое снятие показания + каждый платёж — отдельная строка
-        charges = energy.all_charges(self._plot, meters, rates, repls, up_to=self._as_of)
+        charges = energy.charges_for_plot(self._plot, meters, rates, repls, up_to=self._as_of)
         payments = [
             p for p in energy.payments_breakdown(self._plot, self._df)
             if p["date"] is not None
@@ -441,19 +671,23 @@ class PlotCardDialog(QDialog):
                 charged_text = fmt_money(c["amount"]) if c["amount"] is not None else "—"
                 cum += amount
                 mbal_text = fmt_money(amount) if amount else "0 ₽"
+                is_calc = bool(c.get("calculated"))
+                # Тип 2: показание не вводится — вместо редактора пометка «расчётный метод»
+                value_cell = (f"расч. · {c.get('days', 0)} дн", "#6366F1") if is_calc else None
                 self._set_row(r, [
                     (label, None),
-                    None,                              # «Показание» — редактируемое поле
+                    value_cell,                        # «Показание» — редактируемое поле (тип 1)
                     (kwh_text, None),
                     (rate_text, None),
                     (charged_text, "#f9a825" if c["amount"] else None),
                     ("—", None),
                     (mbal_text, None),
                     (fmt_money(cum), self._debt_color(cum)),
-                    None,                              # кнопка удаления
+                    ("", None) if is_calc else None,   # кнопка удаления (тип 1)
                 ])
-                self._install_value_editor(r, y, m, c["value"], anomaly_map.get((y, m)))
-                self._install_delete_button(r, y, m)
+                if not is_calc:
+                    self._install_value_editor(r, y, m, c["value"], anomaly_map.get((y, m)))
+                    self._install_delete_button(r, y, m)
             elif kind == "payment":
                 p = payload
                 paid = p["amount"]
@@ -516,6 +750,37 @@ class PlotCardDialog(QDialog):
             self.summary_lbl.setText(
                 "Показаний и платежей по этому участку пока нет — внесите первое выше."
             )
+
+    def _configure_banner(self, bt: str, meters: dict):
+        """Плашка под сводкой: расчётный метод / прямой договор / ожидание показаний."""
+        if bt == energy.BILLING_CALCULATED:
+            self._set_banner(
+                "Расчётный метод — прибор учёта не введён в эксплуатацию. "
+                "Начисление по нормативу (норматив × 24 ч × дни × тариф).",
+                "#92400E", "#FEF3C7", "#FCD34D",
+            )
+        elif bt == energy.BILLING_DIRECT:
+            self._set_banner(
+                "Расчёты ведутся напрямую с Пермэнергосбытом. "
+                "Начисление через СНТ не производится, участок исключён из баланса СНТ.",
+                "#3730A3", "#EEF2FF", "#C7D2FE",
+            )
+        elif energy.waiting_for_readings(self._plot, meters):
+            self._set_banner(
+                "Ожидание показаний — показания прибора учёта ещё не переданы, "
+                "начисление не производится.",
+                "#9A3412", "#FFF7ED", "#FED7AA",
+            )
+        else:
+            self.banner_lbl.setVisible(False)
+
+    def _set_banner(self, text: str, fg: str, bg: str, border: str):
+        self.banner_lbl.setText(text)
+        self.banner_lbl.setStyleSheet(
+            f"color:{fg};background:{bg};border:1px solid {border};"
+            "border-radius:6px;padding:8px 12px;font-size:12px;"
+        )
+        self.banner_lbl.setVisible(True)
 
     # ── Помощники строк ──────────────────────────────────────────────────
     def _set_row(self, r: int, cells: list, bold: bool = False):
@@ -685,6 +950,13 @@ class PlotCardDialog(QDialog):
         if v < 0:
             return "#059669"
         return None
+
+    def _on_billing_type(self):
+        dlg = BillingTypeDialog(self._plot, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and getattr(dlg, "_saved", False):
+            self._rebuild()
+            QMessageBox.information(self, "Тип расчёта",
+                                    "Тип расчёта сохранён. Расчёт пересчитан.")
 
     def _on_replace(self):
         meters = energy.load_meters()
