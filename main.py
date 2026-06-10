@@ -601,6 +601,7 @@ class MainWindow(QMainWindow):
 
         # При изменении данных вкладки «Участки» — обновить все зависимые вкладки
         self.plots.plotsUpdated.connect(self.detail.refresh_plot_column)
+        self.plots.plotsUpdated.connect(self.energy_debt._rebuild)
 
         self._nav_click(0)  # initial page: Главная
 
@@ -1076,6 +1077,7 @@ class MainWindow(QMainWindow):
             QLabel#summaryExpense {
                 color: #DC2626; background: transparent; font-size: 13px; font-weight: 600;
             }
+
         """)
 
 
@@ -1121,9 +1123,22 @@ def main():
     palette.setColor(QPalette.ColorRole.Text,        QColor("#1F2937"))
     palette.setColor(QPalette.ColorRole.Button,      QColor("#F0F3F9"))
     palette.setColor(QPalette.ColorRole.ButtonText,  QColor("#1F2937"))
-    palette.setColor(QPalette.ColorRole.Highlight,   QColor("#07414F"))
+    palette.setColor(QPalette.ColorRole.Highlight,      QColor("#07414F"))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.ToolTipBase,    QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.ToolTipText,    QColor("#374151"))
     app.setPalette(palette)
+
+    app.setStyleSheet("""
+        QToolTip {
+            background: #FFFFFF;
+            color: #374151;
+            border: 1px solid #D1D5DB;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 12px;
+        }
+    """)
 
     window = MainWindow()
     if _icon_path.exists():
