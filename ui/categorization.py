@@ -141,67 +141,76 @@ CATEGORY_COLORS.update(load_user_category_colors())
 ALL_CATEGORIES = load_user_categories()
 
 
+def _ensure_category(name: str):
+    """Добавляет категорию в ALL_CATEGORIES (и в файл), если её там ещё нет."""
+    if name not in ALL_CATEGORIES:
+        ALL_CATEGORIES.append(name)
+        if name not in CATEGORY_COLORS and name in _DEFAULT_CATEGORY_COLORS:
+            CATEGORY_COLORS[name] = _DEFAULT_CATEGORY_COLORS[name]
+        save_user_categories(list(ALL_CATEGORIES))
+
+
 def categorize_row(row: dict) -> str:
     text      = str(row.get("Назначение", "")).lower()
     contragent = str(row.get("Контрагент", "")).lower()
 
     if "пермэнергосбыт" in contragent or "пермская энергосбытовая" in contragent:
-        return "Оплата электроэнергии (поставщик) (авто)"
-
-    electro_words = [
+        result = "Оплата электроэнергии (поставщик) (авто)"
+    elif (  # electro + member
+        any(w in text for w in [
+            "электроэнерги", "электричеств", "эл/энерги", "эл.энерги",
+            "эл.знерги", "злектроэнерги", "эл энерги", "элект.энерги",
+            "электро энерги", "свет", "э/э", "квт", "кВт",
+            "зл.знерги", "электорэнерги", "потреблен", "электролени",
+            "электротовар", "эликтричеств", "эл,энерги", "эл. энерги",
+        ])
+        and any(w in text for w in [
+            "членск", "членнск", "чл.взн", "чл взн", "чл взнос",
+            "взносы", "взнос", "садоводческий взнос", "садоводческое товарищество",
+            "общественные нужды", "обществен нужды", "жкх", "ежегодный взнос",
+        ])
+    ):
+        result = "Членские взносы + Электроэнергия (авто)"
+    elif any(w in text for w in [
         "электроэнерги", "электричеств", "эл/энерги", "эл.энерги",
         "эл.знерги", "злектроэнерги", "эл энерги", "элект.энерги",
         "электро энерги", "свет", "э/э", "квт", "кВт",
         "зл.знерги", "электорэнерги", "потреблен", "электролени",
-        "электротовар", "эликтричеств", "эл,энерги", "эл. энерги", "эл. энерги", "эл. энерги",
-    ]
-    member_words = [
+        "электротовар", "эликтричеств", "эл,энерги", "эл. энерги",
+    ]):
+        result = "Электроэнергия (от садоводов) (авто)"
+    elif any(w in text for w in [
         "членск", "членнск", "чл.взн", "чл взн", "чл взнос",
         "взносы", "взнос", "садоводческий взнос", "садоводческое товарищество",
         "общественные нужды", "обществен нужды", "жкх", "ежегодный взнос",
-    ]
-    is_electro = any(w in text for w in electro_words)
-    is_member  = any(w in text for w in member_words)
-
-    if is_electro and is_member:
-        return "Членские взносы + Электроэнергия (авто)"
-    if is_electro:
-        return "Электроэнергия (от садоводов) (авто)"
-    if is_member:
-        return "Членские взносы (авто)"
-
-    if re.search(r"долг|аванс|уч\.19;|2026\s*год|2025\s*год", text):
-        return "Членские взносы (авто)"
-
-    if ("контур" in text or "контур" in contragent
+    ]):
+        result = "Членские взносы (авто)"
+    elif re.search(r"долг|аванс|уч\.19;|2026\s*год|2025\s*год", text):
+        result = "Членские взносы (авто)"
+    elif ("контур" in text or "контур" in contragent
             or "программ" in text or "эвм" in text
             or "бухгалтер" in text or "модуль" in text):
-        return "Программное обеспечение (авто)"
-
-    nalog_words = [
+        result = "Программное обеспечение (авто)"
+    elif any(w in text for w in [
         "налог","ифнс","казначейств","взыскани","штраф","пени",
         "нк рф","енс","страховани","фз №125","требование",
-    ]
-    if any(w in text for w in nalog_words):
-        return "Налоги и штрафы (авто)"
-
-    if "комисси" in text or "рко" in text or "задолженност" in text:
-        return "Банковские комиссии (авто)"
-
-    if "возврат" in text:
-        return "Возврат (авто)"
-
-    material_words = [
+    ]):
+        result = "Налоги и штрафы (авто)"
+    elif "комисси" in text or "рко" in text or "задолженност" in text:
+        result = "Банковские комиссии (авто)"
+    elif "возврат" in text:
+        result = "Возврат (авто)"
+    elif any(w in text for w in [
         "материал","уборка снега","транспортн","подряд",
         "строит","хозяйственн","счет на оплату","счёт на оплату",
         "оплата по счету","оплата по счёту","оплата по договору",
-    ]
-    if any(w in text for w in material_words):
-        return "Материалы и работы (авто)"
-    if any(w in contragent for w in ["ип ", "ооо "]):
-        return "Материалы и работы (авто)"
+    ]) or any(w in contragent for w in ["ип ", "ооо "]):
+        result = "Материалы и работы (авто)"
+    else:
+        result = "Прочее (авто)"
 
-    return "Прочее (авто)"
+    _ensure_category(result)
+    return result
 
 
 def apply_categorization(df: pd.DataFrame) -> pd.DataFrame:
