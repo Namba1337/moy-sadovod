@@ -3,16 +3,16 @@ import os
 
 import pandas as pd
 from PyQt6.QtCore import (
-    Qt, QEvent, QModelIndex, QAbstractItemModel, QObject, QPoint, QRect, QRegularExpression,
-    QTimer, pyqtSignal,
+    Qt, QEvent, QModelIndex, QAbstractItemModel, QObject, QPoint, QRect, QRectF,
+    QRegularExpression, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QAction, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygon,
-    QRegularExpressionValidator,
+    QBitmap, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygon,
+    QRegion, QRegularExpressionValidator,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
+    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMessageBox, QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTableWidget, QTableWidgetItem, QTreeView, QVBoxLayout, QWidget,
 )
@@ -228,8 +228,8 @@ class _PlotNode:
 # ============================================================================ #
 
 class PlotsTreeModel(QAbstractItemModel):
-    COLUMNS = ["Участок, №", "Площадь, м²", "Контактное лицо, ФИО",
-               "Контактный номер", "E-mail"]
+    COLUMNS = ["№", "Площадь, м²", "Контактное лицо",
+               "Контактный номер", "E-mail", "_edit", "_check"]
 
     # Эмитится только из setData (inline-редактирование), чтобы автосохранять.
     ownerDataEdited = pyqtSignal()
@@ -289,11 +289,14 @@ class PlotsTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         col = self.COLUMNS[index.column()]
 
+        if col in ("_edit", "_check"):
+            return "" if role == Qt.ItemDataRole.DisplayRole else None
+
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             if node.kind == "plot":
-                if col == "Участок, №":
+                if col == "№":
                     return str(node.plot_ref.get('num', '?'))
-                if col == "Контактное лицо, ФИО":
+                if col == "Контактное лицо":
                     owners = node.plot_ref.get("owners", []) or []
                     if not owners:
                         return "—"
@@ -320,7 +323,7 @@ class PlotsTreeModel(QAbstractItemModel):
             elif node.kind == "owner":
                 owners = node.plot_ref.get("owners", [])
                 owner = owners[node.owner_idx] if 0 <= node.owner_idx < len(owners) else None
-                if col == "Контактное лицо, ФИО":
+                if col == "Контактное лицо":
                     return _owner_name(owner) if owner is not None else ""
                 if col == "Площадь, м²":
                     if owner is None:
@@ -337,7 +340,7 @@ class PlotsTreeModel(QAbstractItemModel):
 
         if role == Qt.ItemDataRole.ForegroundRole:
             if node.kind == "plot":
-                if col == "Участок, №":
+                if col == "№":
                     return QColor("#07414F")
                 if col == "Площадь, м²":
                     area = node.plot_ref.get("area")
@@ -347,7 +350,7 @@ class PlotsTreeModel(QAbstractItemModel):
                 return QColor("#555F6D")
 
         if role == Qt.ItemDataRole.FontRole:
-            if node.kind == "plot" and col == "Участок, №":
+            if node.kind == "plot" and col == "№":
                 f = QFont()
                 f.setBold(True)
                 return f
@@ -362,6 +365,8 @@ class PlotsTreeModel(QAbstractItemModel):
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             col = self.COLUMNS[section]
+            if col == "_edit":   return chr(0xE3C9)
+            if col == "_check":  return chr(0xE92B)
             return col
         return None
 
@@ -373,7 +378,7 @@ class PlotsTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         col = self.COLUMNS[index.column()]
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if node.kind == "owner" and col in ("Контактное лицо, ФИО", "Площадь, м²"):
+        if node.kind == "owner" and col in ("Контактное лицо", "Площадь, м²"):
             f |= Qt.ItemFlag.ItemIsEditable
         return f
 
@@ -382,13 +387,13 @@ class PlotsTreeModel(QAbstractItemModel):
             return False
         node = index.internalPointer()
         col = self.COLUMNS[index.column()]
-        if node.kind == "owner" and col in ("Контактное лицо, ФИО", "Площадь, м²"):
+        if node.kind == "owner" and col in ("Контактное лицо", "Площадь, м²"):
             text = str(value).strip()
             owners = node.plot_ref.get("owners", [])
             if not (0 <= node.owner_idx < len(owners)):
                 return False
             old = owners[node.owner_idx]
-            if col == "Контактное лицо, ФИО":
+            if col == "Контактное лицо":
                 if not text:
                     return False
                 owners[node.owner_idx] = _make_owner(
@@ -396,7 +401,7 @@ class PlotsTreeModel(QAbstractItemModel):
                     _owner_member_doc(old), _owner_opd_doc(old))
                 pn = node.parent
                 if pn is not None:
-                    fio_col = self.COLUMNS.index("Контактное лицо, ФИО")
+                    fio_col = self.COLUMNS.index("Контактное лицо")
                     self.dataChanged.emit(self.createIndex(pn.row(), fio_col, pn),
                                          self.createIndex(pn.row(), fio_col, pn))
             else:  # Площадь, м²
@@ -425,12 +430,12 @@ class PlotsTreeModel(QAbstractItemModel):
         col = self.COLUMNS[column]
         self.beginResetModel()
         reverse = order == Qt.SortOrder.DescendingOrder
-        if col == "Участок, №":
+        if col == "№":
             self._root.children.sort(
                 key=lambda n: _plot_num_key(str(n.plot_ref.get("num", ""))),
                 reverse=reverse,
             )
-        elif col == "Контактное лицо, ФИО":
+        elif col == "Контактное лицо":
             def _fio_key(n):
                 owners = n.plot_ref.get("owners") or []
                 main = next((o for o in owners if _is_owner(o)), owners[0] if owners else {})
@@ -463,7 +468,7 @@ class PlotsTreeModel(QAbstractItemModel):
         plot_node.children.append(owner_node)
         self.endInsertRows()
         # Обновляем ФИО в родительской строке
-        fio_col = self.COLUMNS.index("Контактное лицо, ФИО")
+        fio_col = self.COLUMNS.index("Контактное лицо")
         fio_mi = self.createIndex(plot_node.row(), fio_col, plot_node)
         self.dataChanged.emit(fio_mi, fio_mi)
         return parent_mi
@@ -484,13 +489,13 @@ class PlotsTreeModel(QAbstractItemModel):
             child.owner_idx = i
         self.endRemoveRows()
         # Обновляем ФИО в родительской строке
-        fio_col = self.COLUMNS.index("Контактное лицо, ФИО")
+        fio_col = self.COLUMNS.index("Контактное лицо")
         fio_mi = self.createIndex(plot_node.row(), fio_col, plot_node)
         self.dataChanged.emit(fio_mi, fio_mi)
 
 
 # ============================================================================ #
-#  Делегат столбца «Контактное лицо, ФИО»                                     #
+#  Делегат столбца «Контактное лицо»                                          #
 # ============================================================================ #
 
 class _FioDelegate(QStyledItemDelegate):
@@ -510,7 +515,7 @@ class _FioDelegate(QStyledItemDelegate):
     _BTN_FG     = QColor("#07414F")
     _BTN_BORDER = QColor("#B5C8D5")
     _BTN_H      = 22
-    _FIO_COL    = PlotsTreeModel.COLUMNS.index("Контактное лицо, ФИО")
+    _FIO_COL    = PlotsTreeModel.COLUMNS.index("Контактное лицо")
 
     def __init__(self, view):
         super().__init__(view)
@@ -574,6 +579,33 @@ class _FioDelegate(QStyledItemDelegate):
                     owner = owners[0]
                 else:
                     owner = None
+                # Агрегированные индикаторы на родительских строках (несколько владельцев)
+                if owner is None and node.kind == "plot" and len(owners) > 1:
+                    miss_m = sum(1 for o in owners if _is_owner(o) and not _owner_member_doc(o))
+                    miss_o = sum(1 for o in owners if _is_owner(o) and not _owner_opd_doc(o))
+                    miss_a = sum(1 for o in owners if _is_owner(o) and _owner_area(o) is None)
+                    indicators = []
+                    if miss_m > 0:
+                        indicators.append((18, str(miss_m), f"Нет заявления о вступлении: {miss_m}"))
+                    if miss_o > 0:
+                        indicators.append((18, str(miss_o), f"Нет заявления на ОПД: {miss_o}"))
+                    if miss_a > 0:
+                        f_m2 = QFont(); f_m2.setPixelSize(11); f_m2.setBold(True)
+                        lw_m2 = QFontMetrics(f_m2).horizontalAdvance("м²")
+                        indicators.append((lw_m2, str(miss_a), f"Площадь не заполнена: {miss_a}"))
+                    if indicators:
+                        f_cnt = QFont(); f_cnt.setPixelSize(11); f_cnt.setBold(True)
+                        fm    = QFontMetrics(f_cnt)
+                        cell_rect = self._view.visualRect(idx)
+                        cur_x = cell_rect.right() - 8
+                        for lw, cnt_str, tip in reversed(indicators):
+                            cw   = fm.horizontalAdvance(cnt_str)
+                            zone = QRect(cur_x - cw - 2 - lw, cell_rect.top(),
+                                         lw + 2 + cw, cell_rect.height())
+                            if zone.contains(pos):
+                                target, target_tip = idx, tip
+                                break
+                            cur_x -= lw + 2 + cw + 4
                 if owner is not None:
                     cell_rect = self._view.visualRect(idx)
                     has_area  = (_owner_area(owner) is not None)
@@ -681,8 +713,11 @@ class _FioDelegate(QStyledItemDelegate):
             btn_bg = self._BTN_BG_H if self._hover_btn_index == index else self._BTN_BG
             painter.setBrush(btn_bg)
             painter.setPen(QPen(self._BTN_BORDER, 1))
-            r = btn.height() // 2
-            painter.drawRoundedRect(btn, r, r)
+            # Полупиксельные координаты: 1px-перо ложится точно в пиксельную
+            # сетку, без них антиалиасинг размазывает бордер на два пикселя.
+            btn_f = QRectF(btn).adjusted(0.5, 0.5, -0.5, -0.5)
+            r = btn_f.height() / 2.0
+            painter.drawRoundedRect(btn_f, r, r)
 
             f_btn = QFont()
             f_btn.setPixelSize(11)
@@ -840,6 +875,254 @@ class _FioDelegate(QStyledItemDelegate):
 
 
 # ============================================================================ #
+#  Делегат столбца «_edit» — кнопка редактирования участка                    #
+# ============================================================================ #
+
+class _EditBtnDelegate(QStyledItemDelegate):
+    """Рисует иконку edit; на hover — filled-версия и курсор-рука."""
+
+    _IC_EDIT  = chr(0xE3C9)  # edit
+    _IC_FONT  = "Material Symbols Rounded"
+    _IC_COLOR = QColor("#07414F")
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view      = view
+        self._edit_col  = PlotsTreeModel.COLUMNS.index("_edit")
+        self._hover_idx = QModelIndex()
+        self._pointing  = False
+        self._fill_tag  = QFont.Tag.fromString("FILL")
+        view.viewport().installEventFilter(self)
+
+    def _is_btn(self, index: QModelIndex) -> bool:
+        node = index.internalPointer() if index.isValid() else None
+        return bool(node and node.kind == "plot" and index.column() == self._edit_col)
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        node = index.internalPointer()
+        if node is None or node.kind != "plot":
+            return
+        painter.save()
+        f = QFont(self._IC_FONT)
+        f.setPixelSize(18)
+        f.setVariableAxis(self._fill_tag, 1.0 if self._hover_idx == index else 0.0)
+        painter.setFont(f)
+        painter.setPen(self._IC_COLOR)
+        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, self._IC_EDIT)
+        painter.restore()
+
+    def eventFilter(self, obj, event):
+        if obj is self._view.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                idx  = self._view.indexAt(event.position().toPoint())
+                on_btn = self._is_btn(idx)
+
+                # setOverrideCursor не сбрасывается внутренней обработкой Qt
+                if on_btn and not self._pointing:
+                    self._pointing = True
+                    QApplication.setOverrideCursor(Qt.CursorShape.PointingHandCursor)
+                elif not on_btn and self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
+
+                # Hover-состояние для fill-эффекта
+                new_hover = idx if on_btn else QModelIndex()
+                if new_hover != self._hover_idx:
+                    old = self._hover_idx
+                    self._hover_idx = new_hover
+                    if old.isValid():
+                        self._view.viewport().update(self._view.visualRect(old))
+                    if new_hover.isValid():
+                        self._view.viewport().update(self._view.visualRect(new_hover))
+
+            elif event.type() == QEvent.Type.Leave:
+                if self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
+                if self._hover_idx.isValid():
+                    old = self._hover_idx
+                    self._hover_idx = QModelIndex()
+                    self._view.viewport().update(self._view.visualRect(old))
+
+        return super().eventFilter(obj, event)
+
+
+# ============================================================================ #
+#  Делегат столбца «_check» — чекбоксы выбора для массовых операций           #
+# ============================================================================ #
+
+class _CheckDelegate(QStyledItemDelegate):
+    """Рисует чекбокс; на hover — filled-версия и курсор-рука. Управляет выбором участков."""
+
+    selectionChanged = pyqtSignal()
+
+    _IC_ON    = chr(0xE834)   # check_box
+    _IC_OFF   = chr(0xE835)   # check_box_outline_blank
+    _IC_FONT  = "Material Symbols Rounded"
+    _IC_COLOR = QColor("#07414F")
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view      = view
+        self._check_col = PlotsTreeModel.COLUMNS.index("_check")
+        self._hover_idx = QModelIndex()
+        self._pointing  = False
+        self._fill_tag  = QFont.Tag.fromString("FILL")
+        self._selected: set[str] = set()
+        view.viewport().installEventFilter(self)
+
+    def get_selected(self) -> set[str]:
+        return set(self._selected)
+
+    def clear_selection(self):
+        if self._selected:
+            self._selected.clear()
+            self.selectionChanged.emit()
+            self._view.viewport().update()
+
+    def remove_plot(self, plot_id: str):
+        if plot_id in self._selected:
+            self._selected.discard(plot_id)
+            self.selectionChanged.emit()
+
+    def _is_btn(self, index: QModelIndex) -> bool:
+        node = index.internalPointer() if index.isValid() else None
+        return bool(node and node.kind == "plot" and index.column() == self._check_col)
+
+    def _plot_id(self, index: QModelIndex) -> str:
+        node = index.internalPointer()
+        return str(node.plot_ref.get("num", id(node.plot_ref))) if node else ""
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        node = index.internalPointer()
+        if node is None or node.kind != "plot":
+            return
+        pid   = self._plot_id(index)
+        hov   = self._hover_idx == index
+        icon  = self._IC_ON if pid in self._selected else self._IC_OFF
+        painter.save()
+        f = QFont(self._IC_FONT)
+        f.setPixelSize(18)
+        f.setVariableAxis(self._fill_tag, 1.0 if hov else 0.0)
+        painter.setFont(f)
+        painter.setPen(self._IC_COLOR)
+        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, icon)
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if (event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._is_btn(index)):
+            pid = self._plot_id(index)
+            if pid:
+                if pid in self._selected:
+                    self._selected.discard(pid)
+                else:
+                    self._selected.add(pid)
+                self._view.viewport().update(self._view.visualRect(index))
+                self.selectionChanged.emit()
+            return True
+        return super().editorEvent(event, model, option, index)
+
+    def eventFilter(self, obj, event):
+        if obj is self._view.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                idx    = self._view.indexAt(event.position().toPoint())
+                on_btn = self._is_btn(idx)
+
+                if on_btn and not self._pointing:
+                    self._pointing = True
+                    QApplication.setOverrideCursor(Qt.CursorShape.PointingHandCursor)
+                elif not on_btn and self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
+
+                new_hover = idx if on_btn else QModelIndex()
+                if new_hover != self._hover_idx:
+                    old = self._hover_idx
+                    self._hover_idx = new_hover
+                    if old.isValid():
+                        self._view.viewport().update(self._view.visualRect(old))
+                    if new_hover.isValid():
+                        self._view.viewport().update(self._view.visualRect(new_hover))
+
+            elif event.type() == QEvent.Type.Leave:
+                if self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
+                if self._hover_idx.isValid():
+                    old = self._hover_idx
+                    self._hover_idx = QModelIndex()
+                    self._view.viewport().update(self._view.visualRect(old))
+
+        return super().eventFilter(obj, event)
+
+
+# ============================================================================ #
+#  Делегат столбца «№» — индикатор отсутствия выписки ЕГРН                    #
+# ============================================================================ #
+
+class _PlotNumDelegate(QStyledItemDelegate):
+    """Для строк-участков рисует иконку real_estate_agent (оранжевую), если egrn_doc не загружен."""
+
+    _IC_MISSING = chr(0xE73A)  # real_estate_agent
+    _IC_COLOR   = QColor("#F59E0B")
+    _PLOT_COL   = PlotsTreeModel.COLUMNS.index("№")
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view         = view
+        self._tip_index    = QModelIndex()
+        view.viewport().installEventFilter(self)
+
+    def _ic_rect(self, cell_rect: QRect) -> QRect:
+        return QRect(cell_rect.right() - 22, cell_rect.top(), 20, cell_rect.height())
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        node = index.internalPointer()
+        if node is None or node.kind != "plot":
+            return
+        if node.plot_ref.get("egrn_doc", ""):
+            return
+        painter.save()
+        f = QFont("Material Symbols Rounded")
+        f.setPixelSize(15)
+        painter.setFont(f)
+        painter.setPen(self._IC_COLOR)
+        painter.drawText(self._ic_rect(option.rect), Qt.AlignmentFlag.AlignCenter, self._IC_MISSING)
+        painter.restore()
+
+    def eventFilter(self, obj, event):
+        if obj is self._view.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                pos = event.position().toPoint()
+                idx = self._view.indexAt(pos)
+                tip = QModelIndex()
+                if idx.isValid() and idx.column() == self._PLOT_COL:
+                    node = idx.internalPointer()
+                    if node and node.kind == "plot" and not node.plot_ref.get("egrn_doc", ""):
+                        if self._ic_rect(self._view.visualRect(idx)).contains(pos):
+                            tip = idx
+                if tip != self._tip_index:
+                    self._tip_index = tip
+                    if tip.isValid():
+                        _AppTooltip.show_at(
+                            "Выписка ЕГРН не прикреплена",
+                            self._view.viewport().mapToGlobal(pos),
+                        )
+                    else:
+                        _AppTooltip.hide()
+            elif event.type() == QEvent.Type.Leave:
+                if self._tip_index.isValid():
+                    self._tip_index = QModelIndex()
+                    _AppTooltip.hide()
+        return super().eventFilter(obj, event)
+
+
+# ============================================================================ #
 #  Стиль дерева                                                                #
 # ============================================================================ #
 
@@ -871,17 +1154,95 @@ _SB_W = 12  # ширина скроллбара — должна совпада�
 
 
 # ============================================================================ #
+#  Вспомогательные виджеты для скруглённых контейнеров                        #
+# ============================================================================ #
+
+class _BorderOverlay(QWidget):
+    """Прозрачный виджет-ребёнок, рисует только скруглённую рамку поверх всего."""
+
+    def __init__(self, color: QColor, radius: int, parent: QWidget):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self._color  = color
+        self._radius = radius
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+        self.raise_()
+
+    def eventFilter(self, obj, event):
+        if obj is self.parent() and event.type() == QEvent.Type.Resize:
+            self.setGeometry(self.parent().rect())
+            self.raise_()
+        return False
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(self._color, 1))
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1),
+                                self._radius, self._radius)
+
+
+class _ClipFrame(QFrame):
+    """QFrame, который через setMask обрезает всё содержимое по скруглённому
+    прямоугольнику — фон, hover-выделения дочерних виджетов не вылезают за углы."""
+
+    def __init__(self, border_color: QColor, radius: int, parent=None):
+        super().__init__(parent)
+        self._radius = radius
+        self._overlay = None  # создаётся после добавления детей
+        self.setStyleSheet("background: transparent; border: none;")
+        self._border_color = border_color
+
+    def finish_setup(self):
+        """Вызвать после того, как все дочерние виджеты добавлены."""
+        self._overlay = _BorderOverlay(self._border_color, self._radius, self)
+        self._update_mask()
+
+    def _update_mask(self):
+        sz = self.size()
+        if sz.width() <= 0 or sz.height() <= 0:
+            return
+        bmp = QBitmap(sz)
+        bmp.fill(Qt.GlobalColor.color0)
+        p = QPainter(bmp)
+        p.setBrush(Qt.GlobalColor.color1)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(self.rect(), self._radius, self._radius)
+        p.end()
+        self.setMask(QRegion(bmp))
+
+    def resizeEvent(self, a0):
+        super().resizeEvent(a0)
+        self._update_mask()
+        if self._overlay:
+            self._overlay.setGeometry(self.rect())
+            self._overlay.raise_()
+
+
+# ============================================================================ #
 #  Шапка таблицы с кастомными стрелками сортировки                            #
 # ============================================================================ #
 
 class _SortHeaderView(QHeaderView):
-    """Шапка с синим фоном и нарисованными стрелками сортировки."""
+    """Шапка с синим фоном, стрелками сортировки и кнопкой удаления выбранных."""
 
-    _BG      = QColor("#C9D8E2")
-    _FG      = QColor("#07414F")
-    _BORDER  = QColor("#B5C8D5")
-    _ARR_ON  = QColor("#07414F")
-    _ARR_OFF = QColor("#9AABB6")
+    deleteRequested = pyqtSignal()
+    searchChanged   = pyqtSignal(int, str)   # (col_logical, text)
+
+    _BG       = QColor("#C9D8E2")
+    _FG       = QColor("#07414F")
+    _BORDER   = QColor("#B5C8D5")
+    _ARR_ON   = QColor("#07414F")
+    _ARR_OFF  = QColor("#9AABB6")
+    _DEL_OFF  = QColor("#9CA3AF")   # нет выбора — серый
+    _DEL_ON   = QColor("#DC2626")   # есть выбор — красный
+    _DEL_HOV  = QColor("#B91C1C")   # наведение — тёмно-красный
+
+    _IC_CHARS = {chr(0xE73A), chr(0xF567), chr(0xF0DC)}  # иконки-индикаторы
+    _IC_COLOR = QColor("#F59E0B")
 
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
@@ -889,6 +1250,205 @@ class _SortHeaderView(QHeaderView):
         self.setSortIndicatorShown(False)
         self.setFixedHeight(34)
         self.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        self.setMouseTracking(True)
+        self._del_col        = -1
+        self._has_sel        = False
+        self._del_hovered    = False
+        self._fill_tag       = QFont.Tag.fromString("FILL")
+        self._col_indicators: dict[int, list] = {}   # col → [(lbl, cnt, tip), ...]
+        self._tip_col        = -1
+        self._tip_text       = ""
+        self._search_cols:   set  = set()
+        self._search_active: dict = {}
+        self._search_fields: dict = {}
+
+    # -- публичный API --------------------------------------------------------
+
+    def set_delete_col(self, col: int):
+        self._del_col = col
+
+    def set_col_indicators(self, col: int, indicators: list):
+        """indicators: [(lbl, count, tooltip_text), ...] — только с count > 0."""
+        self._col_indicators[col] = [i for i in indicators if i[1] > 0]
+        self.viewport().update()
+
+    def _indicator_zones(self, logical_index: int, rect: QRect) -> list:
+        """Возвращает [(QRect, tooltip)] для каждого индикатора, справа налево."""
+        indicators = self._col_indicators.get(logical_index, [])
+        if not indicators:
+            return []
+        f_cnt = QFont(); f_cnt.setPixelSize(10); f_cnt.setBold(True)
+        fm    = QFontMetrics(f_cnt)
+        arr_w = 18
+        cur_x = rect.right() - arr_w - 6
+        zones = []
+        for lbl, cnt, tip in reversed(indicators):
+            lw   = 18 if lbl in self._IC_CHARS else fm.horizontalAdvance(lbl)
+            cw   = fm.horizontalAdvance(str(cnt))
+            zone = QRect(cur_x - cw - 2 - lw, rect.top(), lw + 2 + cw, rect.height())
+            zones.append((zone, tip))
+            cur_x -= lw + 2 + cw + 4
+        return zones
+
+    def set_has_selection(self, has: bool):
+        if self._has_sel != has:
+            self._has_sel = has
+            if not has:
+                self._del_hovered = False
+                self.viewport().unsetCursor()
+            self.viewport().update()
+
+    def add_search_col(self, col: int):
+        """Регистрирует столбец как поисковой и создаёт поле ввода."""
+        self._search_cols.add(col)
+        le = QLineEdit(self.viewport())
+        le.setPlaceholderText("Поиск...")
+        le.hide()
+        le.setStyleSheet(
+            "QLineEdit {"
+            "  background: rgba(255,255,255,0.45);"
+            "  border: 1px solid rgba(7,65,79,0.5);"
+            "  border-radius: 3px;"
+            "  color: #07414F;"
+            "  font-size: 12px;"
+            "  padding: 1px 4px;"
+            "}"
+        )
+        le.textChanged.connect(lambda text, c=col: self.searchChanged.emit(c, text))
+        self._search_fields[col] = le
+        self._search_active[col] = False
+
+    def _toggle_search(self, col: int):
+        now = not self._search_active.get(col, False)
+        self._search_active[col] = now
+        le = self._search_fields.get(col)
+        if le:
+            if now:
+                le.show()
+                le.setFocus()
+            else:
+                le.hide()
+                le.clear()
+        self.viewport().update()
+
+    def _compute_ind_left_x(self, logical: int, arr_left: int) -> int:
+        """Левая граница зоны индикаторов (= правая граница текста/поля)."""
+        indicators = self._col_indicators.get(logical, [])
+        if not indicators:
+            return arr_left - 2
+        f_cnt = QFont(); f_cnt.setPixelSize(10); f_cnt.setBold(True)
+        fm    = QFontMetrics(f_cnt)
+        total = sum(
+            (18 if lbl in self._IC_CHARS else fm.horizontalAdvance(lbl))
+            + 2 + fm.horizontalAdvance(str(cnt)) + 4
+            for lbl, cnt, _ in indicators
+        ) - 4
+        return arr_left - 2 - total - 6
+
+    def _search_icon_zone(self, logical: int, sec_rect: QRect) -> QRect:
+        """QRect иконки поиска или закрытия поиска для кликов/курсора."""
+        IC_W   = 22
+        ind_lx = self._compute_ind_left_x(logical, sec_rect.right() - 18 - 2)
+        if self._search_active.get(logical, False):
+            return QRect(ind_lx - IC_W - 4, sec_rect.top(), IC_W, sec_rect.height())
+        label  = str(self.model().headerData(
+            logical, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or "")
+        f      = QFont(); f.setPixelSize(12); f.setBold(True)
+        max_tw = max(0, ind_lx - sec_rect.left() - IC_W - 16)
+        tw     = min(QFontMetrics(f).horizontalAdvance(label), max_tw)
+        si_x   = min(sec_rect.left() + 10 + tw + 4, ind_lx - IC_W - 4)
+        return QRect(si_x, sec_rect.top(), IC_W, sec_rect.height())
+
+    # -- mouse events ---------------------------------------------------------
+
+    def mouseMoveEvent(self, event):
+        pos  = event.position().toPoint()
+        x    = pos.x()
+        hand = False
+
+        # -- кнопка удаления --
+        if self._del_col >= 0 and self._has_sel:
+            sec_x = self.sectionViewportPosition(self._del_col)
+            sec_w = self.sectionSize(self._del_col)
+            hov   = sec_x <= x < sec_x + sec_w
+            if hov != self._del_hovered:
+                self._del_hovered = hov
+                self.viewport().update()
+            if hov:
+                hand = True
+        else:
+            if self._del_hovered:
+                self._del_hovered = False
+                self.viewport().update()
+
+        # -- иконки поиска --
+        if not hand:
+            logical = self.logicalIndexAt(x)
+            if logical in self._search_cols:
+                sec_x    = self.sectionViewportPosition(logical)
+                sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
+                if self._search_icon_zone(logical, sec_rect).contains(pos):
+                    hand = True
+
+        if hand:
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.viewport().unsetCursor()
+
+        # -- тултипы индикаторов --
+        tip_col, tip_txt = -1, ""
+        logical = self.logicalIndexAt(x)
+        if logical >= 0:
+            sec_x    = self.sectionViewportPosition(logical)
+            sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
+            for zone, tip in self._indicator_zones(logical, sec_rect):
+                if zone.contains(pos):
+                    tip_col, tip_txt = logical, tip
+                    break
+        if tip_col != self._tip_col or tip_txt != self._tip_text:
+            self._tip_col  = tip_col
+            self._tip_text = tip_txt
+            if tip_col >= 0:
+                _AppTooltip.show_at(tip_txt, self.viewport().mapToGlobal(pos))
+            else:
+                _AppTooltip.hide()
+
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self._del_hovered:
+            self._del_hovered = False
+            self.viewport().update()
+        self.viewport().unsetCursor()
+        if self._tip_col >= 0:
+            self._tip_col  = -1
+            self._tip_text = ""
+            _AppTooltip.hide()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            x   = pos.x()
+
+            if self._del_col >= 0 and self._has_sel:
+                sec_x = self.sectionViewportPosition(self._del_col)
+                sec_w = self.sectionSize(self._del_col)
+                if sec_x <= x < sec_x + sec_w:
+                    self.deleteRequested.emit()
+                    return
+
+            logical = self.logicalIndexAt(x)
+            if logical in self._search_cols:
+                sec_x    = self.sectionViewportPosition(logical)
+                sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
+                if self._search_icon_zone(logical, sec_rect).contains(pos):
+                    self._toggle_search(logical)
+                    return
+
+        super().mousePressEvent(event)
+
+    # -- paint ----------------------------------------------------------------
 
     def paintSection(self, painter: QPainter, rect: QRect, logical_index: int):
         if not rect.isValid():
@@ -896,7 +1456,6 @@ class _SortHeaderView(QHeaderView):
         painter.save()
         painter.fillRect(rect, self._BG)
 
-        # Вертикальные разделители между колонками
         painter.setPen(QPen(self._BORDER, 1))
         painter.drawLine(rect.right(), rect.top() + 4, rect.right(), rect.bottom() - 4)
 
@@ -907,37 +1466,118 @@ class _SortHeaderView(QHeaderView):
             if model else ""
         )
         if label:
-            arr_w = 18
-            text_rect = QRect(rect.left() + 10, rect.top(),
-                              rect.width() - arr_w - 14, rect.height())
-            arr_rect  = QRect(rect.right() - arr_w - 2, rect.top(),
-                              arr_w, rect.height())
+            # Одиночный символ Material Symbols — рисуем как иконку, без стрелок
+            if len(label) == 1 and 0xE000 <= ord(label) <= 0xF8FF:
+                f_ic = QFont("Material Symbols Rounded")
+                f_ic.setPixelSize(18)
+                if logical_index == self._del_col:
+                    if not self._has_sel:
+                        color = self._DEL_OFF
+                        fill  = 0.0
+                    elif self._del_hovered:
+                        color = self._DEL_HOV
+                        fill  = 1.0
+                    else:
+                        color = self._DEL_ON
+                        fill  = 0.0
+                    f_ic.setVariableAxis(self._fill_tag, fill)
+                    painter.setPen(color)
+                else:
+                    painter.setPen(self._FG)
+                painter.setFont(f_ic)
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+            else:
+                arr_w    = 18
+                arr_rect = QRect(rect.right() - arr_w - 2, rect.top(), arr_w, rect.height())
 
-            painter.setPen(self._FG)
-            f = QFont()
-            f.setPixelSize(12)
-            f.setBold(True)
-            painter.setFont(f)
-            painter.drawText(text_rect,
-                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                             label)
+                # Индикаторы (справа налево, перед стрелками сортировки)
+                indicators = self._col_indicators.get(logical_index, [])
+                ind_left_x = arr_rect.left() - 2
+                if indicators:
+                    f_ic  = QFont("Material Symbols Rounded"); f_ic.setPixelSize(14)
+                    f_cnt = QFont(); f_cnt.setPixelSize(10); f_cnt.setBold(True)
+                    fm    = QFontMetrics(f_cnt)
+                    cur_x = ind_left_x
+                    for lbl, cnt, _ in reversed(indicators):
+                        lw    = 18 if lbl in self._IC_CHARS else fm.horizontalAdvance(lbl)
+                        cw    = fm.horizontalAdvance(str(cnt))
+                        lbl_r = QRect(cur_x - cw - 2 - lw, rect.top(), lw, rect.height())
+                        cnt_r = QRect(cur_x - cw, rect.top(), cw, rect.height())
+                        painter.setFont(f_ic if lbl in self._IC_CHARS else f_cnt)
+                        painter.setPen(self._IC_COLOR)
+                        painter.drawText(lbl_r, Qt.AlignmentFlag.AlignCenter, lbl)
+                        painter.setFont(f_cnt)
+                        painter.drawText(cnt_r, Qt.AlignmentFlag.AlignCenter, str(cnt))
+                        cur_x -= lw + 2 + cw + 4
+                    ind_left_x = cur_x - 4
 
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            cx = arr_rect.left() + arr_rect.width() // 2
-            cy = arr_rect.top() + arr_rect.height() // 2
-            is_sorted = (self.sortIndicatorSection() == logical_index)
-            asc  = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
-            desc = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+                # Стрелки сортировки
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                cx = arr_rect.left() + arr_rect.width() // 2
+                cy = arr_rect.top() + arr_rect.height() // 2
+                is_sorted = (self.sortIndicatorSection() == logical_index)
+                asc  = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+                desc = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(self._ARR_ON if asc else self._ARR_OFF)
+                painter.drawPolygon(QPolygon([
+                    QPoint(cx - 4, cy - 1), QPoint(cx + 4, cy - 1), QPoint(cx, cy - 6),
+                ]))
+                painter.setBrush(self._ARR_ON if desc else self._ARR_OFF)
+                painter.drawPolygon(QPolygon([
+                    QPoint(cx - 4, cy + 1), QPoint(cx + 4, cy + 1), QPoint(cx, cy + 6),
+                ]))
 
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self._ARR_ON if asc else self._ARR_OFF)
-            painter.drawPolygon(QPolygon([
-                QPoint(cx - 4, cy - 1), QPoint(cx + 4, cy - 1), QPoint(cx, cy - 6),
-            ]))
-            painter.setBrush(self._ARR_ON if desc else self._ARR_OFF)
-            painter.drawPolygon(QPolygon([
-                QPoint(cx - 4, cy + 1), QPoint(cx + 4, cy + 1), QPoint(cx, cy + 6),
-            ]))
+                # Заголовок / поле поиска
+                IC_W      = 22
+                is_srch   = logical_index in self._search_cols
+                is_active = self._search_active.get(logical_index, False)
+
+                if is_srch and is_active:
+                    off_x    = ind_left_x - IC_W - 4
+                    off_rect = QRect(off_x, rect.top(), IC_W, rect.height())
+                    le       = self._search_fields[logical_index]
+                    le_h     = 22
+                    le_rect  = QRect(rect.left() + 8,
+                                     rect.top() + (rect.height() - le_h) // 2,
+                                     max(0, off_x - rect.left() - 10),
+                                     le_h)
+                    le.setGeometry(le_rect)
+                    if not le.isVisible():
+                        le.show()
+                        le.setFocus()
+                    f_ico = QFont("Material Symbols Rounded"); f_ico.setPixelSize(18)
+                    painter.setFont(f_ico)
+                    painter.setPen(self._FG)
+                    painter.drawText(off_rect, Qt.AlignmentFlag.AlignCenter, chr(0xEA76))
+                else:
+                    if is_srch:
+                        le = self._search_fields.get(logical_index)
+                        if le and le.isVisible():
+                            le.hide()
+
+                    if is_srch:
+                        title_max_w = max(0, ind_left_x - rect.left() - IC_W - 16)
+                    else:
+                        title_max_w = max(0, ind_left_x - rect.left() - 6)
+
+                    text_rect = QRect(rect.left() + 10, rect.top(), title_max_w, rect.height())
+                    painter.setPen(self._FG)
+                    f = QFont(); f.setPixelSize(12); f.setBold(True)
+                    painter.setFont(f)
+                    painter.drawText(text_rect,
+                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                     label)
+
+                    if is_srch:
+                        fm_t  = QFontMetrics(f)
+                        tw    = min(fm_t.horizontalAdvance(label), title_max_w)
+                        si_x  = min(rect.left() + 10 + tw + 4, ind_left_x - IC_W - 4)
+                        si_r  = QRect(si_x, rect.top(), IC_W, rect.height())
+                        f_ico = QFont("Material Symbols Rounded"); f_ico.setPixelSize(18)
+                        painter.setFont(f_ico)
+                        painter.setPen(self._FG)
+                        painter.drawText(si_r, Qt.AlignmentFlag.AlignCenter, chr(0xE8B6))
 
         painter.restore()
 
@@ -957,6 +1597,7 @@ class PlotsWidget(QWidget):
         super().__init__()
         self.setAutoFillBackground(True)
         self._plots: list = self._load()
+        self._search_filters: dict[int, str] = {}
         self._setup_ui()
         self._rebuild_table()
 
@@ -1006,9 +1647,6 @@ class PlotsWidget(QWidget):
         top.addWidget(btn_add)
         layout.addLayout(top)
 
-        self.status_label = QLabel("", objectName="statusLabel")
-        layout.addWidget(self.status_label)
-
         self.model = PlotsTreeModel(self)
         self.model.ownerDataEdited.connect(self._save)
 
@@ -1017,14 +1655,8 @@ class PlotsWidget(QWidget):
         self.hdr_view.setModel(self.model)
         self.hdr_view.sortIndicatorChanged.connect(self._on_sort_changed)
 
-        hdr_frame = QFrame(objectName="hdrBlock")
-        hdr_frame.setStyleSheet("""
-            QFrame#hdrBlock {
-                background: #C9D8E2;
-                border: 1px solid #B5C8D5;
-                border-radius: 6px;
-            }
-        """)
+        hdr_frame = QFrame()
+        hdr_frame.setStyleSheet("background: #C9D8E2; border: none;")
         hdr_inner = QHBoxLayout(hdr_frame)
         hdr_inner.setContentsMargins(0, 0, 0, 0)
         hdr_inner.setSpacing(0)
@@ -1043,51 +1675,81 @@ class PlotsWidget(QWidget):
         self.tree.setIndentation(0)
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setSortingEnabled(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setMouseTracking(True)
         self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.tree.setStyleSheet(_TREE_STYLE)
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self._context_menu)
 
-        fio_col_idx = PlotsTreeModel.COLUMNS.index("Контактное лицо, ФИО")
+        fio_col_idx = PlotsTreeModel.COLUMNS.index("Контактное лицо")
         self._fio_delegate = _FioDelegate(self.tree)
         self._fio_delegate.toggleRequested.connect(self._on_toggle)
         self.tree.setItemDelegateForColumn(fio_col_idx, self._fio_delegate)
+
+        plot_col_idx = PlotsTreeModel.COLUMNS.index("№")
+        self._plot_num_delegate = _PlotNumDelegate(self.tree)
+        self.tree.setItemDelegateForColumn(plot_col_idx, self._plot_num_delegate)
+
+        edit_col_idx = PlotsTreeModel.COLUMNS.index("_edit")
+        self._edit_btn_delegate = _EditBtnDelegate(self.tree)
+        self.tree.setItemDelegateForColumn(edit_col_idx, self._edit_btn_delegate)
+        self.tree.clicked.connect(self._on_tree_clicked)
+
+        check_col_idx = PlotsTreeModel.COLUMNS.index("_check")
+        self._check_delegate = _CheckDelegate(self.tree)
+        self.tree.setItemDelegateForColumn(check_col_idx, self._check_delegate)
+        self._check_delegate.selectionChanged.connect(self._on_selection_changed)
+
+        self.hdr_view.set_delete_col(check_col_idx)
+        self.hdr_view.deleteRequested.connect(self._delete_selected)
 
         # Синхронизация ширин колонок между hdr_view и tree
         self.tree.header().sectionResized.connect(self._on_tree_hdr_resized)
         self.hdr_view.sectionResized.connect(self._on_hdr_view_resized)
         self._col_syncing = False
 
-        body_frame = QFrame(objectName="bodyBlock")
-        body_frame.setStyleSheet("""
-            QFrame#bodyBlock {
-                border: 1px solid #D5DCE4;
-                border-radius: 6px;
-                background: transparent;
-            }
-        """)
-        body_inner = QVBoxLayout(body_frame)
-        body_inner.setContentsMargins(0, 0, 0, 0)
-        body_inner.setSpacing(0)
-        body_inner.addWidget(self.tree)
+        # Поиск в шапке для столбцов № и Контактное лицо
+        self.hdr_view.add_search_col(PlotsTreeModel.COLUMNS.index("№"))
+        self.hdr_view.add_search_col(PlotsTreeModel.COLUMNS.index("Контактное лицо"))
+        self.hdr_view.searchChanged.connect(self._on_search_changed)
 
-        # ── Собираем два блока со spacing ────────────────────────────────────
+        # ── Единый внешний контейнер: клипирует шапку + тело вместе ─────────
+        table_outer = _ClipFrame(QColor("#D5DCE4"), 6)
+        outer_inner = QVBoxLayout(table_outer)
+        outer_inner.setContentsMargins(0, 0, 0, 0)
+        outer_inner.setSpacing(0)
+        outer_inner.addWidget(hdr_frame)
+        outer_inner.addWidget(self.tree, stretch=1)
+        table_outer.finish_setup()
+
+        self.status_label = QLabel("", objectName="statusLabel")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+
         table_vbox = QVBoxLayout()
         table_vbox.setSpacing(4)
         table_vbox.setContentsMargins(0, 0, 0, 0)
-        table_vbox.addWidget(hdr_frame)
-        table_vbox.addWidget(body_frame, stretch=1)
+        table_vbox.addWidget(table_outer, stretch=1)
+        table_vbox.addWidget(self.status_label)
         layout.addLayout(table_vbox)
 
     def _rebuild_table(self):
         sort_col   = self.hdr_view.sortIndicatorSection()
         sort_order = self.hdr_view.sortIndicatorOrder()
 
-        self.model.load(self._plots)
+        # Применяем поисковые фильтры
+        plots = self._plots
+        for col, text in self._search_filters.items():
+            if not text:
+                continue
+            if col == PlotsTreeModel.COLUMNS.index("№"):
+                plots = [p for p in plots if text in str(p.get("num", "")).lower()]
+            elif col == PlotsTreeModel.COLUMNS.index("Контактное лицо"):
+                plots = [p for p in plots
+                         if any(text in _owner_name(o).lower()
+                                for o in p.get("owners", []))]
+
+        self.model.load(plots)
 
         if sort_col < 0 or sort_col >= len(PlotsTreeModel.COLUMNS):
             sort_col   = 0
@@ -1095,30 +1757,65 @@ class PlotsWidget(QWidget):
         self.model.sort(sort_col, sort_order)
         self.hdr_view.setSortIndicator(sort_col, sort_order)
 
-        col_участок  = PlotsTreeModel.COLUMNS.index("Участок, №")
-        col_fio      = PlotsTreeModel.COLUMNS.index("Контактное лицо, ФИО")
+        col_участок  = PlotsTreeModel.COLUMNS.index("№")
+        col_fio      = PlotsTreeModel.COLUMNS.index("Контактное лицо")
         col_area     = PlotsTreeModel.COLUMNS.index("Площадь, м²")
         col_phone    = PlotsTreeModel.COLUMNS.index("Контактный номер")
         col_email    = PlotsTreeModel.COLUMNS.index("E-mail")
+        col_edit     = PlotsTreeModel.COLUMNS.index("_edit")
+        col_check    = PlotsTreeModel.COLUMNS.index("_check")
 
         # Одинаковые режимы на обоих хедерах — для выравнивания колонок
         for h in (self.hdr_view, self.tree.header()):
             h.setStretchLastSection(False)
             h.setSectionResizeMode(col_участок,  QHeaderView.ResizeMode.Fixed)
-            h.resizeSection(col_участок, 110)
+            h.resizeSection(col_участок, 140)
             h.setSectionResizeMode(col_fio,      QHeaderView.ResizeMode.Stretch)
             h.setSectionResizeMode(col_area,     QHeaderView.ResizeMode.Fixed)
             h.resizeSection(col_area, 120)
             h.setSectionResizeMode(col_phone,    QHeaderView.ResizeMode.Fixed)
-            h.resizeSection(col_phone, 140)
+            h.resizeSection(col_phone, 160)
             h.setSectionResizeMode(col_email,    QHeaderView.ResizeMode.Fixed)
             h.resizeSection(col_email, 160)
+            h.setSectionResizeMode(col_edit,     QHeaderView.ResizeMode.Fixed)
+            h.resizeSection(col_edit, 46)
+            h.setSectionResizeMode(col_check,    QHeaderView.ResizeMode.Fixed)
+            h.resizeSection(col_check, 46)
 
-        self.status_label.setText(f"Участков: {len(self._plots)}")
+        total    = len(self._plots)
+        filtered = len(plots)
+        if filtered < total:
+            self.status_label.setText(f"Участков: {filtered} из {total}")
+        else:
+            self.status_label.setText(f"Участков: {total}")
+
+        # Индикаторы в шапке «№»
+        n_no_egrn = sum(1 for p in plots if not p.get("egrn_doc", ""))
+        self.hdr_view.set_col_indicators(col_участок, [
+            (chr(0xE73A), n_no_egrn, f"Нет выписки ЕГРН: {n_no_egrn}"),
+        ])
+
+        # Индикаторы в шапке «Контактное лицо»
+        all_owners = [o for p in plots for o in p.get("owners", []) if _is_owner(o)]
+        miss_m = sum(1 for o in all_owners if not _owner_member_doc(o))
+        miss_o = sum(1 for o in all_owners if not _owner_opd_doc(o))
+        miss_a = sum(1 for o in all_owners if _owner_area(o) is None)
+        self.hdr_view.set_col_indicators(col_fio, [
+            (chr(0xF567), miss_m, f"Нет заявления о вступлении: {miss_m}"),
+            (chr(0xF0DC), miss_o, f"Нет заявления на ОПД: {miss_o}"),
+            ("м²",        miss_a, f"Площадь не заполнена: {miss_a}"),
+        ])
 
     def _on_sort_changed(self, col: int, order: Qt.SortOrder):
+        if col in (PlotsTreeModel.COLUMNS.index("_edit"),
+                   PlotsTreeModel.COLUMNS.index("_check")):
+            return
         self.model.sort(col, order)
         self.hdr_view.setSortIndicator(col, order)
+
+    def _on_search_changed(self, col: int, text: str):
+        self._search_filters[col] = text.strip().lower()
+        self._rebuild_table()
 
     def _on_tree_hdr_resized(self, li: int, _old: int, new: int):
         if self._col_syncing:
@@ -1134,52 +1831,48 @@ class PlotsWidget(QWidget):
         self.tree.setColumnWidth(li, new)
         self._col_syncing = False
 
+    def _on_tree_clicked(self, index: QModelIndex):
+        if index.column() == PlotsTreeModel.COLUMNS.index("_edit"):
+            node = index.internalPointer()
+            if node and node.kind == "plot":
+                self._edit_plot(node.plot_ref)
+
+    def _on_selection_changed(self):
+        has = bool(self._check_delegate.get_selected())
+        self.hdr_view.set_has_selection(has)
+
+    def _delete_selected(self):
+        pids = self._check_delegate.get_selected()
+        if not pids:
+            return
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Удаление участков")
+        msg.setText("Вы уверены, что хотите удалить выбранные участки?")
+        msg.setInformativeText(
+            "Внимание! Будет удалена вся информация, "
+            "в том числе ранее сохранённые документы."
+        )
+        msg.setIcon(QMessageBox.Icon.Warning)
+        btn_yes = msg.addButton("Да, удалить", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("Нет", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_yes)
+        msg.exec()
+        if msg.clickedButton() is not btn_yes:
+            return
+        self._plots = [
+            p for p in self._plots
+            if str(p.get("num", "")) not in pids
+        ]
+        self._check_delegate.clear_selection()
+        self._save()
+        self._rebuild_table()
+
     def _on_toggle(self, index: QModelIndex):
         col0 = self.model.index(index.row(), 0, self.model.parent(index))
         if self.tree.isExpanded(col0):
             self.tree.collapse(col0)
         else:
             self.tree.expand(col0)
-
-    def _context_menu(self, pos: QPoint):
-        index = self.tree.indexAt(pos)
-        if not index.isValid():
-            return
-        node = index.internalPointer()
-        if node is None:
-            return
-
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu{background:#F8F9FA;border:1px solid #D1D5DB;color:#374151;
-                  font-size:13px;padding:4px;}
-            QMenu::item{padding:8px 20px;border-radius:4px;}
-            QMenu::item:selected{background:#EEF2FF;color:#DC2626;}
-        """)
-
-        if node.kind == "plot":
-            act_edit = QAction("✏️  Редактировать", self)
-            act_edit.triggered.connect(lambda: self._edit_plot(node.plot_ref))
-            menu.addAction(act_edit)
-
-            act_dist = QAction("⚖️  Распределить площадь", self)
-            act_dist.triggered.connect(lambda: self._distribute_area(node))
-            owners = node.plot_ref.get("owners", [])
-            eligible = sum(1 for o in owners if _is_owner(o))
-            act_dist.setEnabled(
-                bool(node.plot_ref.get("area")) and eligible > 0
-            )
-            menu.addAction(act_dist)
-
-            act_del = QAction("Удалить участок", self)
-            act_del.triggered.connect(lambda: self._delete_plot(node.plot_ref))
-            menu.addAction(act_del)
-        elif node.kind == "owner":
-            act_del = QAction("Удалить владельца", self)
-            act_del.triggered.connect(lambda: self._delete_owner(node))
-            menu.addAction(act_del)
-
-        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _edit_plot(self, plot: dict):
         dlg = PlotEditDialog(plot_data=plot, parent=self)
@@ -1201,58 +1894,11 @@ class PlotsWidget(QWidget):
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            if hasattr(self, "_check_delegate"):
+                self._check_delegate.remove_plot(str(plot.get("num", "")))
             self._plots = [p for p in self._plots if p is not plot]
             self._save()
             self._rebuild_table()
-
-    def _delete_owner(self, owner_node: _PlotNode):
-        owners = owner_node.plot_ref.get("owners", [])
-        idx = owner_node.owner_idx
-        if idx >= len(owners):
-            return
-        name = owners[idx]
-        reply = QMessageBox.question(
-            self, "Удаление владельца",
-            f"Удалить «{name}» из участка № {owner_node.plot_ref.get('num', '?')}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.model.remove_owner(owner_node)
-            self._save()
-
-    def _distribute_area(self, plot_node: _PlotNode):
-        plot = plot_node.plot_ref
-        try:
-            total = float(plot.get("area") or 0)
-        except (TypeError, ValueError):
-            total = 0
-        if total <= 0:
-            QMessageBox.warning(self, "Нет площади",
-                                "У участка не указана площадь.")
-            return
-
-        owners = plot.get("owners", [])
-        eligible_idx = [i for i, o in enumerate(owners) if _is_owner(o)]
-        if not eligible_idx:
-            QMessageBox.warning(self, "Нет собственников",
-                                "Нет владельцев с отметкой «Собственник».")
-            return
-
-        share = round(total / len(eligible_idx), 2)
-        area_col = PlotsTreeModel.COLUMNS.index("Площадь, м²")
-
-        for child in plot_node.children:
-            if child.owner_idx not in eligible_idx:
-                continue
-            o = owners[child.owner_idx]
-            owners[child.owner_idx] = _make_owner(
-                _owner_name(o), _is_owner(o), share, _is_visible(o),
-                _owner_member_doc(o), _owner_opd_doc(o))
-            mi = self.model.createIndex(child.row(), area_col, child)
-            self.model.dataChanged.emit(mi, mi)
-
-        self._save()
 
     def _import_from_excel(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1593,6 +2239,19 @@ class _OpdDocWidget(_MemberDocWidget):
         )
 
 
+class _EgrnDocWidget(_MemberDocWidget):
+    """Кнопки управления выпиской ЕГРН участка."""
+
+    def __init__(self, doc_path: str = "", parent=None):
+        super().__init__(
+            doc_path,
+            open_char=chr(0xE73A),  # real_estate_agent
+            upload_tip="Загрузить выписку ЕГРН",
+            open_tip="Открыть выписку ЕГРН",
+            parent=parent,
+        )
+
+
 # ============================================================================ #
 #  PlotEditDialog                                                              #
 # ============================================================================ #
@@ -1652,6 +2311,9 @@ class PlotEditDialog(QDialog):
         ) if "." in t else None)
         self.inp_area.textChanged.connect(self._update_save_state)
         form.addRow("Площадь, м²:", self.inp_area)
+
+        self._egrn_doc = _EgrnDocWidget(self._plot_data.get("egrn_doc", ""))
+        form.addRow("Выписка ЕГРН:", self._egrn_doc)
         lay.addLayout(form)
 
         # Заголовок секции владельцев с иконкой-подсказкой для чекбокса
@@ -1660,7 +2322,7 @@ class PlotEditDialog(QDialog):
         hdr_lay = QHBoxLayout(hdr_row)
         hdr_lay.setContentsMargins(0, 0, 0, 0)
         hdr_lay.setSpacing(6)
-        lbl_fio = QLabel("Контактное лицо, ФИО")
+        lbl_fio = QLabel("Контактное лицо")
         lbl_fio.setStyleSheet("color:#9CA3AF; font-size:12px;")
         hdr_lay.addWidget(lbl_fio, stretch=1)
         lbl_ic = QLabel("")   # article_person
@@ -1822,12 +2484,13 @@ class PlotEditDialog(QDialog):
         self._owner_emails.append(email_inp)
         rlay.addWidget(email_inp)
 
-        btn = QPushButton("✕")
+        btn = QPushButton(chr(0xE92B))
         btn.setFixedSize(28, 28)
+        btn.setFont(QFont("Material Symbols Rounded", 16))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(
-            "QPushButton{background:#2a1a1a;border:1px solid #5a2a2a;"
-            "border-radius:5px;color:#DC2626;font-size:12px;}"
-            "QPushButton:hover{background:#3a2020;}"
+            "QPushButton{background:transparent;border:none;color:#DC2626;}"
+            "QPushButton:hover{color:#B91C1C;}"
         )
         btn.clicked.connect(
             lambda _, r=row, i=inp, c=chk, v=vis, m=mem_doc, o=opd_doc, a=area_inp,
@@ -1873,13 +2536,17 @@ class PlotEditDialog(QDialog):
             total = None
         if total is not None:
             owner_sum = 0.0
+            n_filled = 0
             for a in self._owner_areas:
                 raw = a.text().replace(",", ".")
-                try:
-                    owner_sum += float(raw) if raw.strip() else 0.0
-                except ValueError:
-                    pass
-            area_ok = owner_sum <= total
+                if raw.strip():
+                    try:
+                        owner_sum += float(raw)
+                        n_filled += 1
+                    except ValueError:
+                        pass
+            # Допуск: max ошибка округления до 2 знаков на каждого заполненного собственника
+            area_ok = owner_sum <= total + n_filled * 0.005 + 1e-9
         ok = fio_ok and area_ok
         self._btn_save.setEnabled(ok)
         self._btn_save.setCursor(
@@ -1955,6 +2622,9 @@ class PlotEditDialog(QDialog):
         result = {"num": num, "owners": owners}
         if area_val is not None:
             result["area"] = area_val
+        egrn_path = self._egrn_doc.get_path()
+        if egrn_path:
+            result["egrn_doc"] = egrn_path
         for k in ("billing_type", "meter_commission_date", "meter_act_number",
                   "meter_location", "norm_kw", "norm_start_date",
                   "direct_contract_date", "direct_contract_number", "billing_history"):
