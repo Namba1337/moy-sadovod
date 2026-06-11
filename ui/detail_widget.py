@@ -1,26 +1,28 @@
 import hashlib
 import json
 import os
+import time
 
 import pandas as pd
 from PyQt6.QtCore import (
-    Qt, QDate, QEvent, QPoint, QRect, QModelIndex, QAbstractItemModel, pyqtSignal,
+    Qt, QDate, QEvent, QPoint, QRect, QRectF, QModelIndex, QAbstractItemModel, pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QPainter, QPen, QPolygon
+from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygon
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
-    QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QTreeView,
-    QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QTreeView, QVBoxLayout, QWidget,
 )
 
 from ui.categorization import (
-    CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization, categorize_row,
+    CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization,
     save_user_categories, save_user_category_color, rename_user_category,
     delete_user_category, PROTECTED_CATEGORIES,
 )
-from ui.plot_detection import apply_plot_column, get_plot, _PLOTS_FILE, load_plot_numbers
+from ui.plot_detection import apply_plot_column, _PLOTS_FILE, load_plot_numbers
+from ui.plots_widget import _ClipFrame
 
 
 # =========================================================================== #
@@ -158,6 +160,8 @@ _MULTI_OP_LABEL = "Мультиоперация"
 _MULTI_OP_COLOR = QColor(110, 110, 118)   # приглушённый серый
 # Служебный столбец управления (стрелка/＋/корзина). Хранится первым в модели.
 _CTRL_COL = "\x00ctrl"
+# Служебный столбец кнопки редактирования. Хранится последним в модели.
+_EDIT_COL = "\x00edit"
 # Колонки, отображаемые в строке-ветке (split). «Контрагент» — копия из операции.
 _SPLIT_DISPLAY_COLS = ("Контрагент", "Сумма", "Категория", "Участок")
 # Из них реально редактируемые в ветке.
@@ -204,7 +208,7 @@ class OperationsTreeModel(QAbstractItemModel):
     def load(self, columns: list[str], records: list[tuple]):
         """records: список (df_idx, data_dict, breakdown_list)."""
         self.beginResetModel()
-        self._columns = [_CTRL_COL] + list(columns)
+        self._columns = list(columns) + [_EDIT_COL]
         root = _Node("root", {})
         for df_idx, data, breakdown in records:
             op = _Node("op", data, df_idx=df_idx, parent=root)
@@ -264,8 +268,8 @@ class OperationsTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         col = self._columns[index.column()]
 
-        # Служебный столбец — всё рисует делегат, модель данных не отдаёт.
-        if col == _CTRL_COL:
+        # Служебные столбцы — всё рисует делегат, модель данных не отдаёт.
+        if col in (_CTRL_COL, _EDIT_COL):
             return None
 
         if role == MANUAL_ROLE:
@@ -301,6 +305,8 @@ class OperationsTreeModel(QAbstractItemModel):
                 return QColor("#374151")
 
         if role == Qt.ItemDataRole.BackgroundRole:
+            if node.kind == "split":
+                return None
             cat = str(node.data.get("Категория", ""))
             return CATEGORY_COLORS.get(cat, _DEFAULT_ROW_COLOR)
 
@@ -315,7 +321,9 @@ class OperationsTreeModel(QAbstractItemModel):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             if 0 <= section < len(self._columns):
                 name = self._columns[section]
-                return "" if name == _CTRL_COL else name
+                if name == _CTRL_COL:   return ""
+                if name == _EDIT_COL:   return chr(0xE3C9)
+                return name
         return None
 
     # -- редактирование ----------------------------------------------------- #
@@ -325,7 +333,7 @@ class OperationsTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         col = self._columns[index.column()]
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if col == _CTRL_COL:
+        if col in (_CTRL_COL, _EDIT_COL):
             return f
         if node.kind == "op":
             # Категория и Участок недоступны для редактирования у строк с дочерними
@@ -365,7 +373,7 @@ class OperationsTreeModel(QAbstractItemModel):
 
     # -- сортировка --------------------------------------------------------- #
     def sort(self, column, order=Qt.SortOrder.AscendingOrder):
-        if 0 <= column < len(self._columns) and self._columns[column] == _CTRL_COL:
+        if 0 <= column < len(self._columns) and self._columns[column] in (_CTRL_COL, _EDIT_COL):
             return
         self._sort_col = column
         self._sort_order = order
@@ -377,7 +385,7 @@ class OperationsTreeModel(QAbstractItemModel):
         if self._sort_col is None or not (0 <= self._sort_col < len(self._columns)):
             return
         col = self._columns[self._sort_col]
-        if col == _CTRL_COL:
+        if col in (_CTRL_COL, _EDIT_COL):
             return
         reverse = self._sort_order == Qt.SortOrder.DescendingOrder
 
@@ -438,10 +446,11 @@ class _CategoryDelegate(_CellDelegate):
     при редактировании создаёт QComboBox «на лету»."""
 
     # Цвета фона/hover/выделения совпадают с _TREE_STYLE
-    _BG       = QColor("#F9FAFB")
+    _BG       = QColor("#FFFFFF")
+    _BG_ALT   = QColor("#F0F4F8")
     _BG_HOVER = QColor("#DDE4EE")
     _BG_SEL   = QColor("#C9D8E2")
-    _BORDER   = QColor("#D8DDE6")
+    _BORDER   = QColor("#E3E8EF")
     _TXT_SEL  = QColor("#07414F")
 
     def __init__(self, items: list[str], parent=None):
@@ -463,23 +472,24 @@ class _CategoryDelegate(_CellDelegate):
             return
 
         painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         rect = option.rect
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
-        # 1. Фон ячейки
+        # 1. Фон ячейки (антиалиасинг выключен — линии должны быть чёткими)
+        is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
         if selected:
             painter.fillRect(rect, self._BG_SEL)
         elif hovered:
             painter.fillRect(rect, self._BG_HOVER)
         else:
-            painter.fillRect(rect, self._BG)
+            painter.fillRect(rect, self._BG_ALT if is_alt else self._BG)
 
         # 2. Нижняя граница строки
         painter.setPen(QPen(self._BORDER, 1))
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # 3. Цвета овала из HSL базового цвета
         h, s, l, _ = color.getHslF()
@@ -491,12 +501,13 @@ class _CategoryDelegate(_CellDelegate):
 
         # 4. Геометрия овала
         v = max(3, (rect.height() - 20) // 2)
-        pill = rect.adjusted(6, v, -6, -v)
-        radius = pill.height() // 2
+        pill   = rect.adjusted(6, v, -6, -v)
+        pill_f = QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius_f = pill_f.height() / 2.0
 
         painter.setPen(QPen(pill_bd, 1))
         painter.setBrush(pill_bg)
-        painter.drawRoundedRect(pill, radius, radius)
+        painter.drawRoundedRect(pill_f, radius_f, radius_f)
 
         # 5. Текст
         painter.setPen(self._TXT_SEL if selected else pill_tx)
@@ -524,39 +535,41 @@ class _CategoryDelegate(_CellDelegate):
     def _paint_hatched(self, painter, option):
         """Овал с диагональной штриховкой для строки-мультиоперации."""
         painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         rect = option.rect
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
+        is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
         if selected:
             painter.fillRect(rect, self._BG_SEL)
         elif hovered:
             painter.fillRect(rect, self._BG_HOVER)
         else:
-            painter.fillRect(rect, self._BG)
+            painter.fillRect(rect, self._BG_ALT if is_alt else self._BG)
 
         painter.setPen(QPen(self._BORDER, 1))
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         v = max(3, (rect.height() - 20) // 2)
-        pill = rect.adjusted(6, v, -6, -v)
-        radius = pill.height() // 2
+        pill   = rect.adjusted(6, v, -6, -v)
+        pill_f = QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius_f = pill_f.height() / 2.0
 
         # Светлый фон овала
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(234, 234, 238))
-        painter.drawRoundedRect(pill, radius, radius)
+        painter.drawRoundedRect(pill_f, radius_f, radius_f)
 
         # Диагональная штриховка
         painter.setBrush(QBrush(QColor(185, 185, 193), Qt.BrushStyle.BDiagPattern))
-        painter.drawRoundedRect(pill, radius, radius)
+        painter.drawRoundedRect(pill_f, radius_f, radius_f)
 
         # Граница
         painter.setPen(QPen(QColor(165, 165, 173), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(pill, radius, radius)
+        painter.drawRoundedRect(pill_f, radius_f, radius_f)
 
         painter.restore()
 
@@ -655,17 +668,24 @@ class _CategoryPillButton(QWidget):
 
     # ---- Display --------------------------------------------------------- #
 
-    def _chip_style(self, r: int, g: int, b: int) -> str:
+    def _chip_style(self, color: QColor) -> str:
+        h, s, l, _ = color.getHslF()
+        if h < 0:
+            h, s = 0.0, 0.0
+        bg = QColor.fromHslF(h, min(s * 0.65, 1.0), 0.91)
+        bd = QColor.fromHslF(h, min(s * 1.00, 1.0), 0.52)
+        tx = QColor.fromHslF(h, min(s * 1.20, 1.0), 0.18)
+        bg_h = bg.darker(108)
         return (
             f"QPushButton {{"
-            f"  background: rgba({r},{g},{b},38);"
-            f"  border: 1px solid rgba({r},{g},{b},160);"
+            f"  background: {bg.name()};"
+            f"  border: 1px solid {bd.name()};"
             f"  border-radius: 11px;"
-            f"  color: rgb({max(0,r-40)},{max(0,g-40)},{max(0,b-40)});"
+            f"  color: {tx.name()};"
             f"  padding: 4px 14px; font-size: 12px; font-weight: 500;"
             f"  min-height: 22px;"
             f"}}"
-            f"QPushButton:hover {{ background: rgba({r},{g},{b},70); }}"
+            f"QPushButton:hover {{ background: {bg_h.name()}; }}"
         )
 
     def _neutral_style(self) -> str:
@@ -686,9 +706,7 @@ class _CategoryPillButton(QWidget):
 
         color = CATEGORY_COLORS.get(text)
         if color:
-            self._btn.setStyleSheet(
-                self._chip_style(color.red(), color.green(), color.blue())
-            )
+            self._btn.setStyleSheet(self._chip_style(color))
         else:
             self._btn.setStyleSheet(
                 "QPushButton {"
@@ -703,35 +721,20 @@ class _CategoryPillButton(QWidget):
     def _open_menu(self):
         if not self._items:
             return
-        menu = QMenu(self)
-        menu.setStyleSheet(
-            "QMenu {"
-            "  background: #FFFFFF; border: 1px solid #D5DCE4;"
-            "  border-radius: 8px; padding: 4px;"
-            "}"
-            "QMenu::item {"
-            "  padding: 6px 16px; font-size: 13px; color: #1F2937; border-radius: 4px;"
-            "}"
-            "QMenu::item:selected { background: #F3F4F6; }"
-        )
-        for i, item in enumerate(self._items):
-            act = menu.addAction(item)
-            act.setCheckable(True)
-            act.setChecked(i == self._current_idx)
-            act.triggered.connect(lambda checked, idx=i: self.setCurrentIndex(idx))
-        menu.exec(
-            self._btn.mapToGlobal(self._btn.rect().bottomLeft() + QPoint(0, 2))
-        )
+        popup = _SingleCatPopup(self._items, self._current_idx)
+        popup.itemSelected.connect(self.setCurrentIndex)
+        popup.show_at(self._btn.mapToGlobal(self._btn.rect().bottomLeft() + QPoint(0, 2)))
 
 
 class _PlotDelegate(_CellDelegate):
     """Делегат колонки «Участок»: выпадающий список номеров участков из БД.
     Для строк-мультиопераций рисует заштрихованный овал вместо значения."""
 
-    _BG       = QColor("#F9FAFB")
+    _BG       = QColor("#FFFFFF")
+    _BG_ALT   = QColor("#F0F4F8")
     _BG_HOVER = QColor("#DDE4EE")
     _BG_SEL   = QColor("#C9D8E2")
-    _BORDER   = QColor("#D8DDE6")
+    _BORDER   = QColor("#E3E8EF")
 
     def __init__(self, items: list[str], parent=None):
         super().__init__(parent)
@@ -740,33 +743,35 @@ class _PlotDelegate(_CellDelegate):
     def paint(self, painter, option, index):
         if index.data(Qt.ItemDataRole.DisplayRole) == _MULTI_OP_LABEL:
             painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
             rect = option.rect
+            is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
             if option.state & QStyle.StateFlag.State_Selected:
                 painter.fillRect(rect, self._BG_SEL)
             elif option.state & QStyle.StateFlag.State_MouseOver:
                 painter.fillRect(rect, self._BG_HOVER)
             else:
-                painter.fillRect(rect, self._BG)
+                painter.fillRect(rect, self._BG_ALT if is_alt else self._BG)
 
             painter.setPen(QPen(self._BORDER, 1))
             painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
             v = max(3, (rect.height() - 20) // 2)
-            pill = rect.adjusted(6, v, -6, -v)
-            radius = pill.height() // 2
+            pill   = rect.adjusted(6, v, -6, -v)
+            pill_f = QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5)
+            radius_f = pill_f.height() / 2.0
 
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(234, 234, 238))
-            painter.drawRoundedRect(pill, radius, radius)
+            painter.drawRoundedRect(pill_f, radius_f, radius_f)
 
             painter.setBrush(QBrush(QColor(185, 185, 193), Qt.BrushStyle.BDiagPattern))
-            painter.drawRoundedRect(pill, radius, radius)
+            painter.drawRoundedRect(pill_f, radius_f, radius_f)
 
             painter.setPen(QPen(QColor(165, 165, 173), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(pill, radius, radius)
+            painter.drawRoundedRect(pill_f, radius_f, radius_f)
 
             painter.restore()
             return
@@ -802,205 +807,242 @@ class _PlotDelegate(_CellDelegate):
         editor.setGeometry(option.rect)
 
 
-# =========================================================================== #
-#  Делегат служебного столбца (стрелка / ＋ / корзина)                          #
-# =========================================================================== #
+class _BranchColumnDelegate(_CellDelegate):
+    """Делегат колонки «Контрагент»:
+    - op-строки с детьми: текст + пилюля «Показать/Свернуть (N)»
+    - split-строки: линии дерева + отступ текста
+    - op-строки без детей: стандартный _CellDelegate"""
 
-class _CtrlDelegate(QStyledItemDelegate):
-    """Рисует кнопки управления в первом (служебном) столбце для операций:
-    стрелку сворачивания (если есть ветки) и зелёную «＋» (добавить ветку).
-    Корзина веток живёт в колонке «Контрагент» (см. _BranchColumnDelegate).
-
-    Клики ловятся в editorEvent и транслируются наружу сигналами. Геометрия
-    кнопок одинакова для всех строк (indentation у дерева = 0)."""
-
-    addBranchRequested = pyqtSignal(QModelIndex)
     toggleRequested = pyqtSignal(QModelIndex)
 
-    _ARROW_COLOR = QColor("#5B6675")
-    _PLUS_BG = QColor("#D6F0DC")
-    _PLUS_FG = QColor("#15803D")
-    _BG = QColor("#F9FAFB")
-    _BG_HOVER = QColor("#DDE4EE")
-    _BG_SEL = QColor("#C9D8E2")
-    _BORDER = QColor("#D8DDE6")
-    _PLUS_W, _PLUS_H = 24, 20
+    _BTN_BG     = QColor("#E8F0F5")
+    _BTN_BG_H   = QColor("#C9D8E2")
+    _BTN_FG     = QColor("#07414F")
+    _BTN_BORDER = QColor("#B5C8D5")
+    _BTN_H      = 22
+    _LINE_COLOR = QColor("#B5C8D5")
+    _BG         = QColor("#FFFFFF")
+    _BG_ALT     = QColor("#F0F4F8")
+    _BG_HOVER   = QColor("#DDE4EE")
+    _BG_SEL     = QColor("#C9D8E2")
+    _BORDER     = QColor("#E3E8EF")
+    _TXT        = QColor("#1F2937")
+    _TXT_SEL    = QColor("#07414F")
+    _TRUNK_X    = 12
+    _SPLIT_PAD  = 24
 
     def __init__(self, view):
         super().__init__(view)
         self._view = view
+        self._hover_btn_idx = QModelIndex()
+        view.viewport().installEventFilter(self)
 
     @staticmethod
-    def _icon_font(px: int = 15) -> QFont:
-        f = QFont("Material Icons")
-        f.setPixelSize(px)
+    def _btn_font() -> QFont:
+        f = QFont()
+        f.setPixelSize(11)
+        f.setBold(True)
         return f
 
-    # -- геометрия кнопок (от левого края ячейки) --------------------------- #
-    def _arrow_rect(self, rect) -> QRect:
-        return QRect(rect.left() + 2, rect.top(), 22, rect.height())
+    def _btn_rect(self, cell_rect: QRect, n: int) -> QRect:
+        f_btn = self._btn_font()
+        btn_w = QFontMetrics(f_btn).horizontalAdvance(f"Свернуть ({n})") + 20
+        y = cell_rect.top() + (cell_rect.height() - self._BTN_H) // 2
+        x = cell_rect.right() - btn_w - 6
+        return QRect(x, y, btn_w, self._BTN_H)
 
-    def _plus_rect(self, rect) -> QRect:
-        y = rect.top() + (rect.height() - self._PLUS_H) // 2
-        return QRect(rect.left() + 26, y, self._PLUS_W, self._PLUS_H)
-
-    # -- отрисовка ---------------------------------------------------------- #
-    def paint(self, painter, option, index):
-        painter.save()
-        if option.state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(option.rect, self._BG_SEL)
-        elif option.state & QStyle.StateFlag.State_MouseOver:
-            painter.fillRect(option.rect, self._BG_HOVER)
+    def _update_btn_hover(self, pos):
+        new_hover = QModelIndex()
+        if pos is not None:
+            idx = self._view.indexAt(pos)
+            if idx.isValid():
+                node = idx.internalPointer()
+                if node is not None and node.kind == "op" and node.children:
+                    rect = self._view.visualRect(idx)
+                    if self._btn_rect(rect, len(node.children)).contains(pos):
+                        new_hover = idx
+        if new_hover != self._hover_btn_idx:
+            old = self._hover_btn_idx
+            self._hover_btn_idx = new_hover
+            if old.isValid():
+                self._view.update(old)
+            if new_hover.isValid():
+                self._view.update(new_hover)
+        if new_hover.isValid():
+            self._view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
         else:
-            painter.fillRect(option.rect, self._BG)
-        painter.setPen(self._BORDER)
-        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+            self._view.viewport().unsetCursor()
 
+    def eventFilter(self, obj, event):
+        if obj is self._view.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                self._update_btn_hover(event.position().toPoint())
+            elif event.type() == QEvent.Type.Leave:
+                self._update_btn_hover(None)
+        return False
+
+    def paint(self, painter, option, index):
         node = index.internalPointer()
         if node is None:
-            painter.restore()
-            return
-        rect = option.rect
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        if node.kind == "op":
-            model = self._view.model()
-            if model is not None and model.hasChildren(index):
-                self._paint_arrow(painter, self._arrow_rect(rect), self._view.isExpanded(index))
-            self._paint_btn(painter, self._plus_rect(rect), "", self._PLUS_BG, self._PLUS_FG)
-        painter.restore()
-
-    def _paint_arrow(self, painter, rect, expanded):
-        painter.save()
-        painter.setBrush(self._ARROW_COLOR)
-        painter.setPen(Qt.PenStyle.NoPen)
-        cx = rect.left() + rect.width() // 2
-        cy = rect.top() + rect.height() // 2
-        if expanded:
-            pts = [QPoint(cx - 4, cy - 2), QPoint(cx + 4, cy - 2), QPoint(cx, cy + 3)]
-        else:
-            pts = [QPoint(cx - 2, cy - 4), QPoint(cx + 3, cy), QPoint(cx - 2, cy + 4)]
-        painter.drawPolygon(QPolygon(pts))
-        painter.restore()
-
-    def _paint_btn(self, painter, rect, glyph, bg, fg):
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setBrush(bg)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(rect, 5, 5)
-        painter.setPen(fg)
-        painter.setFont(self._icon_font(15))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, glyph)
-        painter.restore()
-
-    # -- клики -------------------------------------------------------------- #
-    def editorEvent(self, event, model, option, index):
-        if (event.type() == QEvent.Type.MouseButtonRelease
-                and event.button() == Qt.MouseButton.LeftButton):
-            node = index.internalPointer()
-            pos = event.position().toPoint()
-            rect = option.rect
-            if node is not None:
-                if node.kind == "op":
-                    if model.hasChildren(index) and self._arrow_rect(rect).contains(pos):
-                        self.toggleRequested.emit(index)
-                        return True
-                    if self._plus_rect(rect).contains(pos):
-                        self.addBranchRequested.emit(index)
-                        return True
-        return super().editorEvent(event, model, option, index)
-
-
-class _BranchColumnDelegate(_CellDelegate):
-    """Делегат колонки «Контрагент». Для строк-веток (split) рисует слева
-    соединительные линии дерева (├─ / └─) и кнопку-корзину, а сам текст
-    контрагента сдвигает вправо — так визуально видно вложенность ветки в
-    операцию. Для строк-операций ведёт себя как обычный _CellDelegate
-    (текст + карандаш ручной правки)."""
-
-    deleteBranchRequested = pyqtSignal(QModelIndex)
-
-    _LINE_COLOR = QColor("#9AA4B5")
-    _TRASH_BG = QColor("#FEE2E2")
-    _TRASH_FG = QColor("#B91C1C")
-    _BG = QColor("#F9FAFB")
-    _BG_HOVER = QColor("#DDE4EE")
-    _BG_SEL = QColor("#C9D8E2")
-    _BORDER = QColor("#D8DDE6")
-    _TXT = QColor("#1F2937")
-    _TXT_SEL = QColor("#07414F")
-    _TRUNK_X = 16        # X вертикального «ствола» от левого края ячейки
-    _ELBOW_END = 30      # докуда идёт горизонтальное «ответвление»
-    _TRASH_X, _TRASH_W, _TRASH_H = 34, 24, 20
-    _TEXT_PAD = 64       # отступ текста контрагента вправо
-
-    def _trash_rect(self, rect) -> QRect:
-        y = rect.top() + (rect.height() - self._TRASH_H) // 2
-        return QRect(rect.left() + self._TRASH_X, y, self._TRASH_W, self._TRASH_H)
-
-    def paint(self, painter, option, index):
-        node = index.internalPointer()
-        if node is None or node.kind != "split":
             super().paint(painter, option, index)
             return
 
         rect = option.rect
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
-        # фон + нижняя граница строки (как у соседних ячеек)
-        if selected:
-            painter.fillRect(rect, self._BG_SEL)
-        elif option.state & QStyle.StateFlag.State_MouseOver:
-            painter.fillRect(rect, self._BG_HOVER)
-        else:
-            painter.fillRect(rect, self._BG)
-        painter.setPen(self._BORDER)
-        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        if node.kind == "split":
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-        # соединительные линии дерева: ствол + ответвление (└─ для последней ветки)
-        model = index.model()
-        is_last = index.row() == model.rowCount(index.parent()) - 1
-        midy = rect.top() + rect.height() // 2
-        tx = rect.left() + self._TRUNK_X
-        painter.setPen(QPen(self._LINE_COLOR, 1.4))
-        painter.drawLine(tx, rect.top(), tx, midy if is_last else rect.bottom())
-        painter.drawLine(tx, midy, rect.left() + self._ELBOW_END, midy)
+            is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
+            if selected:
+                bg = self._BG_SEL
+            elif hovered:
+                bg = self._BG_HOVER
+            else:
+                bg = self._BG_ALT if is_alt else self._BG
+            painter.fillRect(rect, bg)
+            painter.setPen(QPen(self._BORDER, 1))
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
 
-        # кнопка-корзина
-        tr = self._trash_rect(rect)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(self._TRASH_BG)
-        painter.drawRoundedRect(tr, 5, 5)
-        painter.setPen(self._TRASH_FG)
-        f = QFont("Material Icons")
-        f.setPixelSize(15)
-        painter.setFont(f)
-        painter.drawText(tr, Qt.AlignmentFlag.AlignCenter, "")
+            model_obj = index.model()
+            is_last = index.row() == model_obj.rowCount(index.parent()) - 1
+            midy = rect.top() + rect.height() // 2
+            cx = rect.left() + self._TRUNK_X
+            painter.setPen(QPen(self._LINE_COLOR, 1))
+            painter.drawLine(cx, rect.top(), cx, midy if is_last else rect.bottom())
+            painter.drawLine(cx, midy, cx + 10, midy)
 
-        # текст контрагента — со сдвигом вправо
-        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
-        if text:
-            painter.setFont(option.font)
+            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+            if text:
+                painter.setFont(option.font)
+                painter.setPen(self._TXT_SEL if selected else self._TXT)
+                txt_rect = rect.adjusted(self._SPLIT_PAD, 0, -6, 0)
+                elided = painter.fontMetrics().elidedText(
+                    str(text), Qt.TextElideMode.ElideRight, txt_rect.width())
+                painter.drawText(
+                    txt_rect,
+                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                    elided,
+                )
+            painter.restore()
+
+        elif node.kind == "op" and node.children:
+            painter.save()
+
+            # Фон и нижняя граница — строго без антиалиасинга, иначе 1px-линия
+            # размазывается и не совпадает с QSS-границей соседних колонок.
+            is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
+            if selected:
+                bg = self._BG_SEL
+            elif hovered:
+                bg = self._BG_HOVER
+            else:
+                bg = self._BG_ALT if is_alt else self._BG
+            painter.fillRect(rect, bg)
+            painter.setPen(QPen(self._BORDER, 1))
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+            n = len(node.children)
+            col0 = self._view.model().index(index.row(), 0,
+                                            self._view.model().parent(index))
+            is_expanded = self._view.isExpanded(col0)
+            label = f"Свернуть ({n})" if is_expanded else f"Показать ({n})"
+            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+            btn = self._btn_rect(rect, n)
+
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            btn_bg = self._BTN_BG_H if self._hover_btn_idx == index else self._BTN_BG
+            painter.setBrush(btn_bg)
+            painter.setPen(QPen(self._BTN_BORDER, 1))
+            painter.drawRoundedRect(
+                QRectF(btn).adjusted(0.5, 0.5, -0.5, -0.5),
+                self._BTN_H / 2.0, self._BTN_H / 2.0,
+            )
+
+            f_btn = self._btn_font()
+            painter.setPen(self._BTN_FG)
+            painter.setFont(f_btn)
+            painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, label)
+
+            text_rect = QRect(
+                rect.left() + 8, rect.top(),
+                btn.left() - rect.left() - 10, rect.height(),
+            )
             painter.setPen(self._TXT_SEL if selected else self._TXT)
-            txt_rect = rect.adjusted(self._TEXT_PAD, 0, -6, 0)
+            painter.setFont(option.font)
             elided = painter.fontMetrics().elidedText(
-                str(text), Qt.TextElideMode.ElideRight, txt_rect.width())
+                str(text), Qt.TextElideMode.ElideRight, text_rect.width())
             painter.drawText(
-                txt_rect,
-                int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                text_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 elided,
             )
-        painter.restore()
+
+            if index.data(MANUAL_ROLE):
+                painter.setFont(self._icon_font())
+                painter.setPen(
+                    QColor(255, 255, 255, 180) if selected else QColor("#9CA3AF")
+                )
+                painter.drawText(
+                    rect.adjusted(0, 0, -4, 0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                    self._CHAR,
+                )
+
+            painter.restore()
+
+        else:
+            # Обычные op-строки рисуем той же процедурой, что и строки с кнопкой:
+            # один путь рендеринга на всю колонку — иначе фон/отступы чуть «гуляют».
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+            is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
+            if selected:
+                bg = self._BG_SEL
+            elif hovered:
+                bg = self._BG_HOVER
+            else:
+                bg = self._BG_ALT if is_alt else self._BG
+            painter.fillRect(rect, bg)
+            painter.setPen(QPen(self._BORDER, 1))
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+            if text:
+                painter.setFont(option.font)
+                painter.setPen(self._TXT_SEL if selected else self._TXT)
+                txt_rect = rect.adjusted(8, 0, -6, 0)
+                elided = painter.fontMetrics().elidedText(
+                    str(text), Qt.TextElideMode.ElideRight, txt_rect.width())
+                painter.drawText(
+                    txt_rect,
+                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                    elided,
+                )
+
+            if index.data(MANUAL_ROLE):
+                painter.setFont(self._icon_font())
+                painter.setPen(
+                    QColor(255, 255, 255, 180) if selected else QColor("#9CA3AF")
+                )
+                painter.drawText(
+                    rect.adjusted(0, 0, -4, 0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                    self._CHAR,
+                )
+            painter.restore()
 
     def editorEvent(self, event, model, option, index):
         node = index.internalPointer()
-        if (node is not None and node.kind == "split"
+        if (node is not None and node.kind == "op" and node.children
                 and event.type() == QEvent.Type.MouseButtonRelease
                 and event.button() == Qt.MouseButton.LeftButton):
-            if self._trash_rect(option.rect).contains(event.position().toPoint()):
-                self.deleteBranchRequested.emit(index)
+            btn = self._btn_rect(option.rect, len(node.children))
+            if btn.contains(event.position().toPoint()):
+                self.toggleRequested.emit(index)
                 return True
         return super().editorEvent(event, model, option, index)
 
@@ -1499,6 +1541,91 @@ class LoadSettingsDialog(QDialog):
         return self.chk_merge.isChecked() if self.chk_merge else False
 
 
+# =========================================================================== #
+#  Виджет строки разбивки (для Add/Edit диалогов)                             #
+# =========================================================================== #
+
+class _SplitRowWidget(QWidget):
+    """Одна строка разбивки: Сумма / Категория / Участок / кнопка удаления."""
+
+    deleteRequested = pyqtSignal(object)  # self
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(6)
+
+        self.inp_summa = QLineEdit()
+        self.inp_summa.setPlaceholderText("Сумма")
+        self.inp_summa.setMaximumWidth(120)
+        lay.addWidget(self.inp_summa)
+
+        self.combo_cat = _CategoryPillButton(neutral_label="")
+        for cat in ALL_CATEGORIES:
+            self.combo_cat.addItem(cat)
+        if ALL_CATEGORIES:
+            self.combo_cat.setCurrentIndex(0)
+        lay.addWidget(self.combo_cat, stretch=1)
+
+        self.combo_plot = QComboBox()
+        self.combo_plot.setEditable(True)
+        self.combo_plot.addItem("")
+        self._fill_plot_combo()
+        self.combo_plot.setMaximumWidth(100)
+        lay.addWidget(self.combo_plot)
+
+        btn_del = QPushButton("✕")
+        btn_del.setFixedSize(26, 26)
+        btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_del.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_del.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            " color: #9CA3AF; font-size: 14px; font-weight: 600; border-radius: 4px; }"
+            "QPushButton:hover { background: #FEE2E2; color: #B91C1C; }"
+        )
+        btn_del.clicked.connect(lambda: self.deleteRequested.emit(self))
+        lay.addWidget(btn_del)
+
+    def _fill_plot_combo(self):
+        try:
+            if os.path.exists(_PLOTS_FILE):
+                with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
+                    plots = json.load(f)
+                nums = sorted(
+                    set(str(p.get("num", "")) for p in plots if p.get("num")),
+                    key=lambda s: (0, int(s), s) if s.isdigit() else (1, 0, s),
+                )
+                for num in nums:
+                    self.combo_plot.addItem(num)
+        except Exception:
+            pass
+
+    def get_data(self) -> dict:
+        raw = (self.inp_summa.text().strip()
+               .replace(",", ".").replace("−", "-").replace("–", "-").replace(" ", ""))
+        summa = 0.0
+        try:
+            summa = float(raw)
+        except ValueError:
+            pass
+        return {
+            "Сумма": summa,
+            "Категория": self.combo_cat.currentText(),
+            "Участок": self.combo_plot.currentText().strip(),
+        }
+
+    def set_data(self, data: dict):
+        num = _to_num(data.get("Сумма"))
+        if num is not None:
+            self.inp_summa.setText(_num_edit_str(num))
+        cat = str(data.get("Категория") or "")
+        idx = self.combo_cat.findText(cat)
+        if idx >= 0:
+            self.combo_cat.setCurrentIndex(idx)
+        self.combo_plot.setEditText(str(data.get("Участок") or ""))
+
+
 class AddRowDialog(QDialog):
     """Диалог ручного добавления операции в таблицу Детализации."""
 
@@ -1536,22 +1663,12 @@ class AddRowDialog(QDialog):
         self.inp_nazn.setPlaceholderText("Назначение платежа")
         form.addRow("Назначение:", self.inp_nazn)
 
-        cat_row = QHBoxLayout()
-        cat_row.setSpacing(6)
         self.combo_cat = _CategoryPillButton(neutral_label="")
         for cat in ALL_CATEGORIES:
             self.combo_cat.addItem(cat)
         if ALL_CATEGORIES:
             self.combo_cat.setCurrentIndex(0)
-        cat_row.addWidget(self.combo_cat, stretch=1)
-        btn_auto = QPushButton("Определить")
-        btn_auto.setObjectName("btnSecondary")
-        btn_auto.setFixedWidth(110)
-        btn_auto.clicked.connect(self._auto_detect)
-        cat_row.addWidget(btn_auto)
-        cat_widget = QWidget()
-        cat_widget.setLayout(cat_row)
-        form.addRow("Категория:", cat_widget)
+        form.addRow("Категория:", self.combo_cat)
 
         self.combo_plot = QComboBox()
         self.combo_plot.setEditable(True)
@@ -1560,6 +1677,43 @@ class AddRowDialog(QDialog):
         form.addRow("Участок:", self.combo_plot)
 
         lay.addLayout(form)
+
+        # ---- секция разбивки операции ----
+        self._split_rows: list[_SplitRowWidget] = []
+
+        self._btn_split = QPushButton("  Разделить операцию")
+        self._btn_split.setObjectName("btnSplit")
+        self._btn_split.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_split.clicked.connect(self._on_split_toggle)
+        lay.addWidget(self._btn_split)
+
+        self._split_section = QWidget()
+        self._split_section.setVisible(False)
+        split_lay = QVBoxLayout(self._split_section)
+        split_lay.setContentsMargins(0, 0, 0, 0)
+        split_lay.setSpacing(4)
+
+        hdr = QHBoxLayout()
+        for lbl in ("Сумма", "Категория", "Участок", ""):
+            l = QLabel(lbl)
+            l.setStyleSheet("color:#6B7280; font-size:11px; font-weight:600;")
+            hdr.addWidget(l, stretch=(2 if lbl == "Категория" else (0 if lbl == "" else 1)))
+        split_lay.addLayout(hdr)
+
+        self._split_rows_lay = QVBoxLayout()
+        self._split_rows_lay.setSpacing(2)
+        split_lay.addLayout(self._split_rows_lay)
+
+        self._btn_add_split = QPushButton("＋  Добавить строку")
+        self._btn_add_split.setObjectName("btnAddSplit")
+        self._btn_add_split.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_add_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_add_split.clicked.connect(self._add_split_row)
+        split_lay.addWidget(self._btn_add_split)
+
+        lay.addWidget(self._split_section)
+        # ----------------------------------
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -1575,6 +1729,35 @@ class AddRowDialog(QDialog):
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
+    def _on_split_toggle(self):
+        if self._split_section.isVisible():
+            self._split_section.setVisible(False)
+            self._btn_split.setText("  Разделить операцию")
+            for row in list(self._split_rows):
+                self._split_rows_lay.removeWidget(row)
+                row.deleteLater()
+            self._split_rows.clear()
+        else:
+            self._split_section.setVisible(True)
+            self._btn_split.setText("  Отменить разделение")
+            self._add_split_row()
+            self._add_split_row()
+        self.adjustSize()
+
+    def _add_split_row(self):
+        row = _SplitRowWidget(self._split_section)
+        row.deleteRequested.connect(self._remove_split_row)
+        self._split_rows_lay.addWidget(row)
+        self._split_rows.append(row)
+        self.adjustSize()
+
+    def _remove_split_row(self, row: "_SplitRowWidget"):
+        if row in self._split_rows:
+            self._split_rows.remove(row)
+            self._split_rows_lay.removeWidget(row)
+            row.deleteLater()
+            self.adjustSize()
+
     def _fill_plot_combo(self):
         try:
             if os.path.exists(_PLOTS_FILE):
@@ -1588,16 +1771,6 @@ class AddRowDialog(QDialog):
                     self.combo_plot.addItem(num)
         except Exception:
             pass
-
-    def _auto_detect(self):
-        row = {"Назначение": self.inp_nazn.text(), "Контрагент": self.inp_cont.text()}
-        cat = categorize_row(row)
-        idx = self.combo_cat.findText(cat)
-        if idx >= 0:
-            self.combo_cat.setCurrentIndex(idx)
-        plot = get_plot(row)
-        if plot:
-            self.combo_plot.setEditText(plot)
 
     def _on_accept(self):
         raw = (self.inp_summa.text().strip()
@@ -1616,7 +1789,7 @@ class AddRowDialog(QDialog):
         raw = (self.inp_summa.text().strip()
                .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
         d = self.date_edit.date()
-        return {
+        result = {
             "Дата":        pd.Timestamp(d.year(), d.month(), d.day()),
             "Контрагент":  self.inp_cont.text().strip(),
             "Сумма":       float(raw),
@@ -1624,6 +1797,13 @@ class AddRowDialog(QDialog):
             "Категория":   self.combo_cat.currentText(),
             "Участок":     self.combo_plot.currentText().strip(),
         }
+        if self._split_rows:
+            contragent = self.inp_cont.text().strip()
+            result["_breakdown"] = [
+                {"Контрагент": contragent, **row.get_data()}
+                for row in self._split_rows
+            ]
+        return result
 
     def _apply_styles(self):
         self.setStyleSheet("""
@@ -1647,7 +1827,750 @@ class AddRowDialog(QDialog):
             QDialogButtonBox QPushButton[text='Отмена'] {
                 background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
             }
+            QPushButton#btnSplit, QPushButton#btnAddSplit {
+                background: transparent; color: #07414F; border: 1px solid #B5C8D5;
+                border-radius: 6px; padding: 5px 14px; font-size: 12px; font-weight: 600;
+                text-align: left;
+            }
+            QPushButton#btnSplit:hover, QPushButton#btnAddSplit:hover {
+                background: #E8F0F5;
+            }
         """)
+
+
+# =========================================================================== #
+#  Делегат кнопки редактирования                                              #
+# =========================================================================== #
+
+class _DetailEditDelegate(QStyledItemDelegate):
+    """Иконка карандаша в последнем столбце; filled при hover, cursor-рука."""
+
+    _IC_EDIT  = chr(0xE3C9)
+    _IC_FONT  = "Material Symbols Rounded"
+    _IC_COLOR = QColor("#07414F")
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view      = view
+        self._hover_idx = QModelIndex()
+        self._pointing  = False
+        self._fill_tag  = QFont.Tag.fromString("FILL")
+        view.viewport().installEventFilter(self)
+
+    def _is_btn(self, index: QModelIndex) -> bool:
+        if not index.isValid():
+            return False
+        node = index.internalPointer()
+        m    = index.model()
+        cols = m.columns() if m else []
+        col  = cols[index.column()] if 0 <= index.column() < len(cols) else ""
+        return bool(node and node.kind == "op" and col == _EDIT_COL)
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if not self._is_btn(index):
+            return
+        painter.save()
+        f = QFont(self._IC_FONT)
+        f.setPixelSize(18)
+        f.setVariableAxis(self._fill_tag, 1.0 if self._hover_idx == index else 0.0)
+        painter.setFont(f)
+        painter.setPen(self._IC_COLOR)
+        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, self._IC_EDIT)
+        painter.restore()
+
+    def eventFilter(self, obj, event):
+        if obj is self._view.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                idx    = self._view.indexAt(event.position().toPoint())
+                on_btn = self._is_btn(idx)
+                if on_btn and not self._pointing:
+                    self._pointing = True
+                    QApplication.setOverrideCursor(Qt.CursorShape.PointingHandCursor)
+                elif not on_btn and self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
+                new_hover = idx if on_btn else QModelIndex()
+                if new_hover != self._hover_idx:
+                    old = self._hover_idx
+                    self._hover_idx = new_hover
+                    if old.isValid():
+                        self._view.viewport().update(self._view.visualRect(old))
+                    if new_hover.isValid():
+                        self._view.viewport().update(self._view.visualRect(new_hover))
+            elif event.type() == QEvent.Type.Leave:
+                if self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
+                if self._hover_idx.isValid():
+                    old = self._hover_idx
+                    self._hover_idx = QModelIndex()
+                    self._view.viewport().update(self._view.visualRect(old))
+        return super().eventFilter(obj, event)
+
+
+# =========================================================================== #
+#  Диалог редактирования операции                                             #
+# =========================================================================== #
+
+class EditOperationDialog(QDialog):
+    """Диалог редактирования существующей операции."""
+
+    def __init__(self, data: dict, breakdown: list = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Редактировать операцию")
+        self.setMinimumWidth(500)
+        self.setModal(True)
+        self._split_rows: list[_SplitRowWidget] = []
+        self._setup_ui()
+        self._prefill(data, breakdown or [])
+        self._apply_styles()
+
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setSpacing(14)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.date_edit = QDateEdit(QDate.currentDate(), calendarPopup=True)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setObjectName("datePicker")
+        form.addRow("Дата:", self.date_edit)
+
+        self.inp_summa = QLineEdit()
+        self.inp_summa.setPlaceholderText("например: 1500 (поступление) или -500 (списание)")
+        form.addRow("Сумма, ₽:", self.inp_summa)
+
+        self.inp_cont = QLineEdit()
+        self.inp_cont.setPlaceholderText("Организация или ФИО")
+        form.addRow("Контрагент:", self.inp_cont)
+
+        self.inp_nazn = QLineEdit()
+        self.inp_nazn.setPlaceholderText("Назначение платежа")
+        form.addRow("Назначение:", self.inp_nazn)
+
+        self.combo_cat = _CategoryPillButton(neutral_label="")
+        for cat in ALL_CATEGORIES:
+            self.combo_cat.addItem(cat)
+        if ALL_CATEGORIES:
+            self.combo_cat.setCurrentIndex(0)
+        form.addRow("Категория:", self.combo_cat)
+
+        self.combo_plot = QComboBox()
+        self.combo_plot.setEditable(True)
+        self.combo_plot.addItem("")
+        self._fill_plot_combo()
+        form.addRow("Участок:", self.combo_plot)
+
+        lay.addLayout(form)
+
+        # ---- секция разбивки операции ----
+        self._btn_split = QPushButton("  Разделить операцию")
+        self._btn_split.setObjectName("btnSplit")
+        self._btn_split.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_split.clicked.connect(self._on_split_toggle)
+        lay.addWidget(self._btn_split)
+
+        self._split_section = QWidget()
+        self._split_section.setVisible(False)
+        split_lay = QVBoxLayout(self._split_section)
+        split_lay.setContentsMargins(0, 0, 0, 0)
+        split_lay.setSpacing(4)
+
+        hdr = QHBoxLayout()
+        for lbl in ("Сумма", "Категория", "Участок", ""):
+            l = QLabel(lbl)
+            l.setStyleSheet("color:#6B7280; font-size:11px; font-weight:600;")
+            hdr.addWidget(l, stretch=(2 if lbl == "Категория" else (0 if lbl == "" else 1)))
+        split_lay.addLayout(hdr)
+
+        self._split_rows_lay = QVBoxLayout()
+        self._split_rows_lay.setSpacing(2)
+        split_lay.addLayout(self._split_rows_lay)
+
+        self._btn_add_split = QPushButton("＋  Добавить строку")
+        self._btn_add_split.setObjectName("btnAddSplit")
+        self._btn_add_split.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_add_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_add_split.clicked.connect(self._add_split_row)
+        split_lay.addWidget(self._btn_add_split)
+
+        lay.addWidget(self._split_section)
+        # ----------------------------------
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
+        lay.addWidget(sep)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def _on_split_toggle(self):
+        if self._split_section.isVisible():
+            self._split_section.setVisible(False)
+            self._btn_split.setText("  Разделить операцию")
+            for row in list(self._split_rows):
+                self._split_rows_lay.removeWidget(row)
+                row.deleteLater()
+            self._split_rows.clear()
+        else:
+            self._split_section.setVisible(True)
+            self._btn_split.setText("  Отменить разделение")
+            self._add_split_row()
+            self._add_split_row()
+        self.adjustSize()
+
+    def _add_split_row(self, data: dict = None):
+        row = _SplitRowWidget(self._split_section)
+        if data:
+            row.set_data(data)
+        row.deleteRequested.connect(self._remove_split_row)
+        self._split_rows_lay.addWidget(row)
+        self._split_rows.append(row)
+        self.adjustSize()
+
+    def _remove_split_row(self, row: "_SplitRowWidget"):
+        if row in self._split_rows:
+            self._split_rows.remove(row)
+            self._split_rows_lay.removeWidget(row)
+            row.deleteLater()
+            self.adjustSize()
+
+    def _prefill(self, data: dict, breakdown: list):
+        ts = _to_ts(data.get("Дата"))
+        if ts is not None:
+            self.date_edit.setDate(QDate(ts.year, ts.month, ts.day))
+        num = _to_num(data.get("Сумма"))
+        if num is not None:
+            self.inp_summa.setText(_num_edit_str(num))
+        self.inp_cont.setText(str(data.get("Контрагент") or ""))
+        self.inp_nazn.setText(str(data.get("Назначение") or ""))
+        cat = str(data.get("Категория") or "")
+        idx = self.combo_cat.findText(cat)
+        if idx >= 0:
+            self.combo_cat.setCurrentIndex(idx)
+        self.combo_plot.setEditText(str(data.get("Участок") or ""))
+
+        if breakdown:
+            self._split_section.setVisible(True)
+            self._btn_split.setText("  Отменить разделение")
+            for item in breakdown:
+                self._add_split_row(item)
+
+    def _fill_plot_combo(self):
+        try:
+            if os.path.exists(_PLOTS_FILE):
+                with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
+                    plots = json.load(f)
+                nums = sorted(
+                    set(str(p.get("num", "")) for p in plots if p.get("num")),
+                    key=lambda s: (0, int(s), s) if s.isdigit() else (1, 0, s),
+                )
+                for num in nums:
+                    self.combo_plot.addItem(num)
+        except Exception:
+            pass
+
+    def _on_accept(self):
+        raw = (self.inp_summa.text().strip()
+               .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
+        if not raw:
+            QMessageBox.warning(self, "Ошибка", "Укажите сумму операции")
+            return
+        try:
+            float(raw)
+        except ValueError:
+            QMessageBox.warning(self, "Ошибка", "Некорректный формат суммы")
+            return
+        self.accept()
+
+    def get_result(self) -> dict:
+        raw = (self.inp_summa.text().strip()
+               .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
+        d = self.date_edit.date()
+        result = {
+            "Дата":       pd.Timestamp(d.year(), d.month(), d.day()),
+            "Контрагент": self.inp_cont.text().strip(),
+            "Сумма":      float(raw),
+            "Назначение": self.inp_nazn.text().strip(),
+            "Категория":  self.combo_cat.currentText(),
+            "Участок":    self.combo_plot.currentText().strip(),
+        }
+        if self._split_rows:
+            contragent = self.inp_cont.text().strip()
+            result["_breakdown"] = [
+                {"Контрагент": contragent, **row.get_data()}
+                for row in self._split_rows
+            ]
+        else:
+            result["_breakdown"] = []
+        return result
+
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            QDialog { background: #FFFFFF; color: #374151; }
+            QLabel  { background: transparent; color: #374151; font-size: 13px; }
+            QLineEdit, QComboBox, QDateEdit {
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 7px 10px; font-size: 13px;
+            }
+            QLineEdit:focus, QComboBox:focus, QDateEdit:focus { border: 1px solid #07414F; }
+            QPushButton#btnSecondary {
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
+                border-radius: 6px; padding: 7px 14px; font-size: 13px;
+            }
+            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
+            QDialogButtonBox QPushButton {
+                background: #07414F; color: white; border: none;
+                border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
+            }
+            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
+            QDialogButtonBox QPushButton:disabled {
+                background: #E5E7EB; color: #9CA3AF; border: none;
+            }
+            QDialogButtonBox QPushButton[text='Отмена'] {
+                background: #E5E7EB; color: #6B7280;
+            }
+            QDialogButtonBox QPushButton[text='Отмена']:hover {
+                background: #D1D5DB; color: #374151;
+            }
+            QPushButton#btnSplit, QPushButton#btnAddSplit {
+                background: transparent; color: #07414F; border: 1px solid #B5C8D5;
+                border-radius: 6px; padding: 5px 14px; font-size: 12px; font-weight: 600;
+                text-align: left;
+            }
+            QPushButton#btnSplit:hover, QPushButton#btnAddSplit:hover {
+                background: #E8F0F5;
+            }
+        """)
+
+
+# =========================================================================== #
+#  Попап фильтра по категориям                                                #
+# =========================================================================== #
+
+class _PopupPillButton(QPushButton):
+    """Кнопка-пилюля в попапе фильтра — рисуется вручную, без QSS-бордер-артефактов."""
+
+    def __init__(self, text: str, color: "QColor | None", parent=None):
+        super().__init__(text, parent)
+        self._pill_color = color
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedHeight(28)
+        fm = QFontMetrics(QFont())
+        self.setMinimumWidth(fm.horizontalAdvance(text) + 36)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        color = self._pill_color
+        if color:
+            h, s, l, _ = color.getHslF()
+            if h < 0:
+                h, s = 0.0, 0.0
+            pill_bd = QColor.fromHslF(h, min(s * 1.0, 1.0), 0.52)
+            pill_bg = QColor.fromHslF(h, min(s * 0.65, 1.0), 0.91)
+            pill_tx = QColor.fromHslF(h, min(s * 1.2, 1.0), 0.18)
+        else:
+            pill_bd = QColor("#9CA3AF")
+            pill_bg = QColor("#F3F4F6")
+            pill_tx = QColor("#374151")
+
+        rf       = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius_f = rf.height() / 2.0
+
+        if self.isChecked():
+            bg = QColor(pill_bg)
+            if self.underMouse():
+                bg = bg.darker(108)
+        elif self.underMouse():
+            bg = QColor(pill_bd)
+            bg.setAlphaF(0.12)
+        else:
+            bg = QColor(0, 0, 0, 0)
+
+        painter.setPen(QPen(pill_bd, 1.0))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rf, radius_f, radius_f)
+
+        f = QFont()
+        f.setPixelSize(12)
+        f.setWeight(QFont.Weight.Medium)
+        painter.setFont(f)
+        painter.setPen(pill_tx)
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+
+
+class _SingleCatPopup(QFrame):
+    """Popup единичного выбора категории для диалогов Add/Edit."""
+
+    itemSelected = pyqtSignal(int)
+    _MAX_H = 360
+
+    def __init__(self, items: list, current_idx: int, parent=None):
+        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("singleCatPopup")
+        self.setStyleSheet(
+            "QFrame#singleCatPopup { background: #FFFFFF; border: 1px solid #C9D8E2; }"
+        )
+
+        self._items = items
+        container = QWidget()
+        inner_lay = QVBoxLayout(container)
+        inner_lay.setContentsMargins(8, 8, 8, 8)
+        inner_lay.setSpacing(4)
+
+        self._btns: list[_PopupPillButton] = []
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+
+        for i, item in enumerate(items):
+            btn = _PopupPillButton(item, CATEGORY_COLORS.get(item), container)
+            btn.setChecked(i == current_idx)
+            btn.clicked.connect(lambda _, idx=i: self._select(idx))
+            inner_lay.addWidget(btn)
+            group.addButton(btn)
+            self._btns.append(btn)
+
+        scroll = QScrollArea(self)
+        scroll.setWidget(container)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            "QScrollBar:vertical { width: 6px; background: transparent; border: none; }"
+            "QScrollBar::handle:vertical { background: #C9D8E2; border-radius: 3px; min-height: 20px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        )
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+    def _select(self, idx: int):
+        self.itemSelected.emit(idx)
+        self.close()
+
+    def show_at(self, global_pos: "QPoint"):
+        n = len(self._btns)
+        if n > 0:
+            pill_h    = 28
+            spacing   = 4
+            vmargin   = 16
+            content_h = n * pill_h + max(0, n - 1) * spacing + vmargin
+
+            max_btn_w = max(
+                (btn.minimumWidth() for btn in self._btns),
+                default=180
+            )
+            popup_w = max_btn_w + 16 + 14  # hmargins(8+8) + scrollbar(~14)
+
+            screen      = QApplication.primaryScreen().availableGeometry()
+            available_h = screen.bottom() - global_pos.y() - 16
+            popup_h     = min(content_h, self._MAX_H, max(80, available_h))
+
+            self.setFixedWidth(max(popup_w, 200))
+            self.setFixedHeight(max(popup_h, 40))
+
+        self.move(global_pos)
+        self.show()
+        self.raise_()
+
+
+class _CatFilterPopup(QFrame):
+    """Выпадающий попап мультивыбора категорий из заголовка таблицы."""
+
+    selectionChanged = pyqtSignal(object)   # set[str]
+    _MAX_H = 360
+    _SCROLLBAR_SS = (
+        "QScrollBar:vertical { width: 6px; background: transparent; border: none; }"
+        "QScrollBar::handle:vertical { background: #C9D8E2; border-radius: 3px; min-height: 20px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+    )
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("catPopup")
+        self.setStyleSheet(
+            "QFrame#catPopup { background: #FFFFFF; border: 1px solid #C9D8E2; }"
+        )
+        self._selected: set = set()
+        self._btns: dict[str, _PopupPillButton] = {}
+        self._hide_time: float = 0.0
+
+        self._container = QWidget()
+        self._lay = QVBoxLayout(self._container)
+        self._lay.setContentsMargins(8, 8, 8, 8)
+        self._lay.setSpacing(4)
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidget(self._container)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setStyleSheet(self._SCROLLBAR_SS)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._scroll)
+
+    # ------------------------------------------------------------------ build #
+
+    def rebuild(self, categories: list):
+        while self._lay.count():
+            item = self._lay.takeAt(0)
+            if (w := item.widget()):
+                w.deleteLater()
+        self._btns.clear()
+
+        for cat in categories:
+            btn = _PopupPillButton(cat, CATEGORY_COLORS.get(cat), self._container)
+            btn.setChecked(cat in self._selected)
+            btn.toggled.connect(lambda checked, c=cat: self._on_toggle(c, checked))
+            self._lay.addWidget(btn)
+            self._btns[cat] = btn
+
+    # ----------------------------------------------------------------- state #
+
+    def _on_toggle(self, cat: str, checked: bool):
+        if checked:
+            self._selected.add(cat)
+        else:
+            self._selected.discard(cat)
+        self.selectionChanged.emit(set(self._selected))
+
+    def set_selected(self, sel: set):
+        self._selected = set(sel)
+        for cat, btn in self._btns.items():
+            btn.blockSignals(True)
+            btn.setChecked(cat in sel)
+            btn.blockSignals(False)
+
+    def clear_selection(self):
+        self._selected.clear()
+        for btn in self._btns.values():
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+        self.selectionChanged.emit(set())
+
+    def get_selected(self) -> set:
+        return set(self._selected)
+
+    # ---------------------------------------------------------------- popup #
+
+    def show_at(self, global_pos: "QPoint"):
+        n = len(self._btns)
+        if n > 0:
+            # Высота: аналитически (не sizeHint — он ненадёжен до первого show)
+            pill_h   = 28   # _PopupPillButton.setFixedHeight(28)
+            spacing  = 4    # self._lay.setSpacing(4)
+            vmargin  = 16   # 8 top + 8 bottom
+            content_h = n * pill_h + max(0, n - 1) * spacing + vmargin
+
+            max_btn_w = max(
+                (btn.minimumWidth() for btn in self._btns.values()),
+                default=180
+            )
+            popup_w = max_btn_w + 16 + 14  # hmargins(8+8) + scrollbar(~14)
+
+            screen      = QApplication.primaryScreen().availableGeometry()
+            available_h = screen.bottom() - global_pos.y() - 16
+            popup_h     = min(content_h, self._MAX_H, max(80, available_h))
+
+            self.setFixedWidth(max(popup_w, 200))
+            self.setFixedHeight(max(popup_h, 40))
+
+        self.move(global_pos)
+        self.show()
+        self.raise_()
+
+    def hideEvent(self, event):
+        self._hide_time = time.monotonic()
+        super().hideEvent(event)
+
+    def was_just_hidden(self) -> bool:
+        return time.monotonic() - self._hide_time < 0.2
+
+
+# =========================================================================== #
+#  Шапка таблицы «Детализация»                                                #
+# =========================================================================== #
+
+class _DetailHeaderView(QHeaderView):
+    """Кастомная шапка таблицы в стиле вкладки «Список участков»."""
+
+    catFilterChanged = pyqtSignal(object)   # set[str]
+
+    _BG      = QColor("#C9D8E2")
+    _FG      = QColor("#07414F")
+    _BORDER  = QColor("#B5C8D5")
+    _ARR_ON  = QColor("#07414F")
+    _ARR_OFF = QColor("#9AABB6")
+    _IC_W    = 22
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.setSectionsClickable(True)
+        self.setSortIndicatorShown(False)
+        self.setFixedHeight(34)
+        self.setMouseTracking(True)
+        self._cat_col:    int                  = -1
+        self._cat_active: bool                 = False
+        self._cat_popup:  "_CatFilterPopup | None" = None
+
+    # ------------------------------------------------------------------ setup #
+
+    def set_cat_col(self, col: int, categories: list, selected: set = None):
+        self._cat_col = col
+        if self._cat_popup is None:
+            self._cat_popup = _CatFilterPopup()
+            self._cat_popup.selectionChanged.connect(self._on_cat_selection_changed)
+        self._cat_popup.rebuild(categories)
+        sel = selected or set()
+        if sel:
+            self._cat_popup.set_selected(sel)
+        self._cat_active = bool(sel)
+        self.viewport().update()
+
+    def _on_cat_selection_changed(self, selected: set):
+        self._cat_active = bool(selected)
+        self.viewport().update()
+        self.catFilterChanged.emit(selected)
+
+    def _cat_icon_zone(self, sec_rect: QRect) -> QRect:
+        arr_x = sec_rect.right() - 18 - 2
+        return QRect(arr_x - self._IC_W - 2, sec_rect.top(), self._IC_W, sec_rect.height())
+
+    # ------------------------------------------------------------------ paint #
+
+    def paintSection(self, painter: QPainter, rect: QRect, logical_index: int):
+        if not rect.isValid():
+            return
+        painter.save()
+        painter.fillRect(rect, self._BG)
+
+        painter.setPen(QPen(self._BORDER, 1))
+        painter.drawLine(rect.right(), rect.top() + 4, rect.right(), rect.bottom() - 4)
+
+        model = self.model()
+        label = (
+            str(model.headerData(logical_index, Qt.Orientation.Horizontal,
+                                 Qt.ItemDataRole.DisplayRole) or "")
+            if model else ""
+        )
+        if label:
+            # Одиночный символ Material Symbols — рисуем как иконку, без стрелок
+            if len(label) == 1 and 0xE000 <= ord(label) <= 0xF8FF:
+                f_ic = QFont("Material Symbols Rounded")
+                f_ic.setPixelSize(18)
+                painter.setPen(self._FG)
+                painter.setFont(f_ic)
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+            else:
+                is_cat   = (logical_index == self._cat_col)
+                IC_W     = self._IC_W
+                arr_x    = rect.right() - 18 - 2
+                arr_rect = QRect(arr_x, rect.top(), 18, rect.height())
+
+                if is_cat:
+                    icon_x    = arr_x - IC_W - 2
+                    text_rect = QRect(rect.left() + 10, rect.top(),
+                                      icon_x - rect.left() - 4, rect.height())
+                else:
+                    text_rect = QRect(rect.left() + 10, rect.top(),
+                                      arr_rect.left() - rect.left() - 4, rect.height())
+
+                painter.setPen(self._FG)
+                f = QFont(); f.setPixelSize(12); f.setBold(True)
+                painter.setFont(f)
+                painter.drawText(text_rect,
+                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                 label)
+
+                if is_cat:
+                    icon_rect = QRect(arr_x - IC_W - 2, rect.top(), IC_W, rect.height())
+                    f_ico = QFont("Material Symbols Rounded"); f_ico.setPixelSize(18)
+                    painter.setFont(f_ico)
+                    painter.setPen(self._FG)
+                    painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter,
+                                     chr(0xEA76) if self._cat_active else chr(0xE8B6))
+
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                cx = arr_rect.left() + arr_rect.width() // 2
+                cy = arr_rect.top() + arr_rect.height() // 2
+                is_sorted = (self.sortIndicatorSection() == logical_index)
+                asc  = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+                desc = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(self._ARR_ON if asc else self._ARR_OFF)
+                painter.drawPolygon(QPolygon([
+                    QPoint(cx - 4, cy - 1), QPoint(cx + 4, cy - 1), QPoint(cx, cy - 6),
+                ]))
+                painter.setBrush(self._ARR_ON if desc else self._ARR_OFF)
+                painter.drawPolygon(QPolygon([
+                    QPoint(cx - 4, cy + 1), QPoint(cx + 4, cy + 1), QPoint(cx, cy + 6),
+                ]))
+
+        painter.restore()
+
+    # --------------------------------------------------------------- mouse #
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._cat_col >= 0:
+            pos     = event.position().toPoint()
+            logical = self.logicalIndexAt(pos.x())
+            if logical == self._cat_col:
+                sec_x    = self.sectionViewportPosition(self._cat_col)
+                sec_rect = QRect(sec_x, 0, self.sectionSize(self._cat_col), self.height())
+                if self._cat_icon_zone(sec_rect).contains(pos):
+                    if self._cat_popup and self._cat_popup.isVisible():
+                        self._cat_popup.hide()
+                        return
+                    if self._cat_popup and self._cat_popup.was_just_hidden():
+                        return
+                    if self._cat_active:
+                        if self._cat_popup:
+                            self._cat_popup.clear_selection()
+                        return
+                    if self._cat_popup:
+                        vp_pt     = QPoint(sec_x, self.viewport().height())
+                        global_pt = self.viewport().mapToGlobal(vp_pt)
+                        self._cat_popup.show_at(global_pt)
+                    return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        pos  = event.position().toPoint()
+        hand = False
+        if self._cat_col >= 0:
+            logical = self.logicalIndexAt(pos.x())
+            if logical == self._cat_col:
+                sec_x    = self.sectionViewportPosition(self._cat_col)
+                sec_rect = QRect(sec_x, 0, self.sectionSize(self._cat_col), self.height())
+                if self._cat_icon_zone(sec_rect).contains(pos):
+                    hand = True
+        self.viewport().setCursor(
+            Qt.CursorShape.PointingHandCursor if hand else Qt.CursorShape.ArrowCursor
+        )
+        super().mouseMoveEvent(event)
 
 
 # =========================================================================== #
@@ -1667,6 +2590,7 @@ class DetailWidget(QWidget):
         self._cont_col: int | None = None
         self._plot_col: int | None = None
         self._active_warning: str | None = None
+        self._hdr_cat_filter: set = set()
         self._setup_ui()
 
     # ----------------------------------------------------------------- UI -- #
@@ -1760,33 +2684,47 @@ class DetailWidget(QWidget):
         # «ёлочку» дерева отключаем, а отступ обнуляем — геометрия кнопок едина.
         self.tree.setRootIsDecorated(False)
         self.tree.setIndentation(0)
-        self.tree.setAlternatingRowColors(False)
+        self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setSortingEnabled(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         self.tree.setMouseTracking(True)
-        self.tree.header().setStretchLastSection(True)
+        self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.hdr_view = _DetailHeaderView()
+        self.tree.setHeader(self.hdr_view)
+        self.hdr_view.setStretchLastSection(False)
+        self.hdr_view.catFilterChanged.connect(self._on_hdr_cat_filter_changed)
         self.tree.setStyleSheet(self._TREE_STYLE)
 
         self._cell_delegate = _CellDelegate(self.tree)
         self._category_delegate = _CategoryDelegate(ALL_CATEGORIES, self.tree)
         self._plot_delegate = _PlotDelegate(load_plot_numbers(), self.tree)
-        self._ctrl_delegate = _CtrlDelegate(self.tree)
-        self._ctrl_delegate.addBranchRequested.connect(self._on_add_branch)
-        self._ctrl_delegate.toggleRequested.connect(self._on_toggle)
         self._branch_delegate = _BranchColumnDelegate(self.tree)
-        self._branch_delegate.deleteBranchRequested.connect(self._on_delete_branch)
+        self._branch_delegate.toggleRequested.connect(self._on_toggle)
+        self._edit_delegate = _DetailEditDelegate(self.tree)
         self.tree.setItemDelegate(self._cell_delegate)
-        self.tree.setItemDelegateForColumn(0, self._ctrl_delegate)
+        self.tree.clicked.connect(self._on_tree_clicked)
+        self.tree.expanded.connect(
+            lambda idx: self.tree.viewport().update(self.tree.visualRect(idx))
+        )
+        self.tree.collapsed.connect(
+            lambda idx: self.tree.viewport().update(self.tree.visualRect(idx))
+        )
 
         # Панель редактора категорий — скрыта по умолчанию, выезжает справа.
         self._cat_editor_panel = CategoryEditorPanel(ALL_CATEGORIES, self)
         self._cat_editor_panel.categoriesChanged.connect(self._on_categories_changed)
         self._cat_editor_panel.categoryRenamed.connect(self._on_category_renamed)
 
-        layout.addWidget(self.tree)
+        table_outer = _ClipFrame(QColor("#D5DCE4"), 6)
+        outer_lay = QVBoxLayout(table_outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+        outer_lay.addWidget(self.tree, stretch=1)
+        table_outer.finish_setup()
+        layout.addWidget(table_outer, stretch=1)
 
         summary_layout = QHBoxLayout()
         self.lbl_records = QLabel("Записей: —", objectName="summaryRecords")
@@ -1798,21 +2736,31 @@ class DetailWidget(QWidget):
     # QTableWidget#mainTable и на дерево не распространяется.
     _TREE_STYLE = """
         QTreeView#mainTable {
-            background: #F9FAFB; border: 1px solid #D8DDE6; border-radius: 8px;
-            color: #1F2937; font-size: 12px;
+            background: #FFFFFF; border: none;
+            color: #1F2937; font-size: 13px;
             selection-background-color: #C9D8E2; selection-color: #07414F;
+            alternate-background-color: #F0F4F8;
             outline: 0;
         }
         QTreeView#mainTable::item {
-            padding: 5px 8px; border-bottom: 1px solid #D8DDE6;
+            padding: 6px 10px; border-bottom: 1px solid #E3E8EF;
         }
         QTreeView#mainTable::item:hover { background: #DDE4EE; }
         QTreeView#mainTable::item:selected { background: #C9D8E2; color: #07414F; }
-        QHeaderView::section {
-            background: #E9EDF5; color: #4B5563; border: none;
-            border-right: 1px solid #CDD3DC; border-bottom: 2px solid #C4CBD7;
-            padding: 8px 10px; font-size: 12px; font-weight: 600;
+        QTreeView#mainTable::branch { background: transparent; }
+        QTreeView#mainTable::branch:has-children:!has-siblings:closed,
+        QTreeView#mainTable::branch:closed:has-children:has-siblings,
+        QTreeView#mainTable::branch:open:has-children:!has-siblings,
+        QTreeView#mainTable::branch:open:has-children:has-siblings { image: none; }
+        QTreeView#mainTable QScrollBar:vertical {
+            width: 12px; background: #F0F4F8; border: none;
         }
+        QTreeView#mainTable QScrollBar::handle:vertical {
+            background: #B5C8D5; border-radius: 5px; min-height: 24px;
+            margin: 2px 2px 2px 2px;
+        }
+        QTreeView#mainTable QScrollBar::add-line:vertical,
+        QTreeView#mainTable QScrollBar::sub-line:vertical { height: 0; }
     """
 
     # ------------------------------------------ редактор категорий ---------- #
@@ -1836,6 +2784,11 @@ class DetailWidget(QWidget):
         self.combo_cat.setCurrentIndex(idx if idx >= 0 else 0)
         self.combo_cat.blockSignals(False)
 
+        valid_sel = self._hdr_cat_filter & set(new_cats)
+        self._hdr_cat_filter = valid_sel
+        if self._cat_col is not None and self._cat_col >= 0:
+            self.hdr_view.set_cat_col(self._cat_col, list(new_cats), valid_sel)
+
         self.apply_filters()
 
     def _on_category_renamed(self, old_name: str, new_name: str):
@@ -1856,6 +2809,13 @@ class DetailWidget(QWidget):
         idx = self.combo_cat.findText(current)
         self.combo_cat.setCurrentIndex(idx if idx >= 0 else 0)
         self.combo_cat.blockSignals(False)
+        if old_name in self._hdr_cat_filter:
+            self._hdr_cat_filter.discard(old_name)
+            self._hdr_cat_filter.add(new_name)
+        if self._cat_col is not None and self._cat_col >= 0:
+            self.hdr_view.set_cat_col(
+                self._cat_col, list(_cat_mod.ALL_CATEGORIES), self._hdr_cat_filter
+            )
         self.apply_filters()
 
     # --------------------------------------------------- наполнение модели -- #
@@ -1905,17 +2865,27 @@ class DetailWidget(QWidget):
 
     def _apply_header_layout(self, columns: list[str]):
         col_widths = {
-            _CTRL_COL: 84, "Дата": 95, "Контрагент": 260, "Сумма": 140,
-            "Назначение": 340, "Категория": 210, "Участок": 80,
+            _EDIT_COL: 46,
+            "Дата": 95, "Сумма": 140, "Категория": 210, "Участок": 80,
         }
+        stretch_cols = {"Контрагент", "Назначение"}
         header = self.tree.header()
+        header.setStretchLastSection(False)
         for col_idx, col in enumerate(columns):
-            w = col_widths.get(col)
-            if w:
-                header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.Interactive)
-                self.tree.setColumnWidth(col_idx, w)
+            if col in stretch_cols:
+                header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.Stretch)
+            elif col in col_widths:
+                header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.Fixed)
+                self.tree.setColumnWidth(col_idx, col_widths[col])
             else:
                 header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.ResizeToContents)
+        # Делегат регистрируется по индексу — обновляем после каждой загрузки
+        if _EDIT_COL in columns:
+            self.tree.setItemDelegateForColumn(columns.index(_EDIT_COL), self._edit_delegate)
+        if "Категория" in columns:
+            self.hdr_view.set_cat_col(
+                columns.index("Категория"), list(ALL_CATEGORIES), self._hdr_cat_filter
+            )
 
     # -------------------------------------------------- замечания ----------- #
     def _compute_warnings(self) -> dict:
@@ -2115,22 +3085,47 @@ class DetailWidget(QWidget):
             self.tree.expand(idx)
         # Разбивка — аннотация, на суммы/долги не влияет: dataLoaded не эмитим.
 
-    # ----------------------------------- клики по столбцу управления ------- #
-    def _on_add_branch(self, index: QModelIndex):
-        node = index.internalPointer()
-        if node is not None and node.kind == "op":
-            self._add_split(node)
-
-    def _on_delete_branch(self, index: QModelIndex):
-        node = index.internalPointer()
-        if node is not None and node.kind == "split":
-            self._delete_split(node)
-
     def _on_toggle(self, index: QModelIndex):
-        if self.tree.isExpanded(index):
-            self.tree.collapse(index)
+        col0 = self.model.index(index.row(), 0, self.model.parent(index))
+        if self.tree.isExpanded(col0):
+            self.tree.collapse(col0)
         else:
-            self.tree.expand(index)
+            self.tree.expand(col0)
+
+    # --------------------------------------------------- кнопка редакт. ----- #
+    def _on_tree_clicked(self, index: QModelIndex):
+        cols = self.model.columns()
+        if index.isValid() and 0 <= index.column() < len(cols):
+            if cols[index.column()] == _EDIT_COL:
+                node = index.internalPointer()
+                if node and node.kind == "op":
+                    self._edit_operation(node)
+
+    def _edit_operation(self, node):
+        breakdown = []
+        if self.df_full is not None and node.df_idx in self.df_full.index:
+            breakdown = _parse_breakdown(self.df_full.at[node.df_idx, "_breakdown"]
+                                         if "_breakdown" in self.df_full.columns else None)
+        dlg = EditOperationDialog(node.data, breakdown, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        result = dlg.get_result()
+        df_idx = node.df_idx
+        new_breakdown = result.pop("_breakdown", None)
+        if df_idx is not None and self.df_full is not None and df_idx in self.df_full.index:
+            for col, val in result.items():
+                if col in self.df_full.columns:
+                    self.df_full.at[df_idx, col] = val
+                    self._manual_cells.add((df_idx, col))
+            self.df_full["Дата"] = pd.to_datetime(self.df_full["Дата"], errors="coerce")
+            if new_breakdown is not None:
+                self._set_breakdown(df_idx, new_breakdown)
+        self.apply_filters()
+        if new_breakdown:
+            idx = self.model.index_for_df_idx(df_idx)
+            if idx.isValid():
+                self.tree.expand(idx)
+        self.dataLoaded.emit(self.df_full)
 
     # ----------------------------------------------------- добавить строку -- #
     def _add_row(self):
@@ -2138,6 +3133,7 @@ class DetailWidget(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         row_data = dlg.get_result()
+        new_breakdown = row_data.pop("_breakdown", None)
 
         if self.df_full is None:
             self.df_full = pd.DataFrame(
@@ -2165,7 +3161,11 @@ class DetailWidget(QWidget):
             if col in self.df_full.columns:
                 self._manual_cells.add((new_idx, col))
 
+        if new_breakdown:
+            self._set_breakdown(new_idx, new_breakdown)
+
         row_ts = row_data["Дата"]
+
         row_qdate = QDate(row_ts.year, row_ts.month, row_ts.day)
         if row_qdate < self.date_from.date():
             self.date_from.setDate(row_qdate)
@@ -2173,6 +3173,10 @@ class DetailWidget(QWidget):
             self.date_to.setDate(row_qdate)
 
         self.apply_filters()
+        if new_breakdown:
+            idx = self.model.index_for_df_idx(new_idx)
+            if idx.isValid():
+                self.tree.expand(idx)
         self.dataLoaded.emit(self.df_full)
 
     # --------------------------------------------------------- загрузка --- #
@@ -2310,10 +3314,18 @@ class DetailWidget(QWidget):
             def _cat_matches(row):
                 bd = _parse_breakdown(row.get("_breakdown"))
                 if bd:
-                    # Мультиоперация: ищем категорию среди дочерних
                     return any(it.get("Категория") == cat_filter for it in bd)
                 return row.get("Категория") == cat_filter
             df = df[df.apply(_cat_matches, axis=1)]
+
+        if self._hdr_cat_filter:
+            _sel = self._hdr_cat_filter
+            def _hdr_cat_matches(row):
+                bd = _parse_breakdown(row.get("_breakdown"))
+                if bd:
+                    return any(it.get("Категория") in _sel for it in bd)
+                return row.get("Категория") in _sel
+            df = df[df.apply(_hdr_cat_matches, axis=1)]
 
         search = self.search_input.text().strip().lower()
         if search:
@@ -2394,12 +3406,23 @@ class DetailWidget(QWidget):
         self.search_input.clear()
         self.combo_type.setCurrentIndex(0)
         self.combo_cat.setCurrentIndex(0)
+        self._hdr_cat_filter = set()
+        if self.hdr_view._cat_popup:
+            self.hdr_view._cat_popup.blockSignals(True)
+            self.hdr_view._cat_popup.clear_selection()
+            self.hdr_view._cat_popup.blockSignals(False)
+        self.hdr_view._cat_active = False
+        self.hdr_view.viewport().update()
         if self.df_full is not None:
             min_d, max_d = self.df_full["Дата"].min(), self.df_full["Дата"].max()
             if pd.notna(min_d):
                 self.date_from.setDate(QDate(min_d.year, min_d.month, min_d.day))
             if pd.notna(max_d):
                 self.date_to.setDate(QDate(max_d.year, max_d.month, max_d.day))
+        self.apply_filters()
+
+    def _on_hdr_cat_filter_changed(self, selected: set):
+        self._hdr_cat_filter = set(selected)
         self.apply_filters()
 
     # ------------------------------------------------------------ экспорт -- #
