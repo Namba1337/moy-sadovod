@@ -512,10 +512,13 @@ class _CategoryDelegate(_CellDelegate):
         # 5. Текст
         painter.setPen(self._TXT_SEL if selected else pill_tx)
         painter.setFont(option.font)
+        text_rect = pill.adjusted(8, 0, -4, 0)
+        fm = QFontMetrics(option.font)
+        elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, text_rect.width())
         painter.drawText(
-            pill.adjusted(8, 0, -4, 0),
+            text_rect,
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-            text,
+            elided,
         )
 
         # 6. Карандаш (ручное редактирование)
@@ -1090,10 +1093,12 @@ class _ColorPickerPopup(QFrame):
 
     # Палитра из 16 цветов (2 строки × 8): светлые + тёмные тона
     PALETTE: list[QColor] = [
-        QColor(217, 217, 217), QColor(244, 204, 204), QColor(252, 229, 205), QColor(255, 242, 204),
-        QColor(217, 234, 211), QColor(208, 224, 227), QColor(207, 226, 255), QColor(217, 210, 233),
-        QColor( 68,  68,  68), QColor(153,   0,   0), QColor(180,  95,   6), QColor(120,  63,   4),
-        QColor( 39,  78,  19), QColor( 12,  52,  61), QColor( 28,  69, 135), QColor( 53,  28, 117),
+        QColor(0x1B, 0x2A, 0x4A), QColor(0x3D, 0x2F, 0x7A), QColor(0x15, 0x50, 0xA0), QColor(0x3A, 0x9B, 0xD5),
+        QColor(0x90, 0xCC, 0xF0), QColor(0x2A, 0xB8, 0xB0), QColor(0x0A, 0x5C, 0x3A), QColor(0x20, 0xA8, 0x40),
+        QColor(0x90, 0xD8, 0x88), QColor(0x5C, 0x8C, 0x20), QColor(0xC8, 0xD8, 0x30), QColor(0x6B, 0x5F, 0xA8),
+        QColor(0xA8, 0x55, 0xC8), QColor(0xD8, 0x80, 0xC0), QColor(0xC4, 0x58, 0x88), QColor(0xD0, 0x40, 0x60),
+        QColor(0xC4, 0x40, 0x30), QColor(0x7A, 0x1A, 0x3A), QColor(0xC8, 0x68, 0x20), QColor(0xE8, 0x98, 0x20),
+        QColor(0xF0, 0xD0, 0x30), QColor(0xC4, 0x7A, 0x5A), QColor(0x8C, 0x50, 0x30), QColor(0x6A, 0x60, 0x58),
     ]
 
     def __init__(self):
@@ -1101,7 +1106,7 @@ class _ColorPickerPopup(QFrame):
         self.setStyleSheet("""
             QFrame {
                 background: #FFFFFF;
-                border: 1px solid #D1D5DB;
+                border: 1px solid #C9D8E2;
                 border-radius: 8px;
             }
         """)
@@ -1109,16 +1114,21 @@ class _ColorPickerPopup(QFrame):
         grid.setContentsMargins(8, 8, 8, 8)
         grid.setSpacing(5)
         for i, color in enumerate(self.PALETTE):
+            h, s, l, _ = color.getHslF()
+            if h < 0:
+                h, s = 0.0, 0.0
+            pill_bg = QColor.fromHslF(h, min(s * 0.65, 1.0), 0.91)
+            pill_bd = QColor.fromHslF(h, min(s * 1.00, 1.0), 0.52)
+
             btn = QPushButton()
             btn.setFixedSize(22, 22)
-            r, g, b = color.red(), color.green(), color.blue()
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: rgb({r},{g},{b});
-                    border: 1.5px solid rgba(0,0,0,0.12);
+                    background: {pill_bg.name()};
+                    border: 1.5px solid {pill_bd.name()};
                     border-radius: 11px;
                 }}
-                QPushButton:hover {{ border: 2.5px solid #4F46E5; }}
+                QPushButton:hover {{ border: 2.5px solid #07414F; }}
             """)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1141,6 +1151,150 @@ class _ColorPickerPopup(QFrame):
 #  Панель редактора категорий                                                 #
 # =========================================================================== #
 
+class _CatPillRow(QWidget):
+    """Строка-пилюля в редакторе категорий: цветной овальный badge с
+    редактируемым именем и кнопкой удаления."""
+
+    _PILL_H = 34
+
+    def __init__(self, cat: str, is_protected: bool, parent=None):
+        super().__init__(parent)
+        self._cat = cat
+        self._is_protected = is_protected
+        self.setFixedHeight(self._PILL_H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(10, 0, 6, 0)
+        hl.setSpacing(6)
+
+        color = CATEGORY_COLORS.get(cat, _DEFAULT_ROW_COLOR)
+        h, s, l, _ = color.getHslF()
+        if h < 0:
+            h, s = 0.0, 0.0
+        pill_bg = QColor.fromHslF(h, min(s * 0.65, 1.0), 0.91)
+        pill_bd = QColor.fromHslF(h, min(s * 1.00, 1.0), 0.52)
+
+        self._color_btn = QPushButton()
+        self._color_btn.setFixedSize(18, 18)
+        self._color_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {pill_bg.name()};
+                border: 1.5px solid {pill_bd.name()};
+                border-radius: 9px;
+            }}
+            QPushButton:hover {{ border: 2px solid #07414F; }}
+        """)
+        self._color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._color_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        from ui.plots_widget import _TooltipFilter
+        self._color_tip = _TooltipFilter("Изменить цвет", self._color_btn)
+        self._color_btn.installEventFilter(self._color_tip)
+        hl.addWidget(self._color_btn)
+
+        self._lbl = QLineEdit(cat)
+        self._lbl.setMinimumWidth(0)
+        self._lbl.setReadOnly(is_protected)
+        self._lbl.setStyleSheet("""
+            QLineEdit {
+                background: transparent; border: none;
+                font-size: 12px; font-weight: 500; padding: 1px 2px;
+            }
+            QLineEdit:focus {
+                background: rgba(255,255,255,0.7); border: 1px solid rgba(0,0,0,0.15);
+                border-radius: 4px; padding: 1px 6px;
+            }
+        """)
+        hl.addWidget(self._lbl, stretch=1)
+
+        _lock_icon = chr(0xe897)
+        if is_protected:
+            action_btn = QLabel(_lock_icon)
+            action_btn.setFixedSize(24, 24)
+            action_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon_font = QFont("Material Symbols Rounded")
+            icon_font.setPixelSize(16)
+            action_btn.setFont(icon_font)
+            action_btn.setStyleSheet(
+                "background: transparent; color: #9CA3AF; border: none;"
+            )
+            self._lock_tip = _TooltipFilter(
+                "Обязательная категория — удаление недоступно", action_btn
+            )
+            action_btn.installEventFilter(self._lock_tip)
+        else:
+            action_btn = QPushButton("✕")
+            action_btn.setFixedSize(24, 24)
+            action_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            action_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent; border: none;
+                    color: rgba(0,0,0,0.25); font-size: 13px; font-weight: 600;
+                    border-radius: 12px;
+                }
+                QPushButton:hover { color: #B91C1C; background: rgba(185,28,28,0.08); }
+            """)
+            self._del_tip = _TooltipFilter("Удалить категорию", action_btn)
+            action_btn.installEventFilter(self._del_tip)
+        hl.addWidget(action_btn)
+
+        self._color_btn.clicked.connect(
+            lambda: self.window()._open_color_picker(self._cat, self._color_btn)
+        )
+        if not is_protected:
+            self._lbl.editingFinished.connect(
+                lambda: self.window()._on_rename(
+                    self._cat, self._lbl.text().strip(), self._lbl
+                )
+            )
+        if not is_protected:
+            action_btn.clicked.connect(
+                lambda: self.window()._on_delete(self._cat)
+            )
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        color = CATEGORY_COLORS.get(self._cat, _DEFAULT_ROW_COLOR)
+        h, s, l, _ = color.getHslF()
+        if h < 0:
+            h, s = 0.0, 0.0
+        pill_bg = QColor.fromHslF(h, min(s * 0.65, 1.0), 0.91)
+        pill_bd = QColor.fromHslF(h, min(s * 1.00, 1.0), 0.52)
+
+        rf = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius_f = rf.height() / 2.0
+
+        if self.underMouse():
+            bg = QColor(pill_bd)
+            bg.setAlphaF(0.08)
+        else:
+            bg = QColor(pill_bg)
+
+        p.setPen(QPen(pill_bd, 1.0))
+        p.setBrush(bg)
+        p.drawRoundedRect(rf, radius_f, radius_f)
+
+        p.end()
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if not self._is_protected:
+            self._lbl.setFocus()
+            self._lbl.selectAll()
+        super().mouseDoubleClickEvent(event)
+
+
 class CategoryEditorPanel(QDialog):
     """Диалог редактирования списка категорий."""
 
@@ -1149,18 +1303,18 @@ class CategoryEditorPanel(QDialog):
 
     _PANEL_STYLE = """
         QDialog {
-            background: #FFFFFF;
+            background: #F0F3F9;
         }
         QPushButton#addCatBtn {
-            background: #4F46E5; color: white; border: none;
-            border-radius: 6px; padding: 7px 12px; font-size: 12px; font-weight: 600;
+            background: #07414F; color: white; border: none;
+            border-radius: 6px; padding: 7px 14px; font-size: 12px; font-weight: 600;
         }
-        QPushButton#addCatBtn:hover { background: #6366F1; }
+        QPushButton#addCatBtn:hover { background: #0A5A6B; }
         QLineEdit#newCatInput {
-            background: #F8F9FA; border: 1px solid #D1D5DB;
-            border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 12px;
+            background: #FFFFFF; border: 1px solid #D5DCE4;
+            border-radius: 6px; color: #1F2937; padding: 7px 10px; font-size: 12px;
         }
-        QLineEdit#newCatInput:focus { border: 1px solid #6366F1; }
+        QLineEdit#newCatInput:focus { border: 1px solid #07414F; }
         QScrollArea { background: transparent; border: none; }
         QWidget#scrollContents { background: transparent; }
     """
@@ -1169,7 +1323,7 @@ class CategoryEditorPanel(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Редактор категорий")
         self.setModal(False)
-        self.setMinimumSize(360, 480)
+        self.setMinimumSize(380, 500)
         self._categories = list(categories)
         self._active_color_cat: str | None = None
         self._color_popup = _ColorPickerPopup()
@@ -1183,22 +1337,25 @@ class CategoryEditorPanel(QDialog):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
-        # Scrollable category list
         self._scroll_contents = QWidget(objectName="scrollContents")
         self._list_layout = QVBoxLayout(self._scroll_contents)
-        self._list_layout.setContentsMargins(0, 2, 0, 2)
-        self._list_layout.setSpacing(3)
+        self._list_layout.setContentsMargins(0, 4, 14, 4)
+        self._list_layout.setSpacing(4)
 
         scroll = QScrollArea()
         scroll.setWidget(self._scroll_contents)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            "QScrollBar:vertical { width: 6px; background: transparent; border: none; }"
+            "QScrollBar::handle:vertical { background: #C9D8E2; border-radius: 3px; min-height: 20px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        )
         layout.addWidget(scroll, stretch=1)
 
-        # Add new category row
         add_row = QHBoxLayout()
         add_row.setSpacing(6)
         self._new_input = QLineEdit(objectName="newCatInput")
@@ -1220,85 +1377,10 @@ class CategoryEditorPanel(QDialog):
                 item.widget().deleteLater()
 
         for cat in self._categories:
-            self._list_layout.addWidget(self._make_cat_row(cat))
+            is_protected = cat in PROTECTED_CATEGORIES
+            row = _CatPillRow(cat, is_protected, self)
+            self._list_layout.addWidget(row)
         self._list_layout.addStretch()
-
-    def _make_cat_row(self, cat: str) -> QWidget:
-        row = QWidget()
-        row.setStyleSheet(
-            "QWidget { background: #F8F9FA; border-radius: 5px; }"
-            "QWidget:hover { background: #EEF2FF; }"
-        )
-        hl = QHBoxLayout(row)
-        hl.setContentsMargins(8, 4, 5, 4)
-        hl.setSpacing(6)
-
-        color = CATEGORY_COLORS.get(cat, _DEFAULT_ROW_COLOR)
-        r, g, b = color.red(), color.green(), color.blue()
-
-        # Кнопка-кружок: отображает текущий цвет, по клику открывает палитру
-        color_btn = QPushButton()
-        color_btn.setFixedSize(22, 22)
-        color_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: rgb({r},{g},{b});
-                border: 1.5px solid rgba(0,0,0,0.15);
-                border-radius: 11px;
-            }}
-            QPushButton:hover {{ border: 2px solid #4F46E5; }}
-        """)
-        color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        color_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        color_btn.setToolTip("Изменить цвет")
-        color_btn.clicked.connect(lambda checked, c=cat, b=color_btn: self._open_color_picker(c, b))
-
-        is_protected = cat in PROTECTED_CATEGORIES
-
-        lbl = QLineEdit(cat)
-        lbl.setMinimumWidth(0)
-        lbl.setReadOnly(is_protected)
-        lbl.setStyleSheet("""
-            QLineEdit {
-                background: transparent; border: none;
-                font-size: 12px; color: #1F2937; padding: 1px 2px;
-            }
-            QLineEdit:focus {
-                background: #FFFFFF; border: 1px solid #6366F1;
-                border-radius: 3px; padding: 1px 4px;
-            }
-            QLineEdit:read-only { color: #6B7280; }
-        """)
-        if not is_protected:
-            lbl.editingFinished.connect(
-                lambda e=lbl, old=cat: self._on_rename(old, e.text().strip(), e)
-            )
-
-        if is_protected:
-            action_btn = QLabel("🔒")
-            action_btn.setFixedSize(26, 26)
-            action_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            action_btn.setStyleSheet("background: transparent; font-size: 13px;")
-            action_btn.setToolTip("Обязательная категория — удаление недоступно")
-        else:
-            action_btn = QPushButton("✕")
-            action_btn.setStyleSheet("""
-                QPushButton {
-                    background: transparent; border: none;
-                    color: #9CA3AF; font-size: 14px; font-weight: 600;
-                    border-radius: 4px;
-                }
-                QPushButton:hover { background: #FEE2E2; color: #B91C1C; }
-            """)
-            action_btn.setFixedSize(26, 26)
-            action_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            action_btn.setToolTip("Удалить категорию")
-            action_btn.clicked.connect(lambda checked, c=cat: self._on_delete(c))
-
-        hl.addWidget(color_btn)
-        hl.addWidget(lbl, stretch=1)
-        hl.addWidget(action_btn)
-        return row
 
     def _on_rename(self, old_name: str, new_name: str, editor: "QLineEdit"):
         if old_name in PROTECTED_CATEGORIES:
@@ -2171,7 +2253,7 @@ class _PopupPillButton(QPushButton):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setFixedHeight(28)
         fm = QFontMetrics(QFont())
-        self.setMinimumWidth(fm.horizontalAdvance(text) + 36)
+        self.setMinimumWidth(min(fm.horizontalAdvance(text) + 36, 300))
 
     def paintEvent(self, _event):
         painter = QPainter(self)
@@ -2212,7 +2294,9 @@ class _PopupPillButton(QPushButton):
         f.setWeight(QFont.Weight.Medium)
         painter.setFont(f)
         painter.setPen(pill_tx)
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+        fm = QFontMetrics(f)
+        elided = fm.elidedText(self.text(), Qt.TextElideMode.ElideRight, self.width() - 12)
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, elided)
 
 
 class _SingleCatPopup(QFrame):
@@ -2278,7 +2362,7 @@ class _SingleCatPopup(QFrame):
                 (btn.minimumWidth() for btn in self._btns),
                 default=180
             )
-            popup_w = max_btn_w + 16 + 14  # hmargins(8+8) + scrollbar(~14)
+            popup_w = min(max_btn_w + 16 + 14, 320)  # cap at ~longest category name
 
             screen      = QApplication.primaryScreen().availableGeometry()
             available_h = screen.bottom() - global_pos.y() - 16
@@ -2388,7 +2472,7 @@ class _CatFilterPopup(QFrame):
                 (btn.minimumWidth() for btn in self._btns.values()),
                 default=180
             )
-            popup_w = max_btn_w + 16 + 14  # hmargins(8+8) + scrollbar(~14)
+            popup_w = min(max_btn_w + 16 + 14, 320)  # cap at ~longest category name
 
             screen      = QApplication.primaryScreen().availableGeometry()
             available_h = screen.bottom() - global_pos.y() - 16
