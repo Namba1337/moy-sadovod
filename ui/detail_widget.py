@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
     QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QTreeView, QVBoxLayout, QWidget,
+    QTreeView, QVBoxLayout, QWidget, QCompleter,
 )
 
 from ui.categorization import (
@@ -162,6 +162,8 @@ _MULTI_OP_COLOR = QColor(110, 110, 118)   # приглушённый серый
 _CTRL_COL = "\x00ctrl"
 # Служебный столбец кнопки редактирования. Хранится последним в модели.
 _EDIT_COL = "\x00edit"
+# Служебный столбец чекбокса выбора строк.
+_CHECK_COL = "\x00check"
 # Колонки, отображаемые в строке-ветке (split). «Контрагент» — копия из операции.
 _SPLIT_DISPLAY_COLS = ("Контрагент", "Сумма", "Категория", "Участок")
 # Из них реально редактируемые в ветке.
@@ -208,7 +210,7 @@ class OperationsTreeModel(QAbstractItemModel):
     def load(self, columns: list[str], records: list[tuple]):
         """records: список (df_idx, data_dict, breakdown_list)."""
         self.beginResetModel()
-        self._columns = list(columns) + [_EDIT_COL]
+        self._columns = list(columns) + [_EDIT_COL, _CHECK_COL]
         root = _Node("root", {})
         for df_idx, data, breakdown in records:
             op = _Node("op", data, df_idx=df_idx, parent=root)
@@ -269,7 +271,7 @@ class OperationsTreeModel(QAbstractItemModel):
         col = self._columns[index.column()]
 
         # Служебные столбцы — всё рисует делегат, модель данных не отдаёт.
-        if col in (_CTRL_COL, _EDIT_COL):
+        if col in (_CTRL_COL, _EDIT_COL, _CHECK_COL):
             return None
 
         if role == MANUAL_ROLE:
@@ -333,7 +335,7 @@ class OperationsTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         col = self._columns[index.column()]
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if col in (_CTRL_COL, _EDIT_COL):
+        if col in (_CTRL_COL, _EDIT_COL, _CHECK_COL):
             return f
         if node.kind == "op":
             # Категория и Участок недоступны для редактирования у строк с дочерними
@@ -373,7 +375,7 @@ class OperationsTreeModel(QAbstractItemModel):
 
     # -- сортировка --------------------------------------------------------- #
     def sort(self, column, order=Qt.SortOrder.AscendingOrder):
-        if 0 <= column < len(self._columns) and self._columns[column] in (_CTRL_COL, _EDIT_COL):
+        if 0 <= column < len(self._columns) and self._columns[column] in (_CTRL_COL, _EDIT_COL, _CHECK_COL):
             return
         self._sort_col = column
         self._sort_order = order
@@ -439,6 +441,115 @@ class _CellDelegate(QStyledItemDelegate):
             self._CHAR,
         )
         painter.restore()
+
+
+class _DetailCheckDelegate(QStyledItemDelegate):
+    """Делегат столбца чекбокса выбора строк для удаления."""
+
+    selectionChanged = pyqtSignal()
+
+    _IC_ON    = chr(0xE834)
+    _IC_OFF   = chr(0xE835)
+    _IC_FONT  = "Material Symbols Rounded"
+    _IC_COLOR = QColor("#07414F")
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view = view
+        self._hover_idx = QModelIndex()
+        self._pointing = False
+        self._fill_tag = QFont.Tag.fromString("FILL")
+        self._selected: set[int] = set()
+        view.viewport().installEventFilter(self)
+
+    def get_selected(self) -> set[int]:
+        return set(self._selected)
+
+    def clear_selection(self):
+        if self._selected:
+            self._selected.clear()
+            self.selectionChanged.emit()
+            self._view.viewport().update()
+
+    def _is_btn(self, index: QModelIndex) -> bool:
+        node = index.internalPointer() if index.isValid() else None
+        if not node or node.kind != "op":
+            return False
+        cols = self._columns
+        return 0 <= index.column() < len(cols) and cols[index.column()] == _CHECK_COL
+
+    @property
+    def _columns(self):
+        return self._view.model()._columns if self._view.model() else []
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        node = index.internalPointer()
+        if node is None or node.kind != "op":
+            return
+        cols = self._columns
+        if index.column() >= len(cols) or cols[index.column()] != _CHECK_COL:
+            return
+        df_idx = node.df_idx
+        hov = self._hover_idx == index
+        icon = self._IC_ON if df_idx in self._selected else self._IC_OFF
+        painter.save()
+        f = QFont(self._IC_FONT)
+        f.setPixelSize(18)
+        f.setVariableAxis(self._fill_tag, 1.0 if hov else 0.0)
+        painter.setFont(f)
+        painter.setPen(self._IC_COLOR)
+        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, icon)
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if (event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._is_btn(index)):
+            node = index.internalPointer()
+            if node and node.df_idx is not None:
+                df_idx = node.df_idx
+                if df_idx in self._selected:
+                    self._selected.discard(df_idx)
+                else:
+                    self._selected.add(df_idx)
+                self._view.viewport().update(self._view.visualRect(index))
+                self.selectionChanged.emit()
+            return True
+        return super().editorEvent(event, model, option, index)
+
+    def eventFilter(self, obj, event):
+        if obj is self._view.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                idx = self._view.indexAt(event.position().toPoint())
+                on_btn = self._is_btn(idx)
+
+                if on_btn and not self._pointing:
+                    self._pointing = True
+                    QApplication.setOverrideCursor(Qt.CursorShape.PointingHandCursor)
+                elif not on_btn and self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
+
+                new_hover = idx if on_btn else QModelIndex()
+                if new_hover != self._hover_idx:
+                    old = self._hover_idx
+                    self._hover_idx = new_hover
+                    if old.isValid():
+                        self._view.viewport().update(self._view.visualRect(old))
+                    if new_hover.isValid():
+                        self._view.viewport().update(self._view.visualRect(new_hover))
+
+            elif event.type() == QEvent.Type.Leave:
+                if self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
+                if self._hover_idx.isValid():
+                    old = self._hover_idx
+                    self._hover_idx = QModelIndex()
+                    self._view.viewport().update(self._view.visualRect(old))
+
+        return super().eventFilter(obj, event)
 
 
 class _CategoryDelegate(_CellDelegate):
@@ -1627,10 +1738,93 @@ class LoadSettingsDialog(QDialog):
 #  Виджет строки разбивки (для Add/Edit диалогов)                             #
 # =========================================================================== #
 
+class _PlotComboBox(QComboBox):
+    """Выпадающий список участков с фильтрацией по вводу.
+
+    При вводе текста список фильтруется в реальном времени (MatchContains).
+    Допускается только выбор существующего значения — при потере фокуса
+    или нажатии Enter невалидное значение сбрасывается.
+    """
+
+    _STYLE = """
+        QComboBox {
+            background: #F8F9FA; border: 1px solid #D1D5DB;
+            border-radius: 5px; color: #374151; padding: 7px 10px;
+            padding-right: 28px; font-size: 13px;
+        }
+        QComboBox:focus { border: 1px solid #07414F; }
+        QComboBox::drop-down {
+            subcontrol-origin: padding; subcontrol-position: center right;
+            width: 28px; border: none; border-left: 1px solid #E5E7EB;
+            border-radius: 0 4px 4px 0;
+        }
+        QComboBox::down-arrow {
+            image: none; width: 10px; height: 10px;
+        }
+        QComboBox QAbstractItemView {
+            background: #FFFFFF; border: 1px solid #D1D5DB;
+            border-radius: 6px; padding: 4px;
+            selection-background-color: #E8F0F5; selection-color: #07414F;
+        }
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setStyleSheet(self._STYLE)
+        self.addItem("")
+        self._fill_items()
+
+        completer = self.completer()
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+
+        self._valid_values: set[str] = {""}
+        self.lineEdit().editingFinished.connect(self._validate)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Стрелка вниз
+        arrow_x = self.width() - 22
+        painter.setPen(QColor("#6B7280"))
+        f = QFont("Material Symbols Rounded")
+        f.setPixelSize(18)
+        painter.setFont(f)
+        arrow_rect = QRectF(arrow_x, 0, 22, self.height())
+        painter.drawText(arrow_rect, Qt.AlignmentFlag.AlignCenter, chr(0xE5C5))
+        painter.restore()
+
+    def _fill_items(self):
+        try:
+            if os.path.exists(_PLOTS_FILE):
+                with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
+                    plots = json.load(f)
+                nums = sorted(
+                    set(str(p.get("num", "")) for p in plots if p.get("num")),
+                    key=lambda s: (0, int(s), s) if s.isdigit() else (1, 0, s),
+                )
+                for num in nums:
+                    self.addItem(num)
+                self._valid_values = {"", *nums}
+        except Exception:
+            pass
+
+    def _validate(self):
+        text = self.currentText().strip()
+        if text and text not in self._valid_values:
+            self.setCurrentIndex(0)
+
+
 class _SplitRowWidget(QWidget):
     """Одна строка разбивки: Сумма / Категория / Участок / кнопка удаления."""
 
     deleteRequested = pyqtSignal(object)  # self
+    sumChanged = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1641,6 +1835,7 @@ class _SplitRowWidget(QWidget):
         self.inp_summa = QLineEdit()
         self.inp_summa.setPlaceholderText("Сумма")
         self.inp_summa.setMaximumWidth(120)
+        self.inp_summa.textChanged.connect(lambda: self.sumChanged.emit())
         lay.addWidget(self.inp_summa)
 
         self.combo_cat = _CategoryPillButton(neutral_label="")
@@ -1650,10 +1845,7 @@ class _SplitRowWidget(QWidget):
             self.combo_cat.setCurrentIndex(0)
         lay.addWidget(self.combo_cat, stretch=1)
 
-        self.combo_plot = QComboBox()
-        self.combo_plot.setEditable(True)
-        self.combo_plot.addItem("")
-        self._fill_plot_combo()
+        self.combo_plot = _PlotComboBox()
         self.combo_plot.setMaximumWidth(100)
         lay.addWidget(self.combo_plot)
 
@@ -1668,20 +1860,6 @@ class _SplitRowWidget(QWidget):
         )
         btn_del.clicked.connect(lambda: self.deleteRequested.emit(self))
         lay.addWidget(btn_del)
-
-    def _fill_plot_combo(self):
-        try:
-            if os.path.exists(_PLOTS_FILE):
-                with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
-                    plots = json.load(f)
-                nums = sorted(
-                    set(str(p.get("num", "")) for p in plots if p.get("num")),
-                    key=lambda s: (0, int(s), s) if s.isdigit() else (1, 0, s),
-                )
-                for num in nums:
-                    self.combo_plot.addItem(num)
-        except Exception:
-            pass
 
     def get_data(self) -> dict:
         raw = (self.inp_summa.text().strip()
@@ -1705,7 +1883,7 @@ class _SplitRowWidget(QWidget):
         idx = self.combo_cat.findText(cat)
         if idx >= 0:
             self.combo_cat.setCurrentIndex(idx)
-        self.combo_plot.setEditText(str(data.get("Участок") or ""))
+        self.combo_plot.setCurrentText(str(data.get("Участок") or ""))
 
 
 class AddRowDialog(QDialog):
@@ -1735,6 +1913,7 @@ class AddRowDialog(QDialog):
 
         self.inp_summa = QLineEdit()
         self.inp_summa.setPlaceholderText("например: 1500 (поступление) или -500 (списание)")
+        self.inp_summa.textChanged.connect(self._update_save_state)
         form.addRow("Сумма, ₽:", self.inp_summa)
 
         self.inp_cont = QLineEdit()
@@ -1752,10 +1931,7 @@ class AddRowDialog(QDialog):
             self.combo_cat.setCurrentIndex(0)
         form.addRow("Категория:", self.combo_cat)
 
-        self.combo_plot = QComboBox()
-        self.combo_plot.setEditable(True)
-        self.combo_plot.addItem("")
-        self._fill_plot_combo()
+        self.combo_plot = _PlotComboBox()
         form.addRow("Участок:", self.combo_plot)
 
         lay.addLayout(form)
@@ -1802,14 +1978,26 @@ class AddRowDialog(QDialog):
         sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
         lay.addWidget(sep)
 
+        self._split_warning = QLabel()
+        self._split_warning.setObjectName("splitWarning")
+        self._split_warning.setWordWrap(True)
+        self._split_warning.setStyleSheet(
+            "color:#9CA3AF; background:transparent; font-size:12px;"
+        )
+        lay.addWidget(self._split_warning)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Добавить")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        self._btn_save = btns.button(QDialogButtonBox.StandardButton.Ok)
+        self._btn_save.setText("Добавить")
+        btn_cancel = btns.button(QDialogButtonBox.StandardButton.Cancel)
+        btn_cancel.setText("Отмена")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
+        self._update_save_state()
 
     def _on_split_toggle(self):
         if self._split_section.isVisible():
@@ -1825,6 +2013,7 @@ class AddRowDialog(QDialog):
             self._add_split_row()
             self._add_split_row()
         self.adjustSize()
+        self._update_save_state()
 
     def _add_split_row(self):
         row = _SplitRowWidget(self._split_section)
@@ -1832,6 +2021,7 @@ class AddRowDialog(QDialog):
         self._split_rows_lay.addWidget(row)
         self._split_rows.append(row)
         self.adjustSize()
+        self._update_save_state()
 
     def _remove_split_row(self, row: "_SplitRowWidget"):
         if row in self._split_rows:
@@ -1839,35 +2029,63 @@ class AddRowDialog(QDialog):
             self._split_rows_lay.removeWidget(row)
             row.deleteLater()
             self.adjustSize()
+            self._update_save_state()
 
-    def _fill_plot_combo(self):
-        try:
-            if os.path.exists(_PLOTS_FILE):
-                with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
-                    plots = json.load(f)
-                nums = sorted(
-                    set(str(p.get("num", "")) for p in plots if p.get("num")),
-                    key=lambda s: (0, int(s), s) if s.isdigit() else (1, 0, s),
-                )
-                for num in nums:
-                    self.combo_plot.addItem(num)
-        except Exception:
-            pass
+    def _update_save_state(self):
+        if not hasattr(self, '_btn_save') or self._btn_save is None:
+            return
+        split_ok = True
+        if self._split_rows and self._split_section.isVisible():
+            raw = (self.inp_summa.text().strip()
+                   .replace(",", ".").replace("\u2212", "-").replace("\u2013", "-").replace(" ", ""))
+            try:
+                main_sum = float(raw) if raw else 0.0
+            except ValueError:
+                main_sum = 0.0
+            split_sum = 0.0
+            for row in self._split_rows:
+                rd = row.get_data()
+                split_sum += rd.get("Сумма", 0.0)
+            split_ok = abs(main_sum - split_sum) < 0.01
+        self._btn_save.setEnabled(split_ok)
+        self._btn_save.setCursor(
+            Qt.CursorShape.PointingHandCursor if split_ok else Qt.CursorShape.ArrowCursor
+        )
+        _text = "Сумма разбитых строк должна равняться сумме операции"
+        if split_ok:
+            self._split_warning.setStyleSheet(
+                "color:#9CA3AF; background:transparent; font-size:12px;"
+            )
+        else:
+            self._split_warning.setStyleSheet(
+                "color:#B45309; background:transparent; font-size:12px; font-weight:600;"
+            )
+        self._split_warning.setText(f"\u2139  {_text}")
+        self._split_warning.setVisible(self._split_section.isVisible() and not split_ok)
+
+    def _prefill(self, data: dict, breakdown: list):
+        ts = _to_ts(data.get("Дата"))
+        if ts is not None:
+            self.date_edit.setDate(QDate(ts.year, ts.month, ts.day))
+        num = _to_num(data.get("Сумма"))
+        if num is not None:
+            self.inp_summa.setText(_num_edit_str(num))
+        self.inp_cont.setText(str(data.get("Контрагент") or ""))
+        self.inp_cont.setCursorPosition(0)
+        self.inp_nazn.setText(str(data.get("Назначение") or ""))
+        self.inp_nazn.setCursorPosition(0)
+        cat = str(data.get("Категория") or "")
+        idx = self.combo_cat.findText(cat)
+        if idx >= 0:
+            self.combo_cat.setCurrentIndex(idx)
+        self.combo_plot.setCurrentText(str(data.get("Участок") or ""))
+        if breakdown:
+            self._on_split_toggle()
+            for bd in breakdown:
+                self._add_split_row(bd)
+            self._update_save_state()
 
     def _on_accept(self):
-        raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
-        if not raw:
-            QMessageBox.warning(self, "Ошибка", "Укажите сумму операции")
-            return
-        try:
-            float(raw)
-        except ValueError:
-            QMessageBox.warning(self, "Ошибка", "Некорректный формат суммы")
-            return
-        self.accept()
-
-    def get_result(self) -> dict:
         raw = (self.inp_summa.text().strip()
                .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
         d = self.date_edit.date()
@@ -2024,6 +2242,7 @@ class EditOperationDialog(QDialog):
 
         self.inp_summa = QLineEdit()
         self.inp_summa.setPlaceholderText("например: 1500 (поступление) или -500 (списание)")
+        self.inp_summa.textChanged.connect(self._update_save_state)
         form.addRow("Сумма, ₽:", self.inp_summa)
 
         self.inp_cont = QLineEdit()
@@ -2041,10 +2260,7 @@ class EditOperationDialog(QDialog):
             self.combo_cat.setCurrentIndex(0)
         form.addRow("Категория:", self.combo_cat)
 
-        self.combo_plot = QComboBox()
-        self.combo_plot.setEditable(True)
-        self.combo_plot.addItem("")
-        self._fill_plot_combo()
+        self.combo_plot = _PlotComboBox()
         form.addRow("Участок:", self.combo_plot)
 
         lay.addLayout(form)
@@ -2089,14 +2305,26 @@ class EditOperationDialog(QDialog):
         sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
         lay.addWidget(sep)
 
+        self._split_warning = QLabel()
+        self._split_warning.setObjectName("splitWarning")
+        self._split_warning.setWordWrap(True)
+        self._split_warning.setStyleSheet(
+            "color:#9CA3AF; background:transparent; font-size:12px;"
+        )
+        lay.addWidget(self._split_warning)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        self._btn_save = btns.button(QDialogButtonBox.StandardButton.Ok)
+        self._btn_save.setText("Сохранить")
+        btn_cancel = btns.button(QDialogButtonBox.StandardButton.Cancel)
+        btn_cancel.setText("Отмена")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
+        self._update_save_state()
 
     def _on_split_toggle(self):
         if self._split_section.isVisible():
@@ -2112,15 +2340,18 @@ class EditOperationDialog(QDialog):
             self._add_split_row()
             self._add_split_row()
         self.adjustSize()
+        self._update_save_state()
 
     def _add_split_row(self, data: dict = None):
         row = _SplitRowWidget(self._split_section)
         if data:
             row.set_data(data)
         row.deleteRequested.connect(self._remove_split_row)
+        row.sumChanged.connect(self._update_save_state)
         self._split_rows_lay.addWidget(row)
         self._split_rows.append(row)
         self.adjustSize()
+        self._update_save_state()
 
     def _remove_split_row(self, row: "_SplitRowWidget"):
         if row in self._split_rows:
@@ -2128,6 +2359,39 @@ class EditOperationDialog(QDialog):
             self._split_rows_lay.removeWidget(row)
             row.deleteLater()
             self.adjustSize()
+            self._update_save_state()
+
+    def _update_save_state(self):
+        if not hasattr(self, '_btn_save') or self._btn_save is None:
+            return
+        split_ok = True
+        if self._split_rows and self._split_section.isVisible():
+            raw = (self.inp_summa.text().strip()
+                   .replace(",", ".").replace("\u2212", "-").replace("\u2013", "-").replace(" ", ""))
+            try:
+                main_sum = float(raw) if raw else 0.0
+            except ValueError:
+                main_sum = 0.0
+            split_sum = 0.0
+            for row in self._split_rows:
+                rd = row.get_data()
+                split_sum += rd.get("Сумма", 0.0)
+            split_ok = abs(main_sum - split_sum) < 0.01
+        self._btn_save.setEnabled(split_ok)
+        self._btn_save.setCursor(
+            Qt.CursorShape.PointingHandCursor if split_ok else Qt.CursorShape.ArrowCursor
+        )
+        _text = "Сумма разбитых строк должна равняться сумме операции"
+        if split_ok:
+            self._split_warning.setStyleSheet(
+                "color:#9CA3AF; background:transparent; font-size:12px;"
+            )
+        else:
+            self._split_warning.setStyleSheet(
+                "color:#B45309; background:transparent; font-size:12px; font-weight:600;"
+            )
+        self._split_warning.setText(f"\u2139  {_text}")
+        self._split_warning.setVisible(self._split_section.isVisible() and not split_ok)
 
     def _prefill(self, data: dict, breakdown: list):
         ts = _to_ts(data.get("Дата"))
@@ -2137,36 +2401,36 @@ class EditOperationDialog(QDialog):
         if num is not None:
             self.inp_summa.setText(_num_edit_str(num))
         self.inp_cont.setText(str(data.get("Контрагент") or ""))
+        self.inp_cont.setCursorPosition(0)
         self.inp_nazn.setText(str(data.get("Назначение") or ""))
+        self.inp_nazn.setCursorPosition(0)
         cat = str(data.get("Категория") or "")
         idx = self.combo_cat.findText(cat)
         if idx >= 0:
             self.combo_cat.setCurrentIndex(idx)
-        self.combo_plot.setEditText(str(data.get("Участок") or ""))
-
+        self.combo_plot.setCurrentText(str(data.get("Участок") or ""))
         if breakdown:
-            self._split_section.setVisible(True)
-            self._btn_split.setText("  Отменить разделение")
-            for item in breakdown:
-                self._add_split_row(item)
-
-    def _fill_plot_combo(self):
-        try:
-            if os.path.exists(_PLOTS_FILE):
-                with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
-                    plots = json.load(f)
-                nums = sorted(
-                    set(str(p.get("num", "")) for p in plots if p.get("num")),
-                    key=lambda s: (0, int(s), s) if s.isdigit() else (1, 0, s),
-                )
-                for num in nums:
-                    self.combo_plot.addItem(num)
-        except Exception:
-            pass
+            self._on_split_toggle()
+            for bd in breakdown:
+                self._add_split_row(bd)
+            self._update_save_state()
 
     def _on_accept(self):
         raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
+               .replace(",", ".").replace("\u2212", "-").replace("\u2013", "-").replace(" ", ""))
+        if not raw:
+            QMessageBox.warning(self, "Ошибка", "Укажите сумму операции")
+            return
+        try:
+            float(raw)
+        except ValueError:
+            QMessageBox.warning(self, "Ошибка", "Некорректный формат суммы")
+            return
+        self.accept()
+
+    def get_result(self) -> dict:
+        raw = (self.inp_summa.text().strip()
+               .replace(",", ".").replace("\u2212", "-").replace("\u2013", "-").replace(" ", ""))
         if not raw:
             QMessageBox.warning(self, "Ошибка", "Укажите сумму операции")
             return
@@ -2501,12 +2765,17 @@ class _DetailHeaderView(QHeaderView):
     """Кастомная шапка таблицы в стиле вкладки «Список участков»."""
 
     catFilterChanged = pyqtSignal(object)   # set[str]
+    searchChanged    = pyqtSignal(int, str)   # (col_logical, text)
+    deleteRequested  = pyqtSignal()
 
     _BG      = QColor("#C9D8E2")
     _FG      = QColor("#07414F")
     _BORDER  = QColor("#B5C8D5")
     _ARR_ON  = QColor("#07414F")
     _ARR_OFF = QColor("#9AABB6")
+    _DEL_OFF = QColor("#9CA3AF")
+    _DEL_ON  = QColor("#DC2626")
+    _DEL_HOV = QColor("#B91C1C")
     _IC_W    = 22
 
     def __init__(self, parent=None):
@@ -2518,6 +2787,75 @@ class _DetailHeaderView(QHeaderView):
         self._cat_col:    int                  = -1
         self._cat_active: bool                 = False
         self._cat_popup:  "_CatFilterPopup | None" = None
+        self._search_cols:   set  = set()
+        self._search_active: dict = {}
+        self._search_fields: dict = {}
+        self._del_col: int = -1
+        self._has_sel: bool = False
+        self._del_hovered: bool = False
+        self._fill_tag = QFont.Tag.fromString("FILL")
+
+    # ------------------------------------------------------------------ delete #
+
+    def set_delete_col(self, col: int):
+        self._del_col = col
+
+    def set_has_selection(self, has: bool):
+        if self._has_sel != has:
+            self._has_sel = has
+            if not has:
+                self._del_hovered = False
+                self.viewport().unsetCursor()
+            self.viewport().update()
+
+    # ------------------------------------------------------------------ search #
+
+    def add_search_col(self, col: int):
+        """Регистрирует столбец как поисковой и создаёт поле ввода."""
+        self._search_cols.add(col)
+        le = QLineEdit(self.viewport())
+        le.setPlaceholderText("Поиск...")
+        le.hide()
+        le.setStyleSheet(
+            "QLineEdit {"
+            "  background: rgba(255,255,255,0.45);"
+            "  border: 1px solid rgba(7,65,79,0.5);"
+            "  border-radius: 3px;"
+            "  color: #07414F;"
+            "  font-size: 12px;"
+            "  padding: 1px 4px;"
+            "}"
+        )
+        le.textChanged.connect(lambda text, c=col: self.searchChanged.emit(c, text))
+        self._search_fields[col] = le
+        self._search_active[col] = False
+
+    def _toggle_search(self, col: int):
+        now = not self._search_active.get(col, False)
+        self._search_active[col] = now
+        le = self._search_fields.get(col)
+        if le:
+            if now:
+                le.show()
+                le.setFocus()
+            else:
+                le.hide()
+                le.clear()
+        self.viewport().update()
+
+    def _search_icon_zone(self, logical: int, sec_rect: QRect) -> QRect:
+        """QRect иконки поиска или закрытия поиска для кликов/курсора."""
+        IC_W   = self._IC_W
+        arr_x  = sec_rect.right() - 18 - 2
+        if self._search_active.get(logical, False):
+            return QRect(arr_x - IC_W - 2, sec_rect.top(), IC_W, sec_rect.height())
+        label  = str(self.model().headerData(
+            logical, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or "")
+        f      = QFont(); f.setPixelSize(12); f.setBold(True)
+        title_max_w = max(0, arr_x - sec_rect.left() - IC_W - 16)
+        tw     = min(QFontMetrics(f).horizontalAdvance(label), title_max_w)
+        si_x   = min(sec_rect.left() + 10 + tw + 4, arr_x - IC_W - 2)
+        return QRect(si_x, sec_rect.top(), IC_W, sec_rect.height())
 
     # ------------------------------------------------------------------ setup #
 
@@ -2539,8 +2877,15 @@ class _DetailHeaderView(QHeaderView):
         self.catFilterChanged.emit(selected)
 
     def _cat_icon_zone(self, sec_rect: QRect) -> QRect:
+        IC_W  = self._IC_W
         arr_x = sec_rect.right() - 18 - 2
-        return QRect(arr_x - self._IC_W - 2, sec_rect.top(), self._IC_W, sec_rect.height())
+        label = str(self.model().headerData(
+            self._cat_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or "")
+        f     = QFont(); f.setPixelSize(12); f.setBold(True)
+        title_max_w = max(0, arr_x - sec_rect.left() - IC_W - 16)
+        tw    = min(QFontMetrics(f).horizontalAdvance(label), title_max_w)
+        si_x  = min(sec_rect.left() + 10 + tw + 4, arr_x - IC_W - 2)
+        return QRect(si_x, sec_rect.top(), IC_W, sec_rect.height())
 
     # ------------------------------------------------------------------ paint #
 
@@ -2567,34 +2912,90 @@ class _DetailHeaderView(QHeaderView):
                 painter.setPen(self._FG)
                 painter.setFont(f_ic)
                 painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+            elif logical_index == self._del_col:
+                # Столбец удаления: рисуем иконку корзины
+                f_ic = QFont("Material Symbols Rounded"); f_ic.setPixelSize(18)
+                f_ic.setVariableAxis(self._fill_tag, 1.0 if self._del_hovered and self._has_sel else 0.0)
+                painter.setFont(f_ic)
+                if self._has_sel:
+                    if self._del_hovered:
+                        painter.setPen(self._DEL_HOV)
+                    else:
+                        painter.setPen(self._DEL_ON)
+                else:
+                    painter.setPen(self._DEL_OFF)
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, chr(0xE92B))
             else:
                 is_cat   = (logical_index == self._cat_col)
+                is_srch  = (logical_index in self._search_cols)
+                is_active = self._search_active.get(logical_index, False)
                 IC_W     = self._IC_W
                 arr_x    = rect.right() - 18 - 2
                 arr_rect = QRect(arr_x, rect.top(), 18, rect.height())
 
-                if is_cat:
-                    icon_x    = arr_x - IC_W - 2
-                    text_rect = QRect(rect.left() + 10, rect.top(),
-                                      icon_x - rect.left() - 4, rect.height())
-                else:
-                    text_rect = QRect(rect.left() + 10, rect.top(),
-                                      arr_rect.left() - rect.left() - 4, rect.height())
-
-                painter.setPen(self._FG)
-                f = QFont(); f.setPixelSize(12); f.setBold(True)
-                painter.setFont(f)
-                painter.drawText(text_rect,
-                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                                 label)
-
-                if is_cat:
-                    icon_rect = QRect(arr_x - IC_W - 2, rect.top(), IC_W, rect.height())
+                if is_srch and is_active:
+                    # Активный поиск: поле ввода + иконка закрытия
+                    off_x    = arr_x - IC_W - 2
+                    off_rect = QRect(off_x, rect.top(), IC_W, rect.height())
+                    le       = self._search_fields[logical_index]
+                    le_h     = 22
+                    le_rect  = QRect(rect.left() + 8,
+                                     rect.top() + (rect.height() - le_h) // 2,
+                                     max(0, off_x - rect.left() - 10),
+                                     le_h)
+                    le.setGeometry(le_rect)
+                    if not le.isVisible():
+                        le.show()
+                        le.setFocus()
                     f_ico = QFont("Material Symbols Rounded"); f_ico.setPixelSize(18)
                     painter.setFont(f_ico)
                     painter.setPen(self._FG)
-                    painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter,
-                                     chr(0xEA76) if self._cat_active else chr(0xE8B6))
+                    painter.drawText(off_rect, Qt.AlignmentFlag.AlignCenter, chr(0xEA76))
+                else:
+                    # Скрыть поле ввода, если было активно
+                    if is_srch:
+                        le = self._search_fields.get(logical_index)
+                        if le and le.isVisible():
+                            le.hide()
+
+                    if is_cat:
+                        title_max_w_cat = max(0, arr_x - rect.left() - IC_W - 16)
+                        text_rect = QRect(rect.left() + 10, rect.top(),
+                                          title_max_w_cat, rect.height())
+                    elif is_srch:
+                        title_max_w = max(0, arr_x - rect.left() - IC_W - 16)
+                        text_rect = QRect(rect.left() + 10, rect.top(),
+                                          title_max_w, rect.height())
+                    else:
+                        text_rect = QRect(rect.left() + 10, rect.top(),
+                                          arr_rect.left() - rect.left() - 4, rect.height())
+
+                    painter.setPen(self._FG)
+                    f = QFont(); f.setPixelSize(12); f.setBold(True)
+                    painter.setFont(f)
+                    painter.drawText(text_rect,
+                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                     label)
+
+                    if is_cat:
+                        fm_t  = QFontMetrics(f)
+                        tw    = min(fm_t.horizontalAdvance(label), title_max_w_cat)
+                        si_x  = min(rect.left() + 10 + tw + 4, arr_x - IC_W - 2)
+                        icon_rect = QRect(si_x, rect.top(), IC_W, rect.height())
+                        f_ico = QFont("Material Symbols Rounded"); f_ico.setPixelSize(18)
+                        painter.setFont(f_ico)
+                        painter.setPen(self._FG)
+                        painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter,
+                                         chr(0xEA76) if self._cat_active else chr(0xE8B6))
+                    elif is_srch:
+                        fm_t  = QFontMetrics(f)
+                        tw    = min(fm_t.horizontalAdvance(label), title_max_w)
+                        si_x  = min(rect.left() + 10 + tw + 4, arr_x - IC_W - 2)
+                        si_r  = QRect(si_x, rect.top(), IC_W, rect.height())
+                        f_ico = QFont("Material Symbols Rounded"); f_ico.setPixelSize(18)
+                        painter.setFont(f_ico)
+                        painter.setPen(self._FG)
+                        painter.drawText(si_r, Qt.AlignmentFlag.AlignCenter, chr(0xE8B6))
 
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 cx = arr_rect.left() + arr_rect.width() // 2
@@ -2618,10 +3019,28 @@ class _DetailHeaderView(QHeaderView):
     # --------------------------------------------------------------- mouse #
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self._cat_col >= 0:
+        if event.button() == Qt.MouseButton.LeftButton:
             pos     = event.position().toPoint()
             logical = self.logicalIndexAt(pos.x())
-            if logical == self._cat_col:
+
+            # Корзина удаления
+            if self._del_col >= 0 and self._has_sel:
+                sec_x = self.sectionViewportPosition(self._del_col)
+                sec_w = self.sectionSize(self._del_col)
+                if sec_x <= pos.x() < sec_x + sec_w:
+                    self.deleteRequested.emit()
+                    return
+
+            # Поиск в столбцах
+            if logical in self._search_cols:
+                sec_x    = self.sectionViewportPosition(logical)
+                sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
+                if self._search_icon_zone(logical, sec_rect).contains(pos):
+                    self._toggle_search(logical)
+                    return
+
+            # Фильтр категорий
+            if self._cat_col >= 0 and logical == self._cat_col:
                 sec_x    = self.sectionViewportPosition(self._cat_col)
                 sec_rect = QRect(sec_x, 0, self.sectionSize(self._cat_col), self.height())
                 if self._cat_icon_zone(sec_rect).contains(pos):
@@ -2644,17 +3063,47 @@ class _DetailHeaderView(QHeaderView):
     def mouseMoveEvent(self, event):
         pos  = event.position().toPoint()
         hand = False
-        if self._cat_col >= 0:
-            logical = self.logicalIndexAt(pos.x())
-            if logical == self._cat_col:
-                sec_x    = self.sectionViewportPosition(self._cat_col)
-                sec_rect = QRect(sec_x, 0, self.sectionSize(self._cat_col), self.height())
-                if self._cat_icon_zone(sec_rect).contains(pos):
-                    hand = True
+        logical = self.logicalIndexAt(pos.x())
+
+        # Корзина удаления — hover
+        if self._del_col >= 0 and self._has_sel:
+            sec_x = self.sectionViewportPosition(self._del_col)
+            sec_w = self.sectionSize(self._del_col)
+            hov = sec_x <= pos.x() < sec_x + sec_w
+            if hov != self._del_hovered:
+                self._del_hovered = hov
+                self.viewport().update()
+            if hov:
+                hand = True
+        else:
+            if self._del_hovered:
+                self._del_hovered = False
+                self.viewport().update()
+
+        # Курсор-рука на иконках поиска
+        if not hand and logical in self._search_cols:
+            sec_x    = self.sectionViewportPosition(logical)
+            sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
+            if self._search_icon_zone(logical, sec_rect).contains(pos):
+                hand = True
+
+        # Курсор-рука на иконке категорий
+        if not hand and self._cat_col >= 0 and logical == self._cat_col:
+            sec_x    = self.sectionViewportPosition(self._cat_col)
+            sec_rect = QRect(sec_x, 0, self.sectionSize(self._cat_col), self.height())
+            if self._cat_icon_zone(sec_rect).contains(pos):
+                hand = True
+
         self.viewport().setCursor(
             Qt.CursorShape.PointingHandCursor if hand else Qt.CursorShape.ArrowCursor
         )
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self._del_hovered:
+            self._del_hovered = False
+            self.viewport().update()
+        super().leaveEvent(event)
 
 
 # =========================================================================== #
@@ -2780,7 +3229,10 @@ class DetailWidget(QWidget):
         self.tree.setHeader(self.hdr_view)
         self.hdr_view.setStretchLastSection(False)
         self.hdr_view.catFilterChanged.connect(self._on_hdr_cat_filter_changed)
+        self.hdr_view.searchChanged.connect(self._on_hdr_search_changed)
+        self._hdr_search_filters: dict[int, str] = {}
         self.tree.setStyleSheet(self._TREE_STYLE)
+        self.tree.setViewportMargins(0, self.hdr_view.height(), 0, 0)
 
         self._cell_delegate = _CellDelegate(self.tree)
         self._category_delegate = _CategoryDelegate(ALL_CATEGORIES, self.tree)
@@ -2788,6 +3240,9 @@ class DetailWidget(QWidget):
         self._branch_delegate = _BranchColumnDelegate(self.tree)
         self._branch_delegate.toggleRequested.connect(self._on_toggle)
         self._edit_delegate = _DetailEditDelegate(self.tree)
+        self._check_delegate = _DetailCheckDelegate(self.tree)
+        self._check_delegate.selectionChanged.connect(self._on_check_selection_changed)
+        self.hdr_view.deleteRequested.connect(self._delete_selected)
         self.tree.setItemDelegate(self._cell_delegate)
         self.tree.clicked.connect(self._on_tree_clicked)
         self.tree.expanded.connect(
@@ -2949,8 +3404,8 @@ class DetailWidget(QWidget):
 
     def _apply_header_layout(self, columns: list[str]):
         col_widths = {
-            _EDIT_COL: 46,
-            "Дата": 95, "Сумма": 140, "Категория": 210, "Участок": 80,
+            _CHECK_COL: 36, _EDIT_COL: 46,
+            "Дата": 95, "Сумма": 140, "Категория": 210, "Участок": 120,
         }
         stretch_cols = {"Контрагент", "Назначение"}
         header = self.tree.header()
@@ -2963,13 +3418,24 @@ class DetailWidget(QWidget):
                 self.tree.setColumnWidth(col_idx, col_widths[col])
             else:
                 header.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.ResizeToContents)
-        # Делегат регистрируется по индексу — обновляем после каждой загрузки
+        # Делегат чекбокса
+        if _CHECK_COL in columns:
+            check_idx = columns.index(_CHECK_COL)
+            self.tree.setItemDelegateForColumn(check_idx, self._check_delegate)
+            self.hdr_view.set_delete_col(check_idx)
+        # Делегат редактирования
         if _EDIT_COL in columns:
             self.tree.setItemDelegateForColumn(columns.index(_EDIT_COL), self._edit_delegate)
         if "Категория" in columns:
             self.hdr_view.set_cat_col(
                 columns.index("Категория"), list(ALL_CATEGORIES), self._hdr_cat_filter
             )
+        # Регистрируем поисковые столбцы (Контрагент, Назначение, Участок)
+        for search_name in ("Контрагент", "Назначение", "Участок"):
+            if search_name in columns:
+                col_idx = columns.index(search_name)
+                if col_idx not in self.hdr_view._search_cols:
+                    self.hdr_view.add_search_col(col_idx)
 
     # -------------------------------------------------- замечания ----------- #
     def _compute_warnings(self) -> dict:
@@ -3023,7 +3489,7 @@ class DetailWidget(QWidget):
                     issue_idx.add(idx)
 
         if "Категория" in self.df_full.columns:
-            mask = self.df_full["Категория"].astype(str) == "Членские взносы + Электроэнергия (авто)"
+            mask = self.df_full["Категория"].astype(str) == "Членские взносы + Электроэнергия"
             out["need_split"] = int(mask.sum())
             issue_idx.update(self.df_full.index[mask].tolist())
 
@@ -3339,6 +3805,10 @@ class DetailWidget(QWidget):
         drop_cols = {"Номер", "Номер счёта", "Контрагент счёт", "Контрагент cчёт", "Теги"}
         df = df.drop(columns=[c for c in drop_cols if c in df.columns])
         df = _merge_to_summa(df)
+        if "Категория" in df.columns:
+            df["Категория"] = df["Категория"].apply(
+                lambda v: v[:-len(" (авто)")] if isinstance(v, str) and v.endswith(" (авто)") else v
+            )
         df = _ensure_meta_columns(df)
         self.df_full = df
         min_d, max_d = df["Дата"].min(), df["Дата"].max()
@@ -3419,6 +3889,19 @@ class DetailWidget(QWidget):
             )
             df = df[mask]
 
+        # Поисковые фильтры из заголовков столбцов
+        if self._hdr_search_filters:
+            _col_names = {idx: name for idx, name in zip(
+                range(self.model.columnCount()),
+                self.model.columns()
+            ) if not name.startswith("\x00")}
+            for col_idx, text in self._hdr_search_filters.items():
+                if not text:
+                    continue
+                col_name = _col_names.get(col_idx)
+                if col_name and col_name in df.columns:
+                    df = df[df[col_name].astype(str).str.lower().str.contains(text, na=False)]
+
         # Фильтр по активному замечанию
         if self._active_warning == "dupes":
             if "_hash" in df.columns:
@@ -3439,7 +3922,7 @@ class DetailWidget(QWidget):
         elif self._active_warning == "need_split":
             if "Категория" in df.columns:
                 df = df[
-                    df["Категория"].astype(str) == "Членские взносы + Электроэнергия (авто)"
+                    df["Категория"].astype(str) == "Членские взносы + Электроэнергия"
                 ]
         elif self._active_warning == "no_plot":
             if "Категория" in df.columns and "Участок" in df.columns:
@@ -3496,6 +3979,13 @@ class DetailWidget(QWidget):
             self.hdr_view._cat_popup.clear_selection()
             self.hdr_view._cat_popup.blockSignals(False)
         self.hdr_view._cat_active = False
+        # Сбросить поисковые фильтры столбцов
+        for col_idx, le in self.hdr_view._search_fields.items():
+            if le.isVisible():
+                self.hdr_view._toggle_search(col_idx)
+        self._hdr_search_filters.clear()
+        # Сбросить выбор строк
+        self._check_delegate.clear_selection()
         self.hdr_view.viewport().update()
         if self.df_full is not None:
             min_d, max_d = self.df_full["Дата"].min(), self.df_full["Дата"].max()
@@ -3508,6 +3998,33 @@ class DetailWidget(QWidget):
     def _on_hdr_cat_filter_changed(self, selected: set):
         self._hdr_cat_filter = set(selected)
         self.apply_filters()
+
+    def _on_hdr_search_changed(self, col: int, text: str):
+        self._hdr_search_filters[col] = text.strip().lower()
+        self.apply_filters()
+
+    def _on_check_selection_changed(self):
+        has = bool(self._check_delegate.get_selected())
+        self.hdr_view.set_has_selection(has)
+
+    def _delete_selected(self):
+        indices = self._check_delegate.get_selected()
+        if not indices:
+            return
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Удаление строк")
+        msg.setText(f"Удалить {len(indices)} выбранных строк из детализации?")
+        msg.setIcon(QMessageBox.Icon.Warning)
+        btn_yes = msg.addButton("Да, удалить", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("Нет", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_yes)
+        msg.exec()
+        if msg.clickedButton() is not btn_yes:
+            return
+        self.df_full = self.df_full.drop(list(indices)).reset_index(drop=True)
+        self._check_delegate.clear_selection()
+        self.apply_filters()
+        self.dataLoaded.emit(self.df_full)
 
     # ------------------------------------------------------------ экспорт -- #
     def _export_excel(self):
