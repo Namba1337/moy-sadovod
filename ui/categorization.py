@@ -12,17 +12,58 @@ from core.utils import DATA_DIR
 _CATEGORIES_FILE = DATA_DIR / "snt_categories.json"
 
 _DEFAULT_CATEGORY_COLORS = {
-    "Членские взносы (авто)":                   QColor(30,  74, 120),
-    "Членские взносы + Электроэнергия (авто)":  QColor(20,  90, 100),
-    "Электроэнергия (от садоводов) (авто)":     QColor(90,  80,  10),
-    "Оплата электроэнергии (поставщик) (авто)": QColor(110, 55,  10),
-    "Налоги и штрафы (авто)":                   QColor(120, 30,  30),
-    "Программное обеспечение (авто)":           QColor(80,  40, 110),
-    "Материалы и работы (авто)":                QColor(20,  90,  40),
-    "Банковские комиссии (авто)":               QColor(80,  65,  20),
-    "Возврат (авто)":                           QColor(10,  90,  75),
-    "Прочее (авто)":                            QColor(55,  55,  60),
+    "Членские взносы":                   QColor(30,  74, 120),
+    "Членские взносы + Электроэнергия":  QColor(20,  90, 100),
+    "Электроэнергия (от садоводов)":     QColor(90,  80,  10),
+    "Оплата электроэнергии (поставщик)": QColor(110, 55,  10),
+    "Налоги и штрафы":                   QColor(120, 30,  30),
+    "Программное обеспечение":           QColor(80,  40, 110),
+    "Материалы и работы":                QColor(20,  90,  40),
+    "Банковские комиссии":               QColor(80,  65,  20),
+    "Возврат":                           QColor(10,  90,  75),
+    "Прочее":                            QColor(55,  55,  60),
 }
+
+def _strip_avto(name: str) -> str:
+    """Убирает суффикс ' (авто)' из имени категории."""
+    if name.endswith(" (авто)"):
+        return name[:-len(" (авто)")]
+    return name
+
+
+def _migrate_avto_categories(data: dict) -> bool:
+    """Миграция: переименовывает категории с '(авто)' в имена без суффикса.
+    Возвращает True если были изменения."""
+    changed = False
+    cats = data.get("categories")
+    if isinstance(cats, list):
+        new_cats = []
+        seen = set()
+        for c in cats:
+            c2 = _strip_avto(c)
+            if c2 not in seen:
+                new_cats.append(c2)
+                seen.add(c2)
+            if c2 != c:
+                changed = True
+        if new_cats != cats:
+            data["categories"] = new_cats
+            changed = True
+    colors = data.get("colors")
+    if isinstance(colors, dict):
+        new_colors = {}
+        for k, v in colors.items():
+            new_key = _strip_avto(k)
+            if new_key != k:
+                changed = True
+            if new_key not in new_colors:
+                new_colors[new_key] = v
+            else:
+                new_colors[new_key] = v
+        if changed:
+            data["colors"] = new_colors
+    return changed
+
 
 CATEGORY_COLORS = dict(_DEFAULT_CATEGORY_COLORS)
 
@@ -42,7 +83,10 @@ def _load_raw() -> dict:
         if _CATEGORIES_FILE.exists():
             with open(_CATEGORIES_FILE, "r", encoding="utf-8") as f:
                 d = json.load(f)
-            return d if isinstance(d, dict) else {"categories": d}
+            d = d if isinstance(d, dict) else {"categories": d}
+            if _migrate_avto_categories(d):
+                _save_raw(d)
+            return d
     except Exception:
         pass
     return {}
@@ -64,6 +108,14 @@ def load_user_categories() -> list[str]:
     cats = raw.get("categories")
     base = list(cats) if isinstance(cats, list) and cats \
         else list(_DEFAULT_CATEGORY_COLORS.keys())
+    # Дедупликация, сохраняя порядок
+    seen = set()
+    deduped = []
+    for c in base:
+        if c not in seen:
+            deduped.append(c)
+            seen.add(c)
+    base = deduped
     # Добавляем защищённые в начало, если их нет
     for p in reversed(sorted(PROTECTED_CATEGORIES)):
         if p not in base:
@@ -155,7 +207,7 @@ def categorize_row(row: dict) -> str:
     contragent = str(row.get("Контрагент", "")).lower()
 
     if "пермэнергосбыт" in contragent or "пермская энергосбытовая" in contragent:
-        result = "Оплата электроэнергии (поставщик) (авто)"
+        result = "Оплата электроэнергии (поставщик)"
     elif (  # electro + member
         any(w in text for w in [
             "электроэнерги", "электричеств", "эл/энерги", "эл.энерги",
@@ -170,7 +222,7 @@ def categorize_row(row: dict) -> str:
             "общественные нужды", "обществен нужды", "жкх", "ежегодный взнос",
         ])
     ):
-        result = "Членские взносы + Электроэнергия (авто)"
+        result = "Членские взносы + Электроэнергия"
     elif any(w in text for w in [
         "электроэнерги", "электричеств", "эл/энерги", "эл.энерги",
         "эл.знерги", "злектроэнерги", "эл энерги", "элект.энерги",
@@ -178,36 +230,36 @@ def categorize_row(row: dict) -> str:
         "зл.знерги", "электорэнерги", "потреблен", "электролени",
         "электротовар", "эликтричеств", "эл,энерги", "эл. энерги",
     ]):
-        result = "Электроэнергия (от садоводов) (авто)"
+        result = "Электроэнергия (от садоводов)"
     elif any(w in text for w in [
         "членск", "членнск", "чл.взн", "чл взн", "чл взнос",
         "взносы", "взнос", "садоводческий взнос", "садоводческое товарищество",
         "общественные нужды", "обществен нужды", "жкх", "ежегодный взнос",
     ]):
-        result = "Членские взносы (авто)"
+        result = "Членские взносы"
     elif re.search(r"долг|аванс|уч\.19;|2026\s*год|2025\s*год", text):
-        result = "Членские взносы (авто)"
+        result = "Членские взносы"
     elif ("контур" in text or "контур" in contragent
             or "программ" in text or "эвм" in text
             or "бухгалтер" in text or "модуль" in text):
-        result = "Программное обеспечение (авто)"
+        result = "Программное обеспечение"
     elif any(w in text for w in [
         "налог","ифнс","казначейств","взыскани","штраф","пени",
         "нк рф","енс","страховани","фз №125","требование",
     ]):
-        result = "Налоги и штрафы (авто)"
+        result = "Налоги и штрафы"
     elif "комисси" in text or "рко" in text or "задолженност" in text:
-        result = "Банковские комиссии (авто)"
+        result = "Банковские комиссии"
     elif "возврат" in text:
-        result = "Возврат (авто)"
+        result = "Возврат"
     elif any(w in text for w in [
         "материал","уборка снега","транспортн","подряд",
         "строит","хозяйственн","счет на оплату","счёт на оплату",
         "оплата по счету","оплата по счёту","оплата по договору",
     ]) or any(w in contragent for w in ["ип ", "ооо "]):
-        result = "Материалы и работы (авто)"
+        result = "Материалы и работы"
     else:
-        result = "Прочее (авто)"
+        result = "Прочее"
 
     _ensure_category(result)
     return result

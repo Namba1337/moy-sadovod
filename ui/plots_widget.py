@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 
 import pandas as pd
@@ -2310,7 +2310,19 @@ class PlotEditDialog(QDialog):
             self.inp_area.setCursorPosition(self.inp_area.cursorPosition()),
         ) if "." in t else None)
         self.inp_area.textChanged.connect(self._update_save_state)
-        form.addRow("Площадь, м²:", self.inp_area)
+        area_row = QHBoxLayout()
+        area_row.setSpacing(6)
+        area_row.addWidget(self.inp_area, stretch=1)
+        self._btn_distribute = QPushButton(chr(0xE897))
+        self._btn_distribute.setFixedSize(32, 32)
+        _f_ic = QFont("Material Symbols Rounded")
+        _f_ic.setPixelSize(18)
+        self._btn_distribute.setFont(_f_ic)
+        self._btn_distribute.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_distribute.setToolTip("Равномерно распределить площадь по собственникам")
+        self._btn_distribute.clicked.connect(self._distribute_area)
+        area_row.addWidget(self._btn_distribute)
+        form.addRow("Площадь, м²:", area_row)
 
         self._egrn_doc = _EgrnDocWidget(self._plot_data.get("egrn_doc", ""))
         form.addRow("Выписка ЕГРН:", self._egrn_doc)
@@ -2403,6 +2415,14 @@ class PlotEditDialog(QDialog):
         sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
         lay.addWidget(sep)
 
+        self._area_warning = QLabel()
+        self._area_warning.setObjectName("areaWarning")
+        self._area_warning.setWordWrap(True)
+        self._area_warning.setStyleSheet(
+            "color:#9CA3AF; background:transparent; font-size:12px;"
+        )
+        lay.addWidget(self._area_warning)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
             QDialogButtonBox.StandardButton.Cancel
@@ -2415,6 +2435,7 @@ class PlotEditDialog(QDialog):
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
+
         self._update_save_state()
 
     def _add_owner_field(self, name: str, is_owner: bool = True,
@@ -2534,24 +2555,61 @@ class PlotEditDialog(QDialog):
             total = float(total_raw) if total_raw.strip() else None
         except ValueError:
             total = None
+
+        owner_sum = 0.0
+        n_filled = 0
+        for a in self._owner_areas:
+            raw = a.text().replace(",", ".")
+            if raw.strip():
+                try:
+                    owner_sum += float(raw)
+                    n_filled += 1
+                except ValueError:
+                    pass
+
         if total is not None:
-            owner_sum = 0.0
-            n_filled = 0
-            for a in self._owner_areas:
-                raw = a.text().replace(",", ".")
-                if raw.strip():
-                    try:
-                        owner_sum += float(raw)
-                        n_filled += 1
-                    except ValueError:
-                        pass
             # Допуск: max ошибка округления до 2 знаков на каждого заполненного собственника
-            area_ok = owner_sum <= total + n_filled * 0.005 + 1e-9
+            tolerance = n_filled * 0.005 + 1e-9
+            area_ok = abs(owner_sum - total) <= tolerance
+        elif n_filled > 0:
+            # У собственников заполнены м², а у участка — нет
+            area_ok = False
+
         ok = fio_ok and area_ok
         self._btn_save.setEnabled(ok)
         self._btn_save.setCursor(
             Qt.CursorShape.PointingHandCursor if ok else Qt.CursorShape.ArrowCursor
         )
+        # Подсказка о площади
+        _text = "Площадь участка должна равняться площади собственников"
+        if area_ok:
+            self._area_warning.setStyleSheet(
+                "color:#9CA3AF; background:transparent; font-size:12px;"
+            )
+        else:
+            self._area_warning.setStyleSheet(
+                "color:#B45309; background:transparent; font-size:12px; font-weight:600;"
+            )
+        self._area_warning.setText(f"ℹ  {_text}")
+
+    def _distribute_area(self):
+        raw = self.inp_area.text().replace(",", ".").strip()
+        if not raw:
+            return
+        try:
+            total = float(raw)
+        except ValueError:
+            return
+        # Собираем индексы собственников с заполненными именами
+        owners = []
+        for i, inp in enumerate(self._owner_inputs):
+            if inp.text().strip():
+                owners.append(i)
+        if not owners:
+            return
+        per_owner = total / len(owners)
+        for i in owners:
+            self._owner_areas[i].setText(f"{per_owner:g}")
 
     def _sync_visible_auto(self):
         checked = [i for i, c in enumerate(self._owner_checks) if c.isChecked()]
@@ -2664,6 +2722,12 @@ class PlotEditDialog(QDialog):
             QDialogButtonBox QPushButton[text='Отмена']:hover {
                 background: #D1D5DB; color: #374151;
             }
+            QPushButton {
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #07414F; font-size: 14px;
+            }
+            QPushButton:hover { background: #E8F0F5; border: 1px solid #07414F; }
+            QPushButton:pressed { background: #D5E5ED; }
         """)
 
 
