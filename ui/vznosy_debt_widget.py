@@ -1,22 +1,26 @@
 import os
 import re
 
-from PyQt6.QtCore import Qt, QDate
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import Qt, QDate, QModelIndex, QAbstractItemModel, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QComboBox, QDateEdit, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QDateEdit, QDialog, QFileDialog,
+    QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QTreeView, QVBoxLayout, QWidget,
 )
 
 from core import energy
 from core.utils import fmt_money
 from ui.energy_card import _NumItem
+from ui.plots_widget import (
+    _SortHeaderView, _ClipFrame, _TREE_STYLE, _SB_W,
+    _is_visible, _is_owner, _owner_name,
+)
 from ui.vznosy_card import VznosyCardDialog
 from ui.rates_widget import VznosyRatesWidget
 
-# Светлые варианты цветов долга для таблицы: тёмный текст (из QSS) на светлом фоне.
-# Оригинальные тёмные цвета хранятся в debts_map для карты.
+# Светлые варианты цветов долга для таблицы.
 _DEBT_COLOR_LIGHT = {
     "#2e7d32": "#c8e6c9",
     "#f9a825": "#fff9c4",
@@ -24,6 +28,107 @@ _DEBT_COLOR_LIGHT = {
     "#c62828": "#ffcdd2",
 }
 
+
+# ============================================================================ #
+#  Модель данных                                                               #
+# ============================================================================ #
+
+class _VznosyModel(QAbstractItemModel):
+    """Плоская модель для таблицы долгов по ЧВ."""
+
+    COLUMNS = [
+        "Участок", "Собственник", "Площадь, м²",
+        "Начислено", "Оплачено", "Долг / Аванс",
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows: list[dict] = []
+
+    def load(self, rows: list[dict]):
+        self.beginResetModel()
+        self._rows = list(rows)
+        self.endResetModel()
+
+    def top_nodes(self) -> list[dict]:
+        return self._rows
+
+    # -- core tree (flat) ---------------------------------------------------- #
+
+    def index(self, row, column, parent=QModelIndex()):
+        if not self.hasIndex(row, column, parent):
+            return QModelIndex()
+        return self.createIndex(row, column, self._rows[row])
+
+    def parent(self, index):
+        return QModelIndex()
+
+    def rowCount(self, parent=QModelIndex()):
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self.COLUMNS)
+
+    # -- read ---------------------------------------------------------------- #
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        col = self.COLUMNS[index.column()]
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            return row.get(f"_text_{col}", "")
+
+        if role == Qt.ItemDataRole.UserRole:
+            return row.get(f"_sort_{col}", 0.0)
+
+        if role == Qt.ItemDataRole.ForegroundRole:
+            fg = row.get(f"_fg_{col}")
+            return QColor(fg) if fg else None
+
+        if role == Qt.ItemDataRole.BackgroundRole:
+            bg = row.get(f"_bg_{col}")
+            return QColor(bg) if bg else None
+
+        if role == Qt.ItemDataRole.FontRole:
+            if row.get(f"_bold_{col}"):
+                f = QFont()
+                f.setBold(True)
+                return f
+
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return row.get(f"_tip_{col}", "")
+
+        return None
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            if 0 <= section < len(self.COLUMNS):
+                return self.COLUMNS[section]
+        return None
+
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        if column < 0 or column >= len(self.COLUMNS):
+            return
+        col = self.COLUMNS[column]
+        sort_key = f"_sort_{col}"
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(
+            key=lambda r: (
+                r.get(sort_key) is None,
+                r.get(sort_key, 0.0),
+            ),
+            reverse=(order == Qt.SortOrder.DescendingOrder),
+        )
+        self.layoutChanged.emit()
+
+
+# ============================================================================ #
+#  Виджет вкладки «Членские взносы»                                             #
+# ============================================================================ #
 
 class VznosyDebtWidget(QWidget):
     """Вкладка контроля долгов по членским взносам."""
@@ -33,6 +138,8 @@ class VznosyDebtWidget(QWidget):
         self.setAutoFillBackground(True)
         self._df = None
         self._last_debts: dict = {}
+        self._col_syncing = False
+        self._search_filters: dict[int, str] = {}
         self._setup_ui()
         self._rebuild()
 
@@ -51,17 +158,6 @@ class VznosyDebtWidget(QWidget):
         self.date_as_of.setMaximumDate(QDate.currentDate())
         self.date_as_of.dateChanged.connect(self._rebuild)
         top.addWidget(self.date_as_of)
-
-        self.search = QLineEdit(objectName="searchInput")
-        self.search.setPlaceholderText("Поиск по № участка или ФИО")
-        self.search.setFixedWidth(280)
-        self.search.textChanged.connect(self._apply_filter)
-        top.addWidget(self.search)
-
-        self.cb_only_debt = QComboBox(objectName="filterCombo")
-        self.cb_only_debt.addItems(["Все участки", "Только должники", "Только оплачено/аванс"])
-        self.cb_only_debt.currentIndexChanged.connect(self._apply_filter)
-        top.addWidget(self.cb_only_debt)
 
         btn = QPushButton("🔄  Пересчитать", objectName="btnPrimary")
         btn.clicked.connect(self._rebuild)
@@ -98,29 +194,101 @@ class VznosyDebtWidget(QWidget):
         legend.addStretch()
         lay.addLayout(legend)
 
-        self.table = QTableWidget(objectName="summaryTable")
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSortingEnabled(True)
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels([
-            "Участок", "Владелец", "Площадь, м²",
-            "Начислено", "Оплачено", "Долг / Аванс", "Лет без оплаты",
-        ])
-        hdr = self.table.horizontalHeader()
-        for c, w in enumerate([85, 280, 100, 130, 130, 140, 110]):
-            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
-            self.table.setColumnWidth(c, w)
-        hdr.setStretchLastSection(True)
-        self.table.cellDoubleClicked.connect(self._open_card)
-        lay.addWidget(self.table, 1)
+        # ── Модель ──────────────────────────────────────────────────────────
+        self.model = _VznosyModel(self)
+
+        # ── Шапка (внешняя) ─────────────────────────────────────────────────
+        self.hdr_view = _SortHeaderView()
+        self.hdr_view.setModel(self.model)
+        self.hdr_view.sortIndicatorChanged.connect(self._on_sort_changed)
+
+        hdr_frame = QFrame()
+        hdr_frame.setStyleSheet("background: #C9D8E2; border: none;")
+        hdr_inner = QHBoxLayout(hdr_frame)
+        hdr_inner.setContentsMargins(0, 0, 0, 0)
+        hdr_inner.setSpacing(0)
+        hdr_inner.addWidget(self.hdr_view)
+        sb_stub = QWidget()
+        sb_stub.setFixedWidth(_SB_W)
+        sb_stub.setStyleSheet("background: #C9D8E2; border: none;")
+        hdr_inner.addWidget(sb_stub)
+
+        # ── Дерево (плоское) ────────────────────────────────────────────────
+        self.tree = QTreeView(objectName="mainTable")
+        self.tree.setModel(self.model)
+        self.tree.header().hide()
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(0)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree.setSortingEnabled(False)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setMouseTracking(True)
+        self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.tree.setStyleSheet(_TREE_STYLE)
+        self.tree.doubleClicked.connect(self._open_card)
+
+        # Поиск в шапке: Участок, Собственник
+        self.hdr_view.add_search_col(_VznosyModel.COLUMNS.index("Участок"))
+        self.hdr_view.add_search_col(_VznosyModel.COLUMNS.index("Собственник"))
+        self.hdr_view.searchChanged.connect(self._on_search_changed)
+
+        # Синхронизация ширин колонок между hdr_view и tree
+        self.tree.header().sectionResized.connect(self._on_tree_hdr_resized)
+        self.hdr_view.sectionResized.connect(self._on_hdr_view_resized)
+
+        # ── Единый контейнер ─────────────────────────────────────────────────
+        table_outer = _ClipFrame(QColor("#D5DCE4"), 6)
+        outer_inner = QVBoxLayout(table_outer)
+        outer_inner.setContentsMargins(0, 0, 0, 0)
+        outer_inner.setSpacing(0)
+        outer_inner.addWidget(hdr_frame)
+        outer_inner.addWidget(self.tree, stretch=1)
+        table_outer.finish_setup()
 
         self.status_lbl = QLabel("Загрузите выписку на вкладке «Детализация»",
                                   objectName="statusLabel")
-        lay.addWidget(self.status_lbl)
+        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        table_vbox = QVBoxLayout()
+        table_vbox.setSpacing(4)
+        table_vbox.setContentsMargins(0, 0, 0, 0)
+        table_vbox.addWidget(table_outer, stretch=1)
+        table_vbox.addWidget(self.status_lbl)
+        lay.addLayout(table_vbox)
 
         self.rates = VznosyRatesWidget()
+
+    # -- синхронизация колонок ----------------------------------------------- #
+
+    def _on_tree_hdr_resized(self, logical, old_size, new_size):
+        if self._col_syncing:
+            return
+        self._col_syncing = True
+        self.hdr_view.resizeSection(logical, new_size)
+        self._col_syncing = False
+
+    def _on_hdr_view_resized(self, logical, old_size, new_size):
+        if self._col_syncing:
+            return
+        self._col_syncing = True
+        self.tree.header().resizeSection(logical, new_size)
+        self._col_syncing = False
+
+    # -- сортировка ---------------------------------------------------------- #
+
+    def _on_sort_changed(self, col, order):
+        self.model.sort(col, order)
+        self.hdr_view.setSortIndicator(col, order)
+
+    # -- поиск --------------------------------------------------------------- #
+
+    def _on_search_changed(self, col, text):
+        self._search_filters[col] = text.strip().lower()
+        self._rebuild()
+
+    # -- публичный API ------------------------------------------------------- #
 
     def _open_rates_dialog(self):
         dlg = QDialog(self)
@@ -132,7 +300,6 @@ class VznosyDebtWidget(QWidget):
         dlg.exec()
         dlg_lay.removeWidget(self.rates)
         self.rates.setParent(self)  # type: ignore[arg-type]
-        # Тарифы могли поменяться — пересчитаем
         self._rebuild()
 
     def refresh(self, df):
@@ -158,7 +325,6 @@ class VznosyDebtWidget(QWidget):
         owners = energy.owners_map()
         plots = self._plot_list()
 
-        # средняя годовая сумма по тарифу — для подсветки уровня долга
         annual_avg = 0.0
         if rates:
             sums = []
@@ -169,19 +335,21 @@ class VznosyDebtWidget(QWidget):
             if sums:
                 annual_avg = sum(sums) / len(sums)
 
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(plots))
-
+        rows: list[dict] = []
         total_debt = 0.0
         total_charged = 0.0
         total_paid = 0.0
         debt_count = 0
         debts_map: dict[str, dict] = {}
 
-        for r, plot in enumerate(plots):
+        for plot in plots:
             area = areas.get(plot)
             bal = vznosy.balance_for_plot(plot, area, as_of, rates, adj, self._df)
-            owner = ", ".join(owners.get(plot, [])) or "—"
+            owners_list = owners.get(plot, []) or []
+            visible = next((o for o in owners_list if _is_visible(o)), None)
+            main = next((o for o in owners_list if _is_owner(o)),
+                         owners_list[0] if owners_list else None)
+            owner_text = _owner_name(visible or main) if (visible or main) else "—"
 
             area_text = f"{area:g}" if area is not None else "—"
             area_color = "#DC2626" if bal.area_missing_warning else (
@@ -191,58 +359,76 @@ class VznosyDebtWidget(QWidget):
                         if bal.area_missing_warning else "")
 
             color = vznosy.debt_color(bal.debt, annual_avg=annual_avg)
-            debts_map[plot] = {"debt": bal.debt, "color": color,
-                                "charged": bal.charged, "paid": bal.paid}
-
-            total_debt += bal.debt
-            total_charged += bal.charged
-            total_paid += bal.paid
-            if bal.debt > 0.5:
-                debt_count += 1
-
-            years_unpaid_text = "—" if bal.years_unpaid is None else str(bal.years_unpaid)
-            years_unpaid_color = "#374151"
-            if bal.years_unpaid and bal.years_unpaid >= 2:
-                years_unpaid_color = "#DC2626" if bal.years_unpaid >= 3 else "#ffd54f"
 
             try:
                 plot_sort = float(str(plot).split(",")[0])
             except ValueError:
                 plot_sort = 0.0
 
-            cells = [
-                (f"уч. {plot}", plot_sort, None, "#6366F1", True, ""),
-                (owner, owner, None, "#374151", False, ""),
-                (area_text, area if area is not None else 0.0, None, area_color, False, area_tip),
-                (fmt_money(bal.charged), bal.charged, None,
-                 "#f9a825" if bal.charged else "#3a5a7a", False, ""),
-                (fmt_money(bal.paid), bal.paid, None,
-                 "#059669" if bal.paid else "#3a5a7a", False, ""),
-                (fmt_money(bal.debt), bal.debt, _DEBT_COLOR_LIGHT.get(color, color), None, True, ""),
-                (years_unpaid_text, float(bal.years_unpaid or 0), None,
-                 years_unpaid_color, False, ""),
-            ]
-            for c, (text, value, bg, fg, bold, tip) in enumerate(cells):
-                if isinstance(value, (int, float)):
-                    it = _NumItem(text, float(value))
-                else:
-                    it = QTableWidgetItem(text)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-                if bg:
-                    it.setBackground(QColor(bg))
-                if fg:
-                    it.setForeground(QColor(fg))
-                if bold:
-                    f = it.font(); f.setBold(True); it.setFont(f)
-                if tip:
-                    it.setToolTip(tip)
-                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                self.table.setItem(r, c, it)
-            self.table.setRowHeight(r, 28)
+            row: dict = {
+                "_text_Участок": plot,
+                "_sort_Участок": plot_sort,
 
-        self.table.setSortingEnabled(True)
+                "_text_Собственник": owner_text,
+                "_sort_Собственник": owner_text,
+                "_fg_Собственник": "#374151",
+
+                "_text_Площадь, м²": area_text,
+                "_sort_Площадь, м²": area if area is not None else 0.0,
+                "_fg_Площадь, м²": area_color,
+                "_tip_Площадь, м²": area_tip,
+
+                "_text_Начислено": fmt_money(bal.charged),
+                "_sort_Начислено": bal.charged,
+                "_fg_Начислено": "#f9a825" if bal.charged else "#3a5a7a",
+
+                "_text_Оплачено": fmt_money(bal.paid),
+                "_sort_Оплачено": bal.paid,
+                "_fg_Оплачено": "#059669" if bal.paid else "#3a5a7a",
+
+                "_text_Долг / Аванс": fmt_money(bal.debt),
+                "_sort_Долг / Аванс": bal.debt,
+                "_bg_Долг / Аванс": _DEBT_COLOR_LIGHT.get(color, color),
+                "_bold_Долг / Аванс": True,
+            }
+            rows.append(row)
+
+            total_charged += bal.charged
+            total_paid += bal.paid
+            total_debt += bal.debt
+            if bal.debt > 0.5:
+                debt_count += 1
+            debts_map[plot] = {"debt": bal.debt, "charged": bal.charged,
+                               "paid": bal.paid, "owner": owner_text}
+
+        # Применяем поиск
+        for col_idx, text in self._search_filters.items():
+            if not text:
+                continue
+            col_name = _VznosyModel.COLUMNS[col_idx]
+            if col_name == "Участок":
+                rows = [r for r in rows if text in r.get("_text_Участок", "").lower()]
+            elif col_name == "Собственник":
+                rows = [r for r in rows if text in r.get("_text_Собственник", "").lower()]
+
+        self.model.load(rows)
+
+        # Ширины колонок
+        for h in (self.hdr_view, self.tree.header()):
+            h.setStretchLastSection(False)
+            h.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+            h.resizeSection(0, 85)
+            h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            h.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+            h.resizeSection(2, 120)
+            h.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+            h.resizeSection(3, 130)
+            h.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+            h.resizeSection(4, 130)
+            h.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+            h.resizeSection(5, 140)
+
         self._last_debts = debts_map
-
         self.status_lbl.setText(
             f"Участков: {len(plots)}  ·  должников: {debt_count}  ·  "
             f"начислено всего: {fmt_money(total_charged)}  ·  "
@@ -250,43 +436,45 @@ class VznosyDebtWidget(QWidget):
             f"общий долг: {fmt_money(total_debt)}"
         )
 
-        self._apply_filter()
-
-    def _apply_filter(self):
-        text = self.search.text().strip().lower()
-        mode = self.cb_only_debt.currentText()
-        for r in range(self.table.rowCount()):
-            plot_item = self.table.item(r, 0)
-            owner_item = self.table.item(r, 1)
-            debt_item = self.table.item(r, 5)
-            if not plot_item or not debt_item:
-                continue
-            visible = True
-            if text:
-                hay = (plot_item.text() + " " + (owner_item.text() if owner_item else "")).lower()
-                visible = text in hay
-            if visible and mode == "Только должники":
-                visible = isinstance(debt_item, _NumItem) and debt_item._value > 0.5
-            elif visible and mode == "Только оплачено/аванс":
-                visible = isinstance(debt_item, _NumItem) and debt_item._value <= 0.5
-            self.table.setRowHidden(r, not visible)
-
-    def _open_card(self, row: int, _col: int):
-        plot_item = self.table.item(row, 0)
-        if not plot_item:
+    def _open_card(self, index: QModelIndex):
+        if not index.isValid():
             return
-        plot = plot_item.text().replace("уч. ", "").strip()
+        node = index.internalPointer()
+        if node is None:
+            return
+        plot_text = node.get("_text_Участок", "").replace("уч. ", "").strip()
+        if not plot_text:
+            return
         as_of = self.date_as_of.date().toPyDate()
-        dlg = VznosyCardDialog(plot, self._df, self, as_of=as_of)
+        dlg = VznosyCardDialog(plot_text, self._df, self, as_of=as_of)
         dlg.exec()
         self._rebuild()
 
     def _export_debtor_receipts(self):
-        if not self._last_debts:
+        if self._df is None or len(self._df) == 0:
             QMessageBox.information(self, "Квитанции", "Сначала загрузите выписку.")
             return
-        debtors = [(p, info) for p, info in self._last_debts.items()
-                   if info["debt"] > 0.5]
+        from core import vznosy
+        rates = vznosy.load_rates()
+        adj = vznosy.load_adjustments()
+        areas = vznosy.plot_area_map()
+        plot_recs = energy.plots_by_num()
+        as_of = self.date_as_of.date().toPyDate()
+
+        # Должник = участок, где задолженность есть у ТЕКУЩЕГО собственника
+        # (квитанция выставляется ему; долг прежнего сюда не входит).
+        debtors: list[tuple[str, str]] = []
+        for plot in self._plot_list():
+            rec = plot_recs.get(plot, {})
+            owners_list = rec.get("owners", []) or []
+            rows = vznosy.balances_by_owner(
+                plot, areas.get(plot), as_of, rates, adj, self._df,
+                owners_list, ownership_form=rec.get("ownership_form"))
+            cur_debt = sum(r.debt for r in rows if r.is_current)
+            if cur_debt > 0.5:
+                cur_name = next((r.name for r in rows if r.is_current), "")
+                debtors.append((plot, cur_name))
+
         if not debtors:
             QMessageBox.information(self, "Квитанции", "Должников нет — квитанции не нужны.")
             return
@@ -299,13 +487,10 @@ class VznosyDebtWidget(QWidget):
             QMessageBox.critical(self, "Ошибка", f"Не удалось импортировать модуль квитанций:\n{e}")
             return
 
-        owners = energy.owners_map()
-        as_of = self.date_as_of.date().toPyDate()
         ok = 0
         errors = []
-        for plot, _info in debtors:
-            owner = (owners.get(plot, [""])[0] or "").split()
-            surname = owner[0] if owner else ""
+        for plot, cur_name in debtors:
+            surname = cur_name.split()[0] if cur_name else ""
             fname = f"Уч_{plot}_ЧВ"
             if surname:
                 safe_surname = re.sub(r"[^\w\-]", "_", surname)
@@ -338,17 +523,16 @@ class VznosyDebtWidget(QWidget):
             path += ".xlsx"
 
         headers = [
-            self.table.horizontalHeaderItem(c).text()
-            for c in range(self.table.columnCount())
+            self.hdr_view.headerData(c, Qt.Orientation.Horizontal)
+            for c in range(self.model.columnCount())
         ]
         rows = []
-        for r in range(self.table.rowCount()):
-            if self.table.isRowHidden(r):
-                continue
-            rows.append([
-                (self.table.item(r, c).text() if self.table.item(r, c) else "")
-                for c in range(self.table.columnCount())
-            ])
+        for r in range(self.model.rowCount()):
+            row_data = []
+            for c in range(self.model.columnCount()):
+                idx = self.model.index(r, c)
+                row_data.append(self.model.data(idx, Qt.ItemDataRole.DisplayRole) or "")
+            rows.append(row_data)
 
         try:
             import openpyxl

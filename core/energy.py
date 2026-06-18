@@ -544,6 +544,141 @@ def balance(plot: str, as_of: date, meters: dict, rates: list,
     )
 
 
+# ── разбивка баланса по собственникам ─────────────────────────────────
+
+@dataclass
+class EnergyOwnerBalance:
+    name: str
+    is_current: bool
+    since: Optional[date]
+    until: Optional[date]
+    charged: float
+    paid: float
+    baseline: float
+    debt: float
+
+
+def _energy_owner_weights(active: list, form: Optional[str]) -> list[float]:
+    """Веса деления суммы между совладельцами для электроэнергии.
+
+    Площади тут нет (энергия — по потреблению), поэтому: долевая → по доле
+    в праве (``share``), индивидуальная/совместная → поровну. При незаданном
+    виде права (старые данные) — по доле, иначе поровну (``effective_weights``).
+    """
+    from core import ownership as own
+    n = len(active)
+    if n == 0:
+        return []
+    if form in (own.FORM_INDIVIDUAL, own.FORM_JOINT):
+        return [1.0 / n] * n
+    return own.effective_weights(active)
+
+
+def balances_by_owner(plot: str, as_of: date, meters: dict, rates: list,
+                      replacements: dict, baseline: dict, df,
+                      owners: list,
+                      ownership_form: Optional[str] = None,
+                      plots: Optional[list] = None) -> list[EnergyOwnerBalance]:
+    """Раскладывает долг по электроэнергии по собственникам во времени.
+
+    Атрибуция: месячное начисление → собственнику на дату снятия показания
+    (конец месяца); начальное сальдо (baseline) → собственнику на дату начала
+    периода baseline; платёж → собственнику на дату платежа. Деление между
+    совладельцами — по виду права (см. :func:`_energy_owner_weights`).
+
+    Долг прежнего собственника остаётся за ним. Сумма по всем владельцам
+    реконсилируется с :func:`balance`. Если у участка нет истории владения,
+    всё сходится на текущих собственниках (поведение как прежде).
+    """
+    from core import ownership as own
+    owners = owners or []
+
+    base = _to_float(baseline.get("balances", {}).get(str(plot))) or 0.0
+    base_start = _parse_iso(baseline.get("start_date", ""))
+
+    charged_acc: dict[int, float] = {}
+    paid_acc: dict[int, float] = {}
+    base_acc: dict[int, float] = {}
+    unknown_charged = 0.0
+    unknown_paid = 0.0
+    unknown_base = 0.0
+
+    def _spread(acc: dict, owners_active: list, amount: float):
+        weights = _energy_owner_weights(owners_active, ownership_form)
+        for o, w in zip(owners_active, weights):
+            acc[id(o)] = acc.get(id(o), 0.0) + amount * w
+
+    # Начальное сальдо → собственник на дату начала baseline
+    if abs(base) > 0.0:
+        active = own.owners_at(owners, base_start or date.min)
+        if active:
+            _spread(base_acc, active, base)
+        else:
+            unknown_base += base
+
+    # Помесячные начисления → собственник на дату показания (конец месяца)
+    for c in charges_for_plot(plot, meters, rates, replacements,
+                              up_to=as_of, plots=plots):
+        amt = c["amount"]
+        if amt is None:
+            continue
+        cdate = reading_date(c["year"], c["month"])
+        active = own.owners_at(owners, cdate)
+        if not active:
+            unknown_charged += amt
+            continue
+        _spread(charged_acc, active, amt)
+
+    # Платежи → собственник на дату платежа (в окне [base_start, as_of])
+    for p in payments_breakdown(plot, df):
+        d = p["date"]
+        if d is None or d > as_of:
+            continue
+        if base_start is not None and d < base_start:
+            continue
+        active = own.owners_at(owners, d)
+        if not active:
+            unknown_paid += p["amount"]
+            continue
+        _spread(paid_acc, active, p["amount"])
+
+    # Сборка по собственникам
+    rows: list[tuple[bool, date, EnergyOwnerBalance]] = []
+    for o in owners:
+        if not own.is_owner(o):
+            continue
+        oid = id(o)
+        c = charged_acc.get(oid, 0.0)
+        pd_ = paid_acc.get(oid, 0.0)
+        b = base_acc.get(oid, 0.0)
+        current = own.is_active_at(o, as_of)
+        if not current and c == 0.0 and pd_ == 0.0 and b == 0.0:
+            continue
+        rows.append((current, own.owner_until(o) or date.max,
+                     EnergyOwnerBalance(
+                         name=own.owner_name(o),
+                         is_current=current,
+                         since=own.owner_since(o),
+                         until=own.owner_until(o),
+                         charged=c,
+                         paid=pd_,
+                         baseline=b,
+                         debt=b + c - pd_,
+                     )))
+
+    rows.sort(key=lambda t: (not t[0], -t[1].toordinal()))
+    out = [r[2] for r in rows]
+
+    if abs(unknown_charged) > 0.0 or abs(unknown_paid) > 0.0 or abs(unknown_base) > 0.0:
+        out.append(EnergyOwnerBalance(
+            name="Собственник не определён",
+            is_current=False, since=None, until=None,
+            charged=unknown_charged, paid=unknown_paid, baseline=unknown_base,
+            debt=unknown_base + unknown_charged - unknown_paid,
+        ))
+    return out
+
+
 # ── аномалии показаний ────────────────────────────────────────────────
 
 @dataclass

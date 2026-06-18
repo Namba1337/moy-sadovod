@@ -196,5 +196,86 @@ class ReconcileTests(unittest.TestCase):
         self.assertIsNone(rec.common_kwh)
 
 
+class BalancesByOwnerTests(unittest.TestCase):
+    def test_no_history_single_owner_reconciles(self):
+        meters = {"5:2026:3": "0", "5:2026:4": "100"}
+        df = _make_df([{
+            "Дата": "2026-04-15", "Сумма": 400,
+            "Категория": "Электроэнергия (от садоводов)", "Участок": "5",
+        }])
+        baseline = {"start_date": "2026-01-01", "balances": {"5": "200"}}
+        owners = [{"name": "Иванов", "is_owner": True}]
+        bal = energy.balance("5", date(2026, 5, 31), meters, RATES, {}, baseline, df)
+        rows = energy.balances_by_owner("5", date(2026, 5, 31), meters, RATES, {},
+                                        baseline, df, owners)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0].charged, bal.charged)
+        self.assertAlmostEqual(rows[0].paid, bal.paid)
+        self.assertAlmostEqual(rows[0].baseline, bal.baseline)
+        self.assertAlmostEqual(rows[0].debt, bal.debt)
+        self.assertTrue(rows[0].is_current)
+
+    def test_sequential_transfer(self):
+        meters = {"5:2025:11": "0", "5:2025:12": "100",
+                  "5:2026:1": "100", "5:2026:2": "260"}
+        df = _make_df([
+            {"Дата": "2025-06-15", "Сумма": 400,
+             "Категория": "Электроэнергия (от садоводов)", "Участок": "5"},
+            {"Дата": "2026-06-15", "Сумма": 300,
+             "Категория": "Электроэнергия (от садоводов)", "Участок": "5"},
+        ])
+        baseline = {"start_date": "2025-01-01", "balances": {"5": "200"}}
+        owners = [
+            {"name": "Продавец", "is_owner": True, "until": "2026-01-01"},
+            {"name": "Покупатель", "is_owner": True, "since": "2026-01-01"},
+        ]
+        as_of = date(2026, 12, 31)
+        bal = energy.balance("5", as_of, meters, RATES, {}, baseline, df)
+        rows = energy.balances_by_owner("5", as_of, meters, RATES, {},
+                                        baseline, df, owners)
+        by = {r.name: r for r in rows}
+        # Продавец: baseline 200 + начисление дек.2025 (585) − оплата 400 = 385
+        self.assertAlmostEqual(by["Продавец"].baseline, 200)
+        self.assertAlmostEqual(by["Продавец"].charged, 585)
+        self.assertAlmostEqual(by["Продавец"].paid, 400)
+        self.assertAlmostEqual(by["Продавец"].debt, 385)
+        self.assertFalse(by["Продавец"].is_current)
+        # Покупатель: начисление фев.2026 (936) − оплата 300
+        self.assertAlmostEqual(by["Покупатель"].charged, 936)
+        self.assertAlmostEqual(by["Покупатель"].paid, 300)
+        self.assertAlmostEqual(by["Покупатель"].debt, 636)
+        self.assertTrue(by["Покупатель"].is_current)
+        # реконсиляция с участковым балансом
+        self.assertAlmostEqual(sum(r.debt for r in rows), bal.debt)
+        self.assertAlmostEqual(sum(r.charged for r in rows), bal.charged)
+        self.assertAlmostEqual(sum(r.paid for r in rows), bal.paid)
+
+    def test_co_owners_shared_by_share(self):
+        meters = {"5:2026:3": "0", "5:2026:4": "100"}   # Apr 2026: 100 кВт·ч × 5.85 = 585
+        owners = [
+            {"name": "A", "is_owner": True, "share": "1/4"},
+            {"name": "B", "is_owner": True, "share": "3/4"},
+        ]
+        rows = energy.balances_by_owner("5", date(2026, 5, 31), meters, RATES, {},
+                                        {"balances": {}}, None, owners,
+                                        ownership_form="shared")
+        by = {r.name: r for r in rows}
+        self.assertAlmostEqual(by["A"].charged, 585 * 0.25)
+        self.assertAlmostEqual(by["B"].charged, 585 * 0.75)
+
+    def test_co_owners_joint_equal(self):
+        meters = {"5:2026:3": "0", "5:2026:4": "100"}
+        owners = [
+            {"name": "A", "is_owner": True},
+            {"name": "B", "is_owner": True},
+        ]
+        rows = energy.balances_by_owner("5", date(2026, 5, 31), meters, RATES, {},
+                                        {"balances": {}}, None, owners,
+                                        ownership_form="joint")
+        by = {r.name: r for r in rows}
+        self.assertAlmostEqual(by["A"].charged, 292.5)
+        self.assertAlmostEqual(by["B"].charged, 292.5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,19 +31,61 @@ def _fmt_balance_cols(balance: float) -> tuple[str, str]:
     return "—", "—"
 
 
+def _former_debt_block(former_rows) -> str:
+    """Жёлтый блок-примечание о долге ПРЕЖНИХ собственников (только положительном).
+
+    Переплаты прежних (отрицательный баланс) не показываем — это не «к взысканию».
+    """
+    items = []
+    for r in former_rows:
+        if r.debt <= 0.005:
+            continue
+        until_txt = f" (по {r.until.strftime('%d.%m.%Y')})" if r.until else ""
+        items.append(f"{html.escape(r.name)}{until_txt} — {fmt_money(r.debt)}")
+    if not items:
+        return ""
+    return (
+        "<div style='margin-top:12px; padding:8px 12px; background:#FEF3C7; "
+        "border:1px solid #FCD34D; border-radius:5px; color:#92400E; font-size:10pt;'>"
+        "ℹ За период до перехода права за прежним собственником числится долг "
+        "(взыскивается отдельно):<br/>" + "<br/>".join(items) + "</div>"
+    )
+
+
 def _build_html(plot: str, df, as_of: date,
                 since: date | None = None,
                 zero_opening: bool = False) -> tuple[str, dict]:
+    from core import ownership as own
     meters = energy.load_meters()
     rates = energy.load_rates()
     repls = energy.load_replacements()
     baseline = energy.load_baseline()
-    owners = energy.owners_map().get(str(plot), [])
-    owner_text = ", ".join(owners) if owners else "—"
+    rec = energy.plot_record(str(plot))
+    owners_list = rec.get("owners", []) or []
+    form = rec.get("ownership_form")
 
     bt = energy.billing_type_of(str(plot))
     bal = energy.balance(plot, as_of, meters, rates, repls, baseline, df)
     charges = energy.charges_for_plot(plot, meters, rates, repls, up_to=as_of)
+
+    # Раскладка по собственникам (для полной квитанции — счёт текущему).
+    ob_rows = energy.balances_by_owner(str(plot), as_of, meters, rates, repls,
+                                       baseline, df, owners_list, ownership_form=form)
+    cur_owners = [r for r in ob_rows if r.is_current]
+    former_owners = [r for r in ob_rows
+                     if not r.is_current and (abs(r.debt) > 0.005 or abs(r.charged) > 0.005)]
+    current_debt = sum(r.debt for r in cur_owners)
+    former_debt = sum(r.debt for r in former_owners)
+
+    def _cur_label(r):
+        s = f" (с {r.since.strftime('%d.%m.%Y')})" if r.since else ""
+        return f"{html.escape(r.name)}{s}"
+    if cur_owners:
+        owner_text = ", ".join(_cur_label(r) for r in cur_owners)
+    else:
+        names = [own.owner_name(o) for o in owners_list if own.is_owner(o)]
+        owner_text = ", ".join(html.escape(n) for n in names) if names else "—"
+    form_label = own.FORM_LABELS.get(own.plot_ownership_form(rec), "")
 
     # Фильтр по начальной дате периода
     if since is not None:
@@ -163,6 +205,27 @@ def _build_html(plot: str, df, as_of: date,
           "border:1px solid #bbb; text-align:center;")
     td_style = "font-size:9pt; padding:4px 5px;"
 
+    # Итоговый блок: для полной квитанции (since=None) — счёт текущему собственнику
+    # с вынесением долга прежнего; для периодной — прежнее поведение.
+    former_html = ""
+    if since is None:
+        pay_label = ("К оплате" if current_debt > 0
+                     else ("Аванс" if current_debt < 0 else "Без задолженности"))
+        pay_color = ("#c62828" if current_debt > 0
+                     else ("#2e7d32" if current_debt < 0 else "#444"))
+        final_block = (
+            f"<tr style='font-weight:700; font-size:12pt;'>"
+            f"<td style='color:{pay_color};'>{pay_label} (текущему собственнику):</td>"
+            f"<td align='right' style='color:{pay_color};'>{fmt_money(abs(current_debt))}</td></tr>"
+        )
+        former_html = _former_debt_block(former_owners)
+    else:
+        final_block = (
+            f"<tr style='font-weight:700; font-size:12pt;'>"
+            f"<td style='color:{debt_color};'>{debt_label}:</td>"
+            f"<td align='right' style='color:{debt_color};'>{fmt_money(abs(period_debt))}</td></tr>"
+        )
+
     body = f"""
     <html><head><meta charset="utf-8"/></head>
     <body style="font-family: 'Segoe UI', Arial, sans-serif; color:#222;">
@@ -175,7 +238,8 @@ def _build_html(plot: str, df, as_of: date,
 
       <table style="margin-bottom:14px; font-size:11pt;">
         <tr><td><b>Участок №:</b></td><td>&nbsp;&nbsp;{html.escape(str(plot))}</td></tr>
-        <tr><td><b>Владелец(ы):</b></td><td>&nbsp;&nbsp;{html.escape(owner_text)}</td></tr>
+        <tr><td><b>Собственник:</b></td><td>&nbsp;&nbsp;{owner_text}</td></tr>
+        <tr><td><b>Вид права:</b></td><td>&nbsp;&nbsp;{html.escape(form_label)}</td></tr>
         <tr><td><b>Последнее показание:</b></td><td>&nbsp;&nbsp;{last_text}</td></tr>
       </table>
 
@@ -214,12 +278,11 @@ def _build_html(plot: str, df, as_of: date,
           <tr><td>Оплачено за период:</td>
               <td align="right">{fmt_money(total_paid)}</td></tr>
           {baseline_row}
-          <tr style="font-weight:700; font-size:12pt;">
-            <td style="color:{debt_color};">{debt_label}:</td>
-            <td align="right" style="color:{debt_color};">{fmt_money(abs(period_debt))}</td>
-          </tr>
+          {final_block}
         </table>
       </div>
+
+      {former_html}
 
       <div style="margin-top:18px; color:#666; font-size:9pt;">
         Квитанция сформирована автоматически {as_of.strftime('%d.%m.%Y')}.
@@ -229,7 +292,9 @@ def _build_html(plot: str, df, as_of: date,
     """
     return body, {
         "owner": owner_text,
-        "debt": period_debt,
+        "debt": current_debt if since is None else period_debt,
+        "former_debt": former_debt,
+        "period_debt": period_debt,
         "charged": total_charged,
         "paid": total_paid,
     }
@@ -272,15 +337,34 @@ def save_plot_receipt_pdf(plot: str, df, out_path: str,
 
 def _build_vznosy_html(plot: str, df, as_of: date) -> tuple[str, dict]:
     from core import vznosy
+    from core import ownership as own
     rates = vznosy.load_rates()
     adj = vznosy.load_adjustments()
     area = vznosy.plot_area_map().get(str(plot))
-    owners = energy.owners_map().get(str(plot), [])
-    owner_text = ", ".join(owners) if owners else "—"
+    rec = energy.plot_record(str(plot))
+    owners = rec.get("owners", []) or []
+    form = rec.get("ownership_form")
 
     periods = vznosy.build_periods(rates)
     bal = vznosy.balance_for_plot(str(plot), area, as_of, rates, adj, df)
     py = vznosy.paid_by_period(str(plot), df, as_of, periods, adj)
+
+    # Раскладка по собственникам: счёт — текущему, долг прежнего — отдельно.
+    ob_rows = vznosy.balances_by_owner(str(plot), area, as_of, rates, adj, df,
+                                       owners, ownership_form=form)
+    current = [r for r in ob_rows if r.is_current]
+    former = [r for r in ob_rows
+              if not r.is_current and (abs(r.debt) > 0.005 or abs(r.charged) > 0.005)]
+    current_debt = sum(r.debt for r in current)
+    former_debt = sum(r.debt for r in former)
+
+    def _cur_label(r):
+        s = f" (с {r.since.strftime('%d.%m.%Y')})" if r.since else ""
+        return f"{html.escape(r.name)}{s}"
+    owner_text = ", ".join(_cur_label(r) for r in current) if current else "—"
+    form_label = own.FORM_LABELS.get(own.plot_ownership_form(rec), "")
+
+    former_html = _former_debt_block(former)
 
     rows_html = []
     for y in bal.breakdown:
@@ -315,8 +399,8 @@ def _build_vznosy_html(plot: str, df, as_of: date) -> tuple[str, dict]:
             f"</tr>"
         )
 
-    debt_label = "К оплате" if bal.debt > 0 else ("Аванс" if bal.debt < 0 else "Без задолженности")
-    debt_color = "#c62828" if bal.debt > 0 else ("#2e7d32" if bal.debt < 0 else "#444")
+    debt_label = "К оплате" if current_debt > 0 else ("Аванс" if current_debt < 0 else "Без задолженности")
+    debt_color = "#c62828" if current_debt > 0 else ("#2e7d32" if current_debt < 0 else "#444")
     area_text = f"{area:g} м²" if area is not None else "—"
 
     body = f"""
@@ -329,7 +413,8 @@ def _build_vznosy_html(plot: str, df, as_of: date) -> tuple[str, dict]:
 
       <table style="margin-bottom:14px; font-size:11pt;">
         <tr><td><b>Участок №:</b></td><td>&nbsp;&nbsp;{html.escape(str(plot))}</td></tr>
-        <tr><td><b>Владелец(ы):</b></td><td>&nbsp;&nbsp;{html.escape(owner_text)}</td></tr>
+        <tr><td><b>Собственник:</b></td><td>&nbsp;&nbsp;{owner_text}</td></tr>
+        <tr><td><b>Вид права:</b></td><td>&nbsp;&nbsp;{html.escape(form_label)}</td></tr>
         <tr><td><b>Площадь:</b></td><td>&nbsp;&nbsp;{area_text}</td></tr>
       </table>
 
@@ -351,16 +436,18 @@ def _build_vznosy_html(plot: str, df, as_of: date) -> tuple[str, dict]:
 
       <div style="margin-top:18px; font-size:11pt;">
         <table style="width:100%;">
-          <tr><td>Начислено всего:</td>
+          <tr><td>Начислено всего (участок):</td>
               <td align="right">{fmt_money(bal.charged)}</td></tr>
-          <tr><td>Оплачено всего:</td>
+          <tr><td>Оплачено всего (участок):</td>
               <td align="right">{fmt_money(bal.paid)}</td></tr>
           <tr style="font-weight:700; font-size:12pt;">
-            <td style="color:{debt_color};">{debt_label}:</td>
-            <td align="right" style="color:{debt_color};">{fmt_money(abs(bal.debt))}</td>
+            <td style="color:{debt_color};">{debt_label} (текущему собственнику):</td>
+            <td align="right" style="color:{debt_color};">{fmt_money(abs(current_debt))}</td>
           </tr>
         </table>
       </div>
+
+      {former_html}
 
       <div style="margin-top:18px; color:#666; font-size:9pt;">
         Квитанция сформирована автоматически {as_of.strftime('%d.%m.%Y')}.
@@ -370,7 +457,8 @@ def _build_vznosy_html(plot: str, df, as_of: date) -> tuple[str, dict]:
     """
     return body, {
         "owner": owner_text,
-        "debt": bal.debt,
+        "debt": current_debt,
+        "former_debt": former_debt,
         "charged": bal.charged,
         "paid": bal.paid,
     }

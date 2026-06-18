@@ -522,6 +522,27 @@ class PlotCardDialog(QDialog):
         hdr.setStretchLastSection(False)
         lay.addWidget(self.table, 1)
 
+        # ── Разбивка по собственникам (видна при истории/совладельцах) ──
+        self.owners_lbl = QLabel("Разбивка по собственникам")
+        self.owners_lbl.setStyleSheet(
+            "color:#6366F1;background:transparent;font-size:12px;margin-top:8px;")
+        lay.addWidget(self.owners_lbl)
+        self.owners_table = QTableWidget(objectName="summaryTable")
+        self.owners_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.owners_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.owners_table.verticalHeader().setVisible(False)
+        self.owners_table.setColumnCount(5)
+        self.owners_table.setHorizontalHeaderLabels([
+            "Собственник", "Период владения", "Начислено", "Оплачено", "Долг",
+        ])
+        ohdr = self.owners_table.horizontalHeader()
+        for c, w in enumerate([280, 190, 120, 120, 120]):
+            ohdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+            self.owners_table.setColumnWidth(c, w)
+        ohdr.setStretchLastSection(True)
+        self.owners_table.setMaximumHeight(160)
+        lay.addWidget(self.owners_table)
+
         # ── Подсказка по аномалиям ─────────────────────────────────
         hint = QHBoxLayout()
         hint.setSpacing(16)
@@ -750,6 +771,56 @@ class PlotCardDialog(QDialog):
             self.summary_lbl.setText(
                 "Показаний и платежей по этому участку пока нет — внесите первое выше."
             )
+
+        # Разбивка по собственникам
+        self._rebuild_owners(meters, rates, repls, baseline)
+
+    def _rebuild_owners(self, meters, rates, repls, baseline):
+        from core import ownership as own
+        rec = energy.plot_record(self._plot)
+        recs = rec.get("owners", []) or []
+        owner_count = sum(1 for o in recs if own.is_owner(o))
+        show = owner_count > 1 or own.has_history(recs)
+        self.owners_lbl.setVisible(show)
+        self.owners_table.setVisible(show)
+        if not show:
+            return
+        rows = energy.balances_by_owner(
+            self._plot, self._as_of, meters, rates, repls, baseline, self._df,
+            recs, ownership_form=rec.get("ownership_form"))
+        self.owners_table.setRowCount(len(rows))
+        for r, ob in enumerate(rows):
+            status = "текущий" if ob.is_current else "прежний"
+            period = self._fmt_own_period(ob.since, ob.until)
+            debt_color = ("#DC2626" if ob.debt > 0.005
+                          else ("#059669" if ob.debt < -0.005 else "#6B7280"))
+            cells = [
+                (f"{ob.name}  ({status})", "#374151" if ob.is_current else "#9CA3AF"),
+                (period, "#6B7280"),
+                (fmt_money(ob.baseline + ob.charged), "#374151"),
+                (fmt_money(ob.paid), "#059669" if ob.paid else "#9CA3AF"),
+                (fmt_money(ob.debt), debt_color),
+            ]
+            for c, (text, color) in enumerate(cells):
+                it = QTableWidgetItem(text)
+                it.setTextAlignment(
+                    (Qt.AlignmentFlag.AlignLeft if c == 0 else Qt.AlignmentFlag.AlignCenter)
+                    | Qt.AlignmentFlag.AlignVCenter)
+                if color:
+                    it.setForeground(QColor(color))
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.owners_table.setItem(r, c, it)
+            self.owners_table.setRowHeight(r, 28)
+
+    @staticmethod
+    def _fmt_own_period(since, until) -> str:
+        if since and until:
+            return f"{since.strftime('%d.%m.%Y')}—{until.strftime('%d.%m.%Y')}"
+        if since:
+            return f"с {since.strftime('%d.%m.%Y')}"
+        if until:
+            return f"по {until.strftime('%d.%m.%Y')}"
+        return "—"
 
     def _configure_banner(self, bt: str, meters: dict):
         """Плашка под сводкой: расчётный метод / прямой договор / ожидание показаний."""

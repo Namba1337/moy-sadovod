@@ -590,6 +590,7 @@ class MainWindow(QMainWindow):
         self.detail.dataLoaded.connect(self.vznosy_debt.refresh)
         self.detail.dataLoaded.connect(self.energy_debt.refresh)
         self.detail.dataLoaded.connect(self.home.refresh)
+        self.detail.dataLoaded.connect(self.plots.refresh)  # df нужен мастеру смены собственника
         # При изменении списка участков (в т.ч. площади) пересчитать ЧВ
         self.plots.plotsUpdated.connect(
             lambda: self.vznosy_debt.refresh(self.detail.df_full)
