@@ -23,19 +23,6 @@ def _next_period_start(today: date | None = None) -> date:
     return date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
 
 
-class _NumItem(QTableWidgetItem):
-    """QTableWidgetItem с числовой сортировкой."""
-    def __init__(self, text: str, value: float):
-        super().__init__(text)
-        self._value = value
-
-    def __lt__(self, other):
-        try:
-            return self._value < other._value
-        except AttributeError:
-            return super().__lt__(other)
-
-
 class _PdfPeriodDialog(QDialog):
     """Диалог выбора начала и конца периода для PDF-квитанции."""
 

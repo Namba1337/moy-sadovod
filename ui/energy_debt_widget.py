@@ -2,26 +2,41 @@ import os
 import re
 from datetime import date
 
-from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtCore import Qt, QDate, QModelIndex
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QComboBox, QDateEdit, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QDateEdit, QDialog, QFileDialog, QFrame,
+    QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QTreeView,
+    QVBoxLayout, QWidget,
 )
 
 from core import energy
 from core.utils import fmt_money
-from ui.energy_card import _NumItem, PlotCardDialog
+from ui.energy_card import PlotCardDialog
 from ui.rates_widget import RatesWidget
+from ui.plots_widget import (
+    _SortHeaderView, _ClipFrame, _TREE_STYLE, _SB_W, _FlatTableModel,
+    _DEBT_COLOR_LIGHT,
+)
 
-_DEBT_COLOR_LIGHT = {
-    "#2e7d32": "#c8e6c9",
-    "#f9a825": "#fff9c4",
-    "#ef6c00": "#ffe0b2",
-    "#c62828": "#ffcdd2",
-}
 
+# ============================================================================ #
+#  Модель данных                                                               #
+# ============================================================================ #
+
+class _EnergyModel(_FlatTableModel):
+    """Плоская модель для таблицы долгов по электроэнергии."""
+
+    COLUMNS = [
+        "Участок", "Владелец", "Последнее показание", "Дата показ.",
+        "Начислено", "Оплачено", "Стартовое", "Долг / Аванс",
+        "Без оплаты, мес.", "Тип расчёта",
+    ]
+
+
+# ============================================================================ #
+#  Виджет вкладки «Электроэнергия»                                             #
+# ============================================================================ #
 
 class EnergyDebtWidget(QWidget):
     """Вкладка контроля долгов по электроэнергии."""
@@ -30,7 +45,11 @@ class EnergyDebtWidget(QWidget):
         super().__init__()
         self.setAutoFillBackground(True)
         self._df = None
+        self._last_debts: dict = {}
+        self._col_syncing = False
+        self._search_filters: dict[int, str] = {}
         self._setup_ui()
+        self._rebuild()
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
@@ -48,15 +67,9 @@ class EnergyDebtWidget(QWidget):
         self.date_as_of.dateChanged.connect(self._rebuild)
         top.addWidget(self.date_as_of)
 
-        self.search = QLineEdit(objectName="searchInput")
-        self.search.setPlaceholderText("Поиск по № участка или ФИО")
-        self.search.setFixedWidth(280)
-        self.search.textChanged.connect(self._apply_filter)
-        top.addWidget(self.search)
-
         self.cb_only_debt = QComboBox(objectName="filterCombo")
         self.cb_only_debt.addItems(["Все участки", "Только должники", "Только аванс/0"])
-        self.cb_only_debt.currentIndexChanged.connect(self._apply_filter)
+        self.cb_only_debt.currentIndexChanged.connect(self._rebuild)
         top.addWidget(self.cb_only_debt)
 
         btn = QPushButton("🔄  Пересчитать", objectName="btnPrimary")
@@ -87,31 +100,63 @@ class EnergyDebtWidget(QWidget):
             ("#DC2626", "■  крупный"),
         ]:
             lb = QLabel(text)
-            lb.setStyleSheet(
-                f"color:{color};background:transparent;font-size:11px;"
-            )
+            lb.setStyleSheet(f"color:{color};background:transparent;font-size:11px;")
             legend.addWidget(lb)
         legend.addStretch()
         lay.addLayout(legend)
 
-        self.table = QTableWidget(objectName="summaryTable")
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSortingEnabled(True)
-        self.table.setColumnCount(10)
-        self.table.setHorizontalHeaderLabels([
-            "Участок", "Владелец", "Последнее показание", "Дата показ.",
-            "Начислено", "Оплачено", "Стартовое", "Долг / Аванс", "Без оплаты, мес.",
-            "Тип расчёта",
-        ])
-        hdr = self.table.horizontalHeader()
-        for c, w in enumerate([85, 240, 140, 105, 120, 120, 100, 130, 110, 130]):
-            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
-            self.table.setColumnWidth(c, w)
-        hdr.setStretchLastSection(True)
-        self.table.cellDoubleClicked.connect(self._open_card)
-        lay.addWidget(self.table, 1)
+        # ── Модель ──────────────────────────────────────────────────────────
+        self.model = _EnergyModel(self)
+
+        # ── Шапка (внешняя) ─────────────────────────────────────────────────
+        self.hdr_view = _SortHeaderView()
+        self.hdr_view.setModel(self.model)
+        self.hdr_view.sortIndicatorChanged.connect(self._on_sort_changed)
+
+        hdr_frame = QFrame()
+        hdr_frame.setStyleSheet("background: #C9D8E2; border: none;")
+        hdr_inner = QHBoxLayout(hdr_frame)
+        hdr_inner.setContentsMargins(0, 0, 0, 0)
+        hdr_inner.setSpacing(0)
+        hdr_inner.addWidget(self.hdr_view)
+        sb_stub = QWidget()
+        sb_stub.setFixedWidth(_SB_W)
+        sb_stub.setStyleSheet("background: #C9D8E2; border: none;")
+        hdr_inner.addWidget(sb_stub)
+
+        # ── Дерево (плоское) ────────────────────────────────────────────────
+        self.tree = QTreeView(objectName="mainTable")
+        self.tree.setModel(self.model)
+        self.tree.header().hide()
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(0)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree.setSortingEnabled(False)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setMouseTracking(True)
+        self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.tree.setStyleSheet(_TREE_STYLE)
+        self.tree.doubleClicked.connect(self._open_card)
+
+        # Поиск в шапке: Участок, Владелец
+        self.hdr_view.add_search_col(_EnergyModel.COLUMNS.index("Участок"))
+        self.hdr_view.add_search_col(_EnergyModel.COLUMNS.index("Владелец"))
+        self.hdr_view.searchChanged.connect(self._on_search_changed)
+
+        # Синхронизация ширин колонок между hdr_view и tree
+        self.tree.header().sectionResized.connect(self._on_tree_hdr_resized)
+        self.hdr_view.sectionResized.connect(self._on_hdr_view_resized)
+
+        # ── Единый контейнер ─────────────────────────────────────────────────
+        table_outer = _ClipFrame(QColor("#D5DCE4"), 6)
+        outer_inner = QVBoxLayout(table_outer)
+        outer_inner.setContentsMargins(0, 0, 0, 0)
+        outer_inner.setSpacing(0)
+        outer_inner.addWidget(hdr_frame)
+        outer_inner.addWidget(self.tree, stretch=1)
+        table_outer.finish_setup()
 
         # Сверка с поставщиком
         self.recon_lbl = QLabel("", objectName="statusLabel")
@@ -120,34 +165,64 @@ class EnergyDebtWidget(QWidget):
             "background:#F9FAFB;border:1px solid #E5E7EB;border-radius:6px;"
             "padding:10px 14px;color:#374151;font-size:12px;"
         )
-        lay.addWidget(self.recon_lbl)
 
         self.status_lbl = QLabel("Загрузите выписку на вкладке «Детализация»",
                                   objectName="statusLabel")
-        lay.addWidget(self.status_lbl)
+        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        table_vbox = QVBoxLayout()
+        table_vbox.setSpacing(4)
+        table_vbox.setContentsMargins(0, 0, 0, 0)
+        table_vbox.addWidget(table_outer, stretch=1)
+        table_vbox.addWidget(self.recon_lbl)
+        table_vbox.addWidget(self.status_lbl)
+        lay.addLayout(table_vbox)
 
         self.rates = RatesWidget()
+
+    # -- синхронизация колонок ----------------------------------------------- #
+
+    def _on_tree_hdr_resized(self, logical, old_size, new_size):
+        if self._col_syncing:
+            return
+        self._col_syncing = True
+        self.hdr_view.resizeSection(logical, new_size)
+        self._col_syncing = False
+
+    def _on_hdr_view_resized(self, logical, old_size, new_size):
+        if self._col_syncing:
+            return
+        self._col_syncing = True
+        self.tree.header().resizeSection(logical, new_size)
+        self._col_syncing = False
+
+    # -- сортировка / поиск -------------------------------------------------- #
+
+    def _on_sort_changed(self, col, order):
+        self.model.sort(col, order)
+        self.hdr_view.setSortIndicator(col, order)
+
+    def _on_search_changed(self, col, text):
+        self._search_filters[col] = text.strip().lower()
+        self._rebuild()
+
+    # -- публичный API ------------------------------------------------------- #
 
     def _open_rates_dialog(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("Нормативы — тарифы на электроэнергию")
         dlg.resize(700, 500)
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.rates)
+        dlg_lay = QVBoxLayout(dlg)
+        dlg_lay.setContentsMargins(0, 0, 0, 0)
+        dlg_lay.addWidget(self.rates)
         dlg.exec()
-        lay.removeWidget(self.rates)
+        dlg_lay.removeWidget(self.rates)
         self.rates.setParent(self)  # type: ignore[arg-type]
+        self._rebuild()
 
     def refresh(self, df):
         self._df = df
         self._rebuild()
-
-    def get_debts(self) -> dict:
-        """Для карты: {plot: {debt, color}}."""
-        if not hasattr(self, "_last_debts"):
-            return {}
-        return self._last_debts
 
     def _plot_list(self) -> list[str]:
         plots = energy.load_plots()
@@ -158,7 +233,6 @@ class EnergyDebtWidget(QWidget):
             parts = key.split(":")
             if parts and parts[0] not in nums:
                 nums.append(parts[0])
-        # сортировка: сначала числовые по возрастанию, потом сложные
         def _key(s):
             try:
                 return (0, int(s))
@@ -177,47 +251,38 @@ class EnergyDebtWidget(QWidget):
         owners = energy.owners_map()
         plots = self._plot_list()
 
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(plots))
-
         total_debt = 0.0
         total_charged = 0.0
         total_paid = 0.0
         debt_count = 0
-        avg_monthly: list[float] = []
         debts_map: dict[str, dict] = {}
         type_counts = {energy.BILLING_METER: 0, energy.BILLING_CALCULATED: 0,
                        energy.BILLING_DIRECT: 0}
         type_charged = {energy.BILLING_METER: 0.0, energy.BILLING_CALCULATED: 0.0}
         direct_debt_total = 0.0
 
-        for r, plot in enumerate(plots):
+        rows: list[dict] = []
+        for plot in plots:
             bt = energy.billing_type_of(plot)
             type_counts[bt] = type_counts.get(bt, 0) + 1
             bal = energy.balance(plot, as_of, meters, rates, repls, baseline, self._df)
             owner = ", ".join(owners.get(plot, [])) or "—"
             last_reading_text = "—"
             last_date_text = "—"
+            reading_sort = -1.0
+            date_sort = -1.0
             if bal.last_reading:
                 ly, lm, lv = bal.last_reading
                 last_reading_text = f"{lv:g}"
                 last_date_text = f"{lm:02d}.{ly}"
-
-            # Средний месячный платёж для оценки уровня долга (для цвета на карте)
-            if bal.charged > 0:
-                count_charged_months = sum(
-                    1 for c in energy.all_charges(plot, meters, rates, repls, as_of)
-                    if c["amount"] is not None
-                )
-                if count_charged_months:
-                    avg_monthly.append(bal.charged / count_charged_months)
+                reading_sort = float(lv)
+                date_sort = float(ly * 100 + lm)
 
             color = energy.debt_color(bal.debt, monthly_avg=300.0)
             debts_map[plot] = {"debt": bal.debt, "color": color,
                                 "charged": bal.charged, "paid": bal.paid,
                                 "billing_type": bt}
 
-            # Тип 3 (прямой договор) — вне суммарного баланса СНТ
             if bt == energy.BILLING_DIRECT:
                 direct_debt_total += bal.debt
             else:
@@ -232,46 +297,84 @@ class EnergyDebtWidget(QWidget):
                 plot_sort = float(str(plot).split(",")[0])
             except ValueError:
                 plot_sort = 0.0
-            try:
-                reading_sort = float(last_reading_text) if last_reading_text != "—" else -1.0
-            except ValueError:
-                reading_sort = -1.0
-            date_sort = float(bal.last_reading[0] * 100 + bal.last_reading[1]) if bal.last_reading else -1.0
 
-            cells = [
-                (f"уч. {plot}", plot_sort, None, "#6366F1", True),
-                (owner, owner, None, "#374151", False),
-                (last_reading_text, reading_sort, None, "#374151", False),
-                (last_date_text, date_sort, None, "#9CA3AF", False),
-                (fmt_money(bal.charged), bal.charged, None, "#f9a825" if bal.charged else "#3a5a7a", False),
-                (fmt_money(bal.paid), bal.paid, None, "#059669" if bal.paid else "#3a5a7a", False),
-                (fmt_money(bal.baseline) if bal.baseline else "—", bal.baseline, None,
-                 "#c97c7c" if bal.baseline else "#3a5a7a", False),
-                (fmt_money(bal.debt), bal.debt, _DEBT_COLOR_LIGHT.get(color, color), None, True),
-                ("—" if bal.months_without_payment is None else str(bal.months_without_payment),
-                 bal.months_without_payment or 0, None,
-                 "#DC2626" if (bal.months_without_payment or 0) > 3 else "#374151", False),
-                (energy.BILLING_LABELS.get(bt, bt), bt,
-                 "#EEF2FF" if bt == energy.BILLING_DIRECT else None,
-                 "#4338CA" if bt == energy.BILLING_DIRECT else "#6B7280", False),
-            ]
-            for c, (text, value, bg, fg, bold) in enumerate(cells):
-                if isinstance(value, (int, float)):
-                    it = _NumItem(text, float(value))
+            mwp = bal.months_without_payment
+            row = {
+                "_text_Участок": f"уч. {plot}",
+                "_sort_Участок": plot_sort,
+                "_fg_Участок": "#6366F1",
+                "_bold_Участок": True,
+
+                "_text_Владелец": owner,
+                "_sort_Владелец": owner,
+                "_fg_Владелец": "#374151",
+
+                "_text_Последнее показание": last_reading_text,
+                "_sort_Последнее показание": reading_sort,
+                "_fg_Последнее показание": "#374151",
+
+                "_text_Дата показ.": last_date_text,
+                "_sort_Дата показ.": date_sort,
+                "_fg_Дата показ.": "#9CA3AF",
+
+                "_text_Начислено": fmt_money(bal.charged),
+                "_sort_Начислено": bal.charged,
+                "_fg_Начислено": "#f9a825" if bal.charged else "#3a5a7a",
+
+                "_text_Оплачено": fmt_money(bal.paid),
+                "_sort_Оплачено": bal.paid,
+                "_fg_Оплачено": "#059669" if bal.paid else "#3a5a7a",
+
+                "_text_Стартовое": fmt_money(bal.baseline) if bal.baseline else "—",
+                "_sort_Стартовое": bal.baseline,
+                "_fg_Стартовое": "#c97c7c" if bal.baseline else "#3a5a7a",
+
+                "_text_Долг / Аванс": fmt_money(bal.debt),
+                "_sort_Долг / Аванс": bal.debt,
+                "_bg_Долг / Аванс": _DEBT_COLOR_LIGHT.get(color, color),
+                "_bold_Долг / Аванс": True,
+
+                "_text_Без оплаты, мес.": "—" if mwp is None else str(mwp),
+                "_sort_Без оплаты, мес.": mwp or 0,
+                "_fg_Без оплаты, мес.": "#DC2626" if (mwp or 0) > 3 else "#374151",
+
+                "_text_Тип расчёта": energy.BILLING_LABELS.get(bt, bt),
+                "_sort_Тип расчёта": bt,
+                "_bg_Тип расчёта": "#EEF2FF" if bt == energy.BILLING_DIRECT else None,
+                "_fg_Тип расчёта": "#4338CA" if bt == energy.BILLING_DIRECT else "#6B7280",
+            }
+            rows.append(row)
+
+        # Поиск в шапке
+        for col_idx, text in self._search_filters.items():
+            if not text:
+                continue
+            col_name = _EnergyModel.COLUMNS[col_idx]
+            if col_name == "Участок":
+                rows = [r for r in rows if text in r.get("_text_Участок", "").lower()]
+            elif col_name == "Владелец":
+                rows = [r for r in rows if text in r.get("_text_Владелец", "").lower()]
+
+        # Фильтр по долгу
+        mode = self.cb_only_debt.currentText()
+        if mode == "Только должники":
+            rows = [r for r in rows if r.get("_sort_Долг / Аванс", 0.0) > 0.5]
+        elif mode == "Только аванс/0":
+            rows = [r for r in rows if r.get("_sort_Долг / Аванс", 0.0) <= 0.5]
+
+        self.model.load(rows)
+
+        # Ширины колонок
+        widths = [85, 240, 140, 95, 110, 110, 95, 120, 110, 120]
+        for h in (self.hdr_view, self.tree.header()):
+            h.setStretchLastSection(False)
+            for c, w in enumerate(widths):
+                if c == 1:
+                    h.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
                 else:
-                    it = QTableWidgetItem(text)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-                if bg:
-                    it.setBackground(QColor(bg))
-                if fg:
-                    it.setForeground(QColor(fg))
-                if bold:
-                    f = it.font(); f.setBold(True); it.setFont(f)
-                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                self.table.setItem(r, c, it)
-            self.table.setRowHeight(r, 28)
+                    h.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed)
+                    h.resizeSection(c, w)
 
-        self.table.setSortingEnabled(True)
         self._last_debts = debts_map
 
         direct_note = ""
@@ -294,7 +397,7 @@ class EnergyDebtWidget(QWidget):
         try:
             df = self._df
             if df is None or df.empty:
-                date_from = baseline_start = energy._parse_iso(baseline.get("start_date", "")) or date(as_of.year, 1, 1)
+                date_from = energy._parse_iso(baseline.get("start_date", "")) or date(as_of.year, 1, 1)
                 date_to = as_of
             else:
                 date_from = max(
@@ -322,36 +425,18 @@ class EnergyDebtWidget(QWidget):
         except Exception as e:
             self.recon_lbl.setText(f"Сверка недоступна: {e}")
 
-        self._apply_filter()
-
-    def _apply_filter(self):
-        text = self.search.text().strip().lower()
-        mode = self.cb_only_debt.currentText()
-        for r in range(self.table.rowCount()):
-            plot_item = self.table.item(r, 0)
-            owner_item = self.table.item(r, 1)
-            debt_item = self.table.item(r, 7)
-            if not plot_item or not debt_item:
-                continue
-            visible = True
-            if text:
-                hay = (plot_item.text() + " " + (owner_item.text() if owner_item else "")).lower()
-                visible = text in hay
-            if visible and mode == "Только должники":
-                visible = isinstance(debt_item, _NumItem) and debt_item._value > 0.5
-            elif visible and mode == "Только аванс/0":
-                visible = isinstance(debt_item, _NumItem) and debt_item._value <= 0.5
-            self.table.setRowHidden(r, not visible)
-
-    def _open_card(self, row: int, _col: int):
-        plot_item = self.table.item(row, 0)
-        if not plot_item:
+    def _open_card(self, index: QModelIndex):
+        if not index.isValid():
             return
-        plot = plot_item.text().replace("уч. ", "").strip()
+        node = index.internalPointer()
+        if node is None:
+            return
+        plot = node.get("_text_Участок", "").replace("уч. ", "").strip()
+        if not plot:
+            return
         as_of = self.date_as_of.date().toPyDate()
         dlg = PlotCardDialog(plot, self._df, self, as_of=as_of)
         dlg.exec()
-        # после возможной правки показаний / замены счётчика — пересчитать
         self._rebuild()
 
     def _export_debtor_receipts(self):
@@ -428,17 +513,16 @@ class EnergyDebtWidget(QWidget):
             path += ".xlsx"
 
         headers = [
-            self.table.horizontalHeaderItem(c).text()
-            for c in range(self.table.columnCount())
+            self.hdr_view.headerData(c, Qt.Orientation.Horizontal)
+            for c in range(self.model.columnCount())
         ]
         rows = []
-        for r in range(self.table.rowCount()):
-            if self.table.isRowHidden(r):
-                continue
-            rows.append([
-                (self.table.item(r, c).text() if self.table.item(r, c) else "")
-                for c in range(self.table.columnCount())
-            ])
+        for r in range(self.model.rowCount()):
+            row_data = []
+            for c in range(self.model.columnCount()):
+                idx = self.model.index(r, c)
+                row_data.append(self.model.data(idx, Qt.ItemDataRole.DisplayRole) or "")
+            rows.append(row_data)
 
         try:
             import openpyxl

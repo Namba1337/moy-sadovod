@@ -1,129 +1,35 @@
 import os
 import re
 
-from PyQt6.QtCore import Qt, QDate, QModelIndex, QAbstractItemModel, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtCore import Qt, QDate, QModelIndex
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDateEdit, QDialog, QFileDialog,
-    QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QTreeView, QVBoxLayout, QWidget,
+    QAbstractItemView, QDateEdit, QDialog, QFileDialog,
+    QFrame, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
+    QPushButton, QTreeView, QVBoxLayout, QWidget,
 )
 
 from core import energy
 from core.utils import fmt_money
-from ui.energy_card import _NumItem
 from ui.plots_widget import (
-    _SortHeaderView, _ClipFrame, _TREE_STYLE, _SB_W,
-    _is_visible, _is_owner, _owner_name,
+    _SortHeaderView, _ClipFrame, _TREE_STYLE, _SB_W, _FlatTableModel,
+    _DEBT_COLOR_LIGHT, _is_visible, _is_owner, _owner_name,
 )
 from ui.vznosy_card import VznosyCardDialog
 from ui.rates_widget import VznosyRatesWidget
-
-# Светлые варианты цветов долга для таблицы.
-_DEBT_COLOR_LIGHT = {
-    "#2e7d32": "#c8e6c9",
-    "#f9a825": "#fff9c4",
-    "#ef6c00": "#ffe0b2",
-    "#c62828": "#ffcdd2",
-}
 
 
 # ============================================================================ #
 #  Модель данных                                                               #
 # ============================================================================ #
 
-class _VznosyModel(QAbstractItemModel):
+class _VznosyModel(_FlatTableModel):
     """Плоская модель для таблицы долгов по ЧВ."""
 
     COLUMNS = [
         "Участок", "Собственник", "Площадь, м²",
         "Начислено", "Оплачено", "Долг / Аванс",
     ]
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._rows: list[dict] = []
-
-    def load(self, rows: list[dict]):
-        self.beginResetModel()
-        self._rows = list(rows)
-        self.endResetModel()
-
-    def top_nodes(self) -> list[dict]:
-        return self._rows
-
-    # -- core tree (flat) ---------------------------------------------------- #
-
-    def index(self, row, column, parent=QModelIndex()):
-        if not self.hasIndex(row, column, parent):
-            return QModelIndex()
-        return self.createIndex(row, column, self._rows[row])
-
-    def parent(self, index):
-        return QModelIndex()
-
-    def rowCount(self, parent=QModelIndex()):
-        if parent.isValid():
-            return 0
-        return len(self._rows)
-
-    def columnCount(self, parent=QModelIndex()):
-        return len(self.COLUMNS)
-
-    # -- read ---------------------------------------------------------------- #
-
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return None
-        row = self._rows[index.row()]
-        col = self.COLUMNS[index.column()]
-
-        if role == Qt.ItemDataRole.DisplayRole:
-            return row.get(f"_text_{col}", "")
-
-        if role == Qt.ItemDataRole.UserRole:
-            return row.get(f"_sort_{col}", 0.0)
-
-        if role == Qt.ItemDataRole.ForegroundRole:
-            fg = row.get(f"_fg_{col}")
-            return QColor(fg) if fg else None
-
-        if role == Qt.ItemDataRole.BackgroundRole:
-            bg = row.get(f"_bg_{col}")
-            return QColor(bg) if bg else None
-
-        if role == Qt.ItemDataRole.FontRole:
-            if row.get(f"_bold_{col}"):
-                f = QFont()
-                f.setBold(True)
-                return f
-
-        if role == Qt.ItemDataRole.ToolTipRole:
-            return row.get(f"_tip_{col}", "")
-
-        return None
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            if 0 <= section < len(self.COLUMNS):
-                return self.COLUMNS[section]
-        return None
-
-    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
-        if column < 0 or column >= len(self.COLUMNS):
-            return
-        col = self.COLUMNS[column]
-        sort_key = f"_sort_{col}"
-        self.layoutAboutToBeChanged.emit()
-        self._rows.sort(
-            key=lambda r: (
-                r.get(sort_key) is None,
-                r.get(sort_key, 0.0),
-            ),
-            reverse=(order == Qt.SortOrder.DescendingOrder),
-        )
-        self.layoutChanged.emit()
 
 
 # ============================================================================ #
