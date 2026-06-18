@@ -157,6 +157,8 @@ MANUAL_ROLE = Qt.ItemDataRole.UserRole + 1
 _DEFAULT_ROW_COLOR = QColor(55, 55, 60)
 # Заглушка для родительской строки, у которой есть дочерние строки-распределения.
 _MULTI_OP_LABEL = "Мультиоперация"
+_MULTI_CAT_LABEL = "Несколько категорий"
+_MULTI_PLOT_LABEL = "Несколько участков"
 _MULTI_OP_COLOR = QColor(110, 110, 118)   # приглушённый серый
 # Служебный столбец управления (стрелка/＋/корзина). Хранится первым в модели.
 _CTRL_COL = "\x00ctrl"
@@ -280,10 +282,29 @@ class OperationsTreeModel(QAbstractItemModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             if node.kind == "split" and col not in _SPLIT_DISPLAY_COLS:
                 return ""
-            # Родительская строка с дочерними → Категория и Участок скрываются заглушкой
-            if (col in ("Категория", "Участок") and role == Qt.ItemDataRole.DisplayRole
-                    and node.kind == "op" and node.children):
-                return _MULTI_OP_LABEL
+            if role == Qt.ItemDataRole.DisplayRole and node.kind == "op" and node.children:
+                if col == "Участок":
+                    plots = set()
+                    for ch in node.children:
+                        p = str(ch.data.get("Участок", "")).strip()
+                        if p:
+                            plots.add(p)
+                    if len(plots) == 1:
+                        return plots.pop()
+                    if len(plots) == 0:
+                        return _MULTI_OP_LABEL
+                    return _MULTI_PLOT_LABEL
+                if col == "Категория":
+                    cats = set()
+                    for ch in node.children:
+                        c = str(ch.data.get("Категория", "")).strip()
+                        if c:
+                            cats.add(c)
+                    if len(cats) == 1:
+                        return cats.pop()
+                    if len(cats) == 0:
+                        return _MULTI_OP_LABEL
+                    return _MULTI_CAT_LABEL
             val = node.data.get(col)
             if col == "Сумма":
                 num = _to_num(val)
@@ -577,6 +598,10 @@ class _CategoryDelegate(_CellDelegate):
             self._paint_hatched(painter, option)
             return
 
+        if text == _MULTI_CAT_LABEL:
+            self._paint_multi_cat(painter, option, text)
+            return
+
         color = CATEGORY_COLORS.get(text) if text else None
         if color is None:
             super().paint(painter, option, index)
@@ -643,6 +668,52 @@ class _CategoryDelegate(_CellDelegate):
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                 self._CHAR,
             )
+
+        painter.restore()
+
+    def _paint_multi_cat(self, painter, option, text):
+        """Серый овал с текстом (без штриховки) для строки с несколькими категориями."""
+        painter.save()
+
+        rect = option.rect
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
+
+        is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
+        if selected:
+            painter.fillRect(rect, self._BG_SEL)
+        elif hovered:
+            painter.fillRect(rect, self._BG_HOVER)
+        else:
+            painter.fillRect(rect, self._BG_ALT if is_alt else self._BG)
+
+        painter.setPen(QPen(self._BORDER, 1))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        v = max(3, (rect.height() - 20) // 2)
+        pill   = rect.adjusted(6, v, -6, -v)
+        pill_f = QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius_f = pill_f.height() / 2.0
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(234, 234, 238))
+        painter.drawRoundedRect(pill_f, radius_f, radius_f)
+
+        painter.setPen(QPen(QColor(165, 165, 173), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(pill_f, radius_f, radius_f)
+
+        painter.setPen(QColor(110, 110, 118))
+        painter.setFont(option.font)
+        text_rect = pill.adjusted(8, 0, -4, 0)
+        fm = QFontMetrics(option.font)
+        elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, text_rect.width())
+        painter.drawText(
+            text_rect,
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            elided,
+        )
 
         painter.restore()
 
@@ -855,7 +926,13 @@ class _PlotDelegate(_CellDelegate):
         self._items = items
 
     def paint(self, painter, option, index):
-        if index.data(Qt.ItemDataRole.DisplayRole) == _MULTI_OP_LABEL:
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+
+        if text == _MULTI_PLOT_LABEL:
+            self._paint_multi_plot(painter, option, text)
+            return
+
+        if text == _MULTI_OP_LABEL:
             painter.save()
 
             rect = option.rect
@@ -891,6 +968,51 @@ class _PlotDelegate(_CellDelegate):
             return
 
         super().paint(painter, option, index)
+
+    def _paint_multi_plot(self, painter, option, text):
+        painter.save()
+
+        rect = option.rect
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
+
+        is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
+        if selected:
+            painter.fillRect(rect, self._BG_SEL)
+        elif hovered:
+            painter.fillRect(rect, self._BG_HOVER)
+        else:
+            painter.fillRect(rect, self._BG_ALT if is_alt else self._BG)
+
+        painter.setPen(QPen(self._BORDER, 1))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        v = max(3, (rect.height() - 20) // 2)
+        pill   = rect.adjusted(6, v, -6, -v)
+        pill_f = QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius_f = pill_f.height() / 2.0
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(234, 234, 238))
+        painter.drawRoundedRect(pill_f, radius_f, radius_f)
+
+        painter.setPen(QPen(QColor(165, 165, 173), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(pill_f, radius_f, radius_f)
+
+        painter.setPen(QColor(110, 110, 118))
+        painter.setFont(option.font)
+        text_rect = pill.adjusted(8, 0, -4, 0)
+        fm = QFontMetrics(option.font)
+        elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, text_rect.width())
+        painter.drawText(
+            text_rect,
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            elided,
+        )
+
+        painter.restore()
 
     def createEditor(self, parent, option, index):
         combo = QComboBox(parent)
@@ -1774,6 +1896,7 @@ class _PlotComboBox(QComboBox):
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.setStyleSheet(self._STYLE)
         self.addItem("")
+        self._valid_values: set[str] = {""}
         self._fill_items()
 
         completer = self.completer()
@@ -1781,7 +1904,6 @@ class _PlotComboBox(QComboBox):
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
-        self._valid_values: set[str] = {""}
         self.lineEdit().editingFinished.connect(self._validate)
 
     def paintEvent(self, event):
@@ -3122,7 +3244,6 @@ class DetailWidget(QWidget):
         self._cat_col: int | None = None
         self._cont_col: int | None = None
         self._plot_col: int | None = None
-        self._active_warning: str | None = None
         self._hdr_cat_filter: set = set()
         self._setup_ui()
 
@@ -3153,58 +3274,6 @@ class DetailWidget(QWidget):
         top_bar.addWidget(btn_excel)
 
         layout.addLayout(top_bar)
-
-        filter_frame = QFrame()
-        filter_frame.setObjectName("filterFrame")
-        fl = QHBoxLayout(filter_frame)
-        fl.setContentsMargins(16, 12, 16, 12)
-        fl.setSpacing(10)
-
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Поиск по контрагенту или назначению...")
-        self.search_input.setObjectName("searchInput")
-        self.search_input.textChanged.connect(self.apply_filters)
-        fl.addWidget(self.search_input, stretch=3)
-
-        self.combo_type = QComboBox()
-        self.combo_type.setObjectName("filterCombo")
-        self.combo_type.addItems(["Все операции", "Поступления", "Списания"])
-        self.combo_type.currentIndexChanged.connect(self.apply_filters)
-        fl.addWidget(self.combo_type, stretch=1)
-
-        self.combo_cat = _CategoryPillButton()
-        self.combo_cat.addItem("Все категории")
-        for cat in ALL_CATEGORIES:
-            self.combo_cat.addItem(cat)
-        self.combo_cat.currentTextChanged.connect(self.apply_filters)
-        fl.addWidget(self.combo_cat, stretch=2)
-
-        fl.addWidget(QLabel("с", objectName="filterLabel"))
-        self.date_from = QDateEdit(calendarPopup=True, objectName="datePicker",
-                                   displayFormat="dd.MM.yyyy")
-        self.date_from.setDate(QDate(2021, 1, 1))
-        self.date_from.dateChanged.connect(self.apply_filters)
-        fl.addWidget(self.date_from)
-
-        fl.addWidget(QLabel("по", objectName="filterLabel"))
-        self.date_to = QDateEdit(calendarPopup=True, objectName="datePicker",
-                                 displayFormat="dd.MM.yyyy")
-        self.date_to.setDate(QDate.currentDate())
-        self.date_to.dateChanged.connect(self.apply_filters)
-        fl.addWidget(self.date_to)
-
-        btn_reset = QPushButton("✕  Сбросить", objectName="btnSecondary")
-        btn_reset.clicked.connect(self.reset_filters)
-        fl.addWidget(btn_reset)
-
-        layout.addWidget(filter_frame)
-
-        self._warnings_bar = QWidget()
-        self._warnings_bar.setVisible(False)
-        self._warnings_layout = QHBoxLayout(self._warnings_bar)
-        self._warnings_layout.setContentsMargins(0, 0, 0, 0)
-        self._warnings_layout.setSpacing(6)
-        layout.addWidget(self._warnings_bar)
 
         # --- дерево (Model-View) --------------------------------------- #
         self.model = OperationsTreeModel(self._manual_cells, self)
@@ -3314,15 +3383,6 @@ class DetailWidget(QWidget):
         _cat_mod.ALL_CATEGORIES[:] = new_cats
         self._category_delegate._items = list(new_cats)
 
-        current = self.combo_cat.currentText()
-        self.combo_cat.blockSignals(True)
-        self.combo_cat.clear()
-        self.combo_cat.addItem("Все категории")
-        self.combo_cat.addItems(new_cats)
-        idx = self.combo_cat.findText(current)
-        self.combo_cat.setCurrentIndex(idx if idx >= 0 else 0)
-        self.combo_cat.blockSignals(False)
-
         valid_sel = self._hdr_cat_filter & set(new_cats)
         self._hdr_cat_filter = valid_sel
         if self._cat_col is not None and self._cat_col >= 0:
@@ -3337,17 +3397,6 @@ class DetailWidget(QWidget):
             self.df_full.loc[self.df_full["Категория"] == old_name, "Категория"] = new_name
         # Делегат уже обновлён через rename_user_category → ALL_CATEGORIES
         self._category_delegate._items = list(_cat_mod.ALL_CATEGORIES)
-        # Комбобокс фильтра: меняем только изменившийся пункт
-        current = self.combo_cat.currentText()
-        if current == old_name:
-            current = new_name
-        self.combo_cat.blockSignals(True)
-        self.combo_cat.clear()
-        self.combo_cat.addItem("Все категории")
-        self.combo_cat.addItems(_cat_mod.ALL_CATEGORIES)
-        idx = self.combo_cat.findText(current)
-        self.combo_cat.setCurrentIndex(idx if idx >= 0 else 0)
-        self.combo_cat.blockSignals(False)
         if old_name in self._hdr_cat_filter:
             self._hdr_cat_filter.discard(old_name)
             self._hdr_cat_filter.add(new_name)
@@ -3437,162 +3486,9 @@ class DetailWidget(QWidget):
                 if col_idx not in self.hdr_view._search_cols:
                     self.hdr_view.add_search_col(col_idx)
 
-    # -------------------------------------------------- замечания ----------- #
-    def _compute_warnings(self) -> dict:
-        """Считает ошибки по всему df_full (не только по отфильтрованным строкам).
-        Возвращает {dupes, split_mismatch, no_cat, total} где total — кол-во
-        уникальных строк с хотя бы одной ошибкой."""
-        out = {"dupes": 0, "split_mismatch": 0, "no_cat": 0, "need_split": 0, "no_plot": 0, "total": 0}
-        if self.df_full is None or self.df_full.empty:
-            return out
-
-        issue_idx: set = set()
-
-        if "_hash" in self.df_full.columns:
-            mask = self.df_full.duplicated(subset=["_hash"], keep=False)
-            out["dupes"] = int(mask.sum())
-            issue_idx.update(self.df_full.index[mask].tolist())
-
-        if "Категория" in self.df_full.columns:
-            _bd_empty = {"", "None", "nan", "[]"}
-
-            def _no_cat(row):
-                bd_raw = row.get("_breakdown")
-                bd = _parse_breakdown(bd_raw) if bd_raw else []
-                if bd:
-                    # Мультиоперация: считаем «нет категории», если хоть у одного ребёнка пусто
-                    return any(
-                        not str(it.get("Категория") or "").strip() for it in bd
-                    )
-                cat = row.get("Категория")
-                return cat is None or (isinstance(cat, float) and pd.isna(cat)) \
-                    or str(cat).strip() == ""
-
-            mask = self.df_full.apply(_no_cat, axis=1)
-            out["no_cat"] = int(mask.sum())
-            issue_idx.update(self.df_full.index[mask].tolist())
-
-        if "_breakdown" in self.df_full.columns:
-            _empty = {"", "None", "nan", "[]"}
-            has_bd = (
-                self.df_full["_breakdown"].notna() &
-                ~self.df_full["_breakdown"].astype(str).str.strip().isin(_empty)
-            )
-            for idx, row in self.df_full[has_bd].iterrows():
-                items = _parse_breakdown(row.get("_breakdown"))
-                if not items:
-                    continue
-                parent = _to_num(row.get("Сумма")) or 0.0
-                child  = sum(_to_num(it.get("Сумма")) or 0.0 for it in items)
-                if abs(parent - child) > 0.005:
-                    out["split_mismatch"] += 1
-                    issue_idx.add(idx)
-
-        if "Категория" in self.df_full.columns:
-            mask = self.df_full["Категория"].astype(str) == "Членские взносы + Электроэнергия"
-            out["need_split"] = int(mask.sum())
-            issue_idx.update(self.df_full.index[mask].tolist())
-
-        if "Категория" in self.df_full.columns and "Участок" in self.df_full.columns:
-            known_plots = set(self._plot_delegate._items)
-
-            def _needs_plot_cat(cat: str) -> bool:
-                return cat.startswith("Членские взносы") or \
-                       cat.startswith("Электроэнергия (от садоводов)")
-
-            def _bad_plot(plot) -> bool:
-                s = str(plot).strip() if plot is not None else ""
-                return not s or s not in known_plots
-
-            def _no_plot_row(row) -> bool:
-                bd = _parse_breakdown(row.get("_breakdown")) if row.get("_breakdown") else []
-                if bd:
-                    return any(
-                        _needs_plot_cat(str(it.get("Категория") or "")) and
-                        _bad_plot(it.get("Участок"))
-                        for it in bd
-                    )
-                return _needs_plot_cat(str(row.get("Категория") or "")) and \
-                       _bad_plot(row.get("Участок"))
-
-            mask = self.df_full.apply(_no_plot_row, axis=1)
-            out["no_plot"] = int(mask.sum())
-            issue_idx.update(self.df_full.index[mask].tolist())
-
-        out["total"] = len(issue_idx)
-        return out
-
     def _refresh_summary(self):
         nodes = self.model.top_nodes()
         self.lbl_records.setText(f"Записей: {len(nodes)}")
-        self._rebuild_warnings_bar()
-
-    def _rebuild_warnings_bar(self):
-        # Очищаем старые чипы
-        while self._warnings_layout.count():
-            item = self._warnings_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        w = self._compute_warnings()
-        chips: list[tuple[str, str]] = []
-        if w["dupes"]:
-            chips.append(("dupes",         f"Дубли ({w['dupes']})"))
-        if w["split_mismatch"]:
-            chips.append(("split_mismatch", f"Сумма дочерних строк ({w['split_mismatch']})"))
-        if w["no_cat"]:
-            chips.append(("no_cat",         f"Нет категории ({w['no_cat']})"))
-        if w["need_split"]:
-            chips.append(("need_split",     f"Необходимо распределить операцию ({w['need_split']})"))
-        if w["no_plot"]:
-            chips.append(("no_plot",        f"Неизвестный участок ({w['no_plot']})"))
-
-        if not chips:
-            self._active_warning = None
-            self._warnings_bar.setVisible(False)
-            return
-
-        # Сбрасываем активный фильтр, если его замечание исчезло
-        if self._active_warning not in {k for k, _ in chips}:
-            self._active_warning = None
-
-        lbl = QLabel(f"⚠  Замечания ({w['total']}):")
-        lbl.setStyleSheet(
-            "color:#D97706; font-size:12px; font-weight:600; background:transparent;"
-        )
-        self._warnings_layout.addWidget(lbl)
-
-        for key, text in chips:
-            btn = QPushButton(text)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            if self._active_warning == key:
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background: #F59E0B; color: #FFFFFF;
-                        border: 1px solid #D97706; border-radius: 11px;
-                        padding: 3px 12px; font-size: 11px; font-weight: 600;
-                    }
-                    QPushButton:hover { background: #D97706; }
-                """)
-            else:
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background: #FEF3C7; color: #92400E;
-                        border: 1px solid #F59E0B; border-radius: 11px;
-                        padding: 3px 12px; font-size: 11px;
-                    }
-                    QPushButton:hover { background: #FDE68A; }
-                """)
-            btn.clicked.connect(lambda checked, k=key: self._on_warning_tag_clicked(k))
-            self._warnings_layout.addWidget(btn)
-
-        self._warnings_layout.addStretch()
-        self._warnings_bar.setVisible(True)
-
-    def _on_warning_tag_clicked(self, key: str):
-        self._active_warning = None if self._active_warning == key else key
-        self.apply_filters()
 
     # --------------------------------------------------------- разбивка --- #
     def _set_breakdown(self, df_idx, items: list):
@@ -3690,9 +3586,6 @@ class DetailWidget(QWidget):
                 columns=["Дата", "Контрагент", "Сумма", "Назначение", "Категория", "Участок"]
             )
             self.df_full = self.df_full.astype({"Дата": "datetime64[ns]", "Сумма": float})
-            today = QDate.currentDate()
-            self.date_from.setDate(QDate(today.year() - 1, 1, 1))
-            self.date_to.setDate(today)
 
         new_idx = int(self.df_full.index.max()) + 1 if len(self.df_full) > 0 else 0
 
@@ -3713,14 +3606,6 @@ class DetailWidget(QWidget):
 
         if new_breakdown:
             self._set_breakdown(new_idx, new_breakdown)
-
-        row_ts = row_data["Дата"]
-
-        row_qdate = QDate(row_ts.year, row_ts.month, row_ts.day)
-        if row_qdate < self.date_from.date():
-            self.date_from.setDate(row_qdate)
-        if row_qdate > self.date_to.date():
-            self.date_to.setDate(row_qdate)
 
         self.apply_filters()
         if new_breakdown:
@@ -3787,12 +3672,6 @@ class DetailWidget(QWidget):
                 self._manual_cells.clear()
                 self.df_full = df
 
-            min_d = self.df_full["Дата"].min()
-            max_d = self.df_full["Дата"].max()
-            if pd.notna(min_d):
-                self.date_from.setDate(QDate(min_d.year, min_d.month, min_d.day))
-            if pd.notna(max_d):
-                self.date_to.setDate(QDate(max_d.year, max_d.month, max_d.day))
             self.apply_filters()
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
@@ -3811,11 +3690,6 @@ class DetailWidget(QWidget):
             )
         df = _ensure_meta_columns(df)
         self.df_full = df
-        min_d, max_d = df["Дата"].min(), df["Дата"].max()
-        if pd.notna(min_d):
-            self.date_from.setDate(QDate(min_d.year, min_d.month, min_d.day))
-        if pd.notna(max_d):
-            self.date_to.setDate(QDate(max_d.year, max_d.month, max_d.day))
         self.apply_filters()
         self.dataLoaded.emit(self.df_full)
 
@@ -3853,25 +3727,6 @@ class DetailWidget(QWidget):
     def _filtered_df(self) -> "pd.DataFrame":
         df = self.df_full.copy()
 
-        d_from = self.date_from.date().toPyDate()
-        d_to   = self.date_to.date().toPyDate()
-        df = df[(df["Дата"].dt.date >= d_from) & (df["Дата"].dt.date <= d_to)]
-
-        op_type = self.combo_type.currentText()
-        if op_type == "Поступления" and "Сумма" in df.columns:
-            df = df[pd.to_numeric(df["Сумма"], errors="coerce") > 0]
-        elif op_type == "Списания" and "Сумма" in df.columns:
-            df = df[pd.to_numeric(df["Сумма"], errors="coerce") < 0]
-
-        cat_filter = self.combo_cat.currentText()
-        if cat_filter != "Все категории":
-            def _cat_matches(row):
-                bd = _parse_breakdown(row.get("_breakdown"))
-                if bd:
-                    return any(it.get("Категория") == cat_filter for it in bd)
-                return row.get("Категория") == cat_filter
-            df = df[df.apply(_cat_matches, axis=1)]
-
         if self._hdr_cat_filter:
             _sel = self._hdr_cat_filter
             def _hdr_cat_matches(row):
@@ -3880,14 +3735,6 @@ class DetailWidget(QWidget):
                     return any(it.get("Категория") in _sel for it in bd)
                 return row.get("Категория") in _sel
             df = df[df.apply(_hdr_cat_matches, axis=1)]
-
-        search = self.search_input.text().strip().lower()
-        if search:
-            mask = (
-                df["Контрагент"].astype(str).str.lower().str.contains(search, na=False) |
-                df["Назначение"].astype(str).str.lower().str.contains(search, na=False)
-            )
-            df = df[mask]
 
         # Поисковые фильтры из заголовков столбцов
         if self._hdr_search_filters:
@@ -3902,98 +3749,12 @@ class DetailWidget(QWidget):
                 if col_name and col_name in df.columns:
                     df = df[df[col_name].astype(str).str.lower().str.contains(text, na=False)]
 
-        # Фильтр по активному замечанию
-        if self._active_warning == "dupes":
-            if "_hash" in df.columns:
-                df = df[df.duplicated(subset=["_hash"], keep=False)]
-        elif self._active_warning == "no_cat":
-            if "Категория" in df.columns:
-                def _no_cat_row(row):
-                    bd_raw = row.get("_breakdown")
-                    bd = _parse_breakdown(bd_raw) if bd_raw else []
-                    if bd:
-                        return any(
-                            not str(it.get("Категория") or "").strip() for it in bd
-                        )
-                    cat = row.get("Категория")
-                    return cat is None or (isinstance(cat, float) and pd.isna(cat)) \
-                        or str(cat).strip() == ""
-                df = df[df.apply(_no_cat_row, axis=1)]
-        elif self._active_warning == "need_split":
-            if "Категория" in df.columns:
-                df = df[
-                    df["Категория"].astype(str) == "Членские взносы + Электроэнергия"
-                ]
-        elif self._active_warning == "no_plot":
-            if "Категория" in df.columns and "Участок" in df.columns:
-                known_plots = set(self._plot_delegate._items)
-
-                def _no_plot_filter(row) -> bool:
-                    def _needs(cat): return (
-                        str(cat or "").startswith("Членские взносы") or
-                        str(cat or "").startswith("Электроэнергия (от садоводов)")
-                    )
-                    def _bad(plot):
-                        s = str(plot).strip() if plot is not None else ""
-                        return not s or s not in known_plots
-
-                    bd = _parse_breakdown(row.get("_breakdown")) if row.get("_breakdown") else []
-                    if bd:
-                        return any(_needs(it.get("Категория")) and _bad(it.get("Участок"))
-                                   for it in bd)
-                    return _needs(row.get("Категория")) and _bad(row.get("Участок"))
-
-                df = df[df.apply(_no_plot_filter, axis=1)]
-        elif self._active_warning == "split_mismatch":
-            if "_breakdown" in df.columns:
-                _empty = {"", "None", "nan", "[]"}
-                has_bd = (
-                    df["_breakdown"].notna() &
-                    ~df["_breakdown"].astype(str).str.strip().isin(_empty)
-                )
-                bad = []
-                for idx, row in df[has_bd].iterrows():
-                    items = _parse_breakdown(row.get("_breakdown"))
-                    if not items:
-                        continue
-                    parent = _to_num(row.get("Сумма")) or 0.0
-                    child  = sum(_to_num(it.get("Сумма")) or 0.0 for it in items)
-                    if abs(parent - child) > 0.005:
-                        bad.append(idx)
-                df = df[df.index.isin(bad)]
-
         return df
 
     def apply_filters(self):
         if self.df_full is None:
             return
         self._rebuild_model(self._filtered_df())
-
-    def reset_filters(self):
-        self.search_input.clear()
-        self.combo_type.setCurrentIndex(0)
-        self.combo_cat.setCurrentIndex(0)
-        self._hdr_cat_filter = set()
-        if self.hdr_view._cat_popup:
-            self.hdr_view._cat_popup.blockSignals(True)
-            self.hdr_view._cat_popup.clear_selection()
-            self.hdr_view._cat_popup.blockSignals(False)
-        self.hdr_view._cat_active = False
-        # Сбросить поисковые фильтры столбцов
-        for col_idx, le in self.hdr_view._search_fields.items():
-            if le.isVisible():
-                self.hdr_view._toggle_search(col_idx)
-        self._hdr_search_filters.clear()
-        # Сбросить выбор строк
-        self._check_delegate.clear_selection()
-        self.hdr_view.viewport().update()
-        if self.df_full is not None:
-            min_d, max_d = self.df_full["Дата"].min(), self.df_full["Дата"].max()
-            if pd.notna(min_d):
-                self.date_from.setDate(QDate(min_d.year, min_d.month, min_d.day))
-            if pd.notna(max_d):
-                self.date_to.setDate(QDate(max_d.year, max_d.month, max_d.day))
-        self.apply_filters()
 
     def _on_hdr_cat_filter_changed(self, selected: set):
         self._hdr_cat_filter = set(selected)
