@@ -1,9 +1,10 @@
 import json
 import os
+from datetime import date, datetime
 
 import pandas as pd
 from PyQt6.QtCore import (
-    Qt, QEvent, QModelIndex, QAbstractItemModel, QObject, QPoint, QRect, QRectF,
+    Qt, QDate, QEvent, QModelIndex, QAbstractItemModel, QObject, QPoint, QRect, QRectF,
     QRegularExpression, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -11,13 +12,15 @@ from PyQt6.QtGui import (
     QRegion, QRegularExpressionValidator,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog,
+    QDialogButtonBox, QFileDialog, QFormLayout,
     QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMessageBox, QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTableWidget, QTableWidgetItem, QTreeView, QVBoxLayout, QWidget,
 )
 
-from core.utils import DATA_DIR
+from core import ownership
+from core.utils import DATA_DIR, fmt_money
 from ui.plot_detection import _PLOTS_FILE
 
 
@@ -70,6 +73,13 @@ def _owner_area(owner) -> float | None:
     return None
 
 
+def _owner_share_str(owner) -> str:
+    """Доля в праве как строка (для поля ввода), напр. '1/2'. Иначе ''."""
+    if isinstance(owner, dict):
+        return str(owner.get("share", "") or "")
+    return ""
+
+
 def _is_visible(owner) -> bool:
     if isinstance(owner, dict):
         return bool(owner.get("is_visible", False))
@@ -103,7 +113,8 @@ def _owner_email(owner) -> str:
 def _make_owner(name: str, is_owner: bool = True, area: float | None = None,
                 is_visible: bool = False, member_doc: str = "",
                 opd_doc: str = "", phone: str = "",
-                email: str = "") -> dict:
+                email: str = "", since: str = "", until: str = "",
+                share: str = "") -> dict:
     d: dict = {"name": name, "is_owner": is_owner}
     if area is not None:
         d["area"] = area
@@ -117,6 +128,14 @@ def _make_owner(name: str, is_owner: bool = True, area: float | None = None,
         d["phone"] = phone
     if email:
         d["email"] = email
+    # Поля истории владения (могут быть проставлены мастером «Сменить
+    # собственника»). Сохраняем как есть, чтобы редактор контактов их не терял.
+    if since:
+        d["since"] = since
+    if until:
+        d["until"] = until
+    if share:
+        d["share"] = share
     return d
 
 
@@ -393,12 +412,14 @@ class PlotsTreeModel(QAbstractItemModel):
             if not (0 <= node.owner_idx < len(owners)):
                 return False
             old = owners[node.owner_idx]
+            # Сохраняем ВСЕ поля владельца (телефон, e-mail, документы,
+            # since/until/share), меняя только редактируемую ячейку.
+            new = dict(old) if isinstance(old, dict) else {"name": str(old), "is_owner": True}
             if col == "Контактное лицо":
                 if not text:
                     return False
-                owners[node.owner_idx] = _make_owner(
-                    text, _is_owner(old), _owner_area(old), _is_visible(old),
-                    _owner_member_doc(old), _owner_opd_doc(old))
+                new["name"] = text
+                owners[node.owner_idx] = new
                 pn = node.parent
                 if pn is not None:
                     fio_col = self.COLUMNS.index("Контактное лицо")
@@ -406,7 +427,7 @@ class PlotsTreeModel(QAbstractItemModel):
                                          self.createIndex(pn.row(), fio_col, pn))
             else:  # Площадь, м²
                 if text in ("", "—"):
-                    area = None
+                    new.pop("area", None)
                 else:
                     try:
                         area = float(text.replace(",", "."))
@@ -414,9 +435,8 @@ class PlotsTreeModel(QAbstractItemModel):
                             return False
                     except ValueError:
                         return False
-                owners[node.owner_idx] = _make_owner(
-                    _owner_name(old), _is_owner(old), area, _is_visible(old),
-                    _owner_member_doc(old), _owner_opd_doc(old))
+                    new["area"] = area
+                owners[node.owner_idx] = new
             self.dataChanged.emit(index, index)
             self.ownerDataEdited.emit()
             return True
@@ -1597,9 +1617,14 @@ class PlotsWidget(QWidget):
         super().__init__()
         self.setAutoFillBackground(True)
         self._plots: list = self._load()
+        self._df = None                       # выписка — нужна мастеру для снимка долга
         self._search_filters: dict[int, str] = {}
         self._setup_ui()
         self._rebuild_table()
+
+    def refresh(self, df):
+        """Принимает загруженную выписку (для расчёта долга в мастере смены)."""
+        self._df = df
 
     def _load(self) -> list:
         try:
@@ -1875,7 +1900,7 @@ class PlotsWidget(QWidget):
             self.tree.expand(col0)
 
     def _edit_plot(self, plot: dict):
-        dlg = PlotEditDialog(plot_data=plot, parent=self)
+        dlg = PlotEditDialog(plot_data=plot, parent=self, df=self._df)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             result = dlg.get_result()
             if result:
@@ -2012,7 +2037,7 @@ class PlotsWidget(QWidget):
         )
 
     def _add_plot(self):
-        dlg = PlotEditDialog(plot_data=None, parent=self)
+        dlg = PlotEditDialog(plot_data=None, parent=self, df=self._df)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             result = dlg.get_result()
             if result:
@@ -2261,21 +2286,30 @@ class PlotEditDialog(QDialog):
 
     _IC_FONT = "Material Symbols Rounded"
 
-    def __init__(self, plot_data: dict | None = None, parent=None):
+    def __init__(self, plot_data: dict | None = None, parent=None, df=None):
         super().__init__(parent)
         self._is_edit = plot_data is not None
         self._plot_data = plot_data or {}
+        self._df = df
+        # Выбывшие собственники (с until) не редактируются здесь, но сохраняются
+        # вместе с участком ради истории владения.
+        self._departed: list = [
+            o for o in self._plot_data.get("owners", []) or []
+            if ownership.owner_until(o)
+        ]
         self.setWindowTitle("Редактировать участок" if self._is_edit else "Новый участок")
-        self.setMinimumWidth(800)
+        self.setMinimumWidth(920)
         self.setModal(True)
         self._owner_inputs:      list[QLineEdit]         = []
         self._owner_checks:      list[_IconCheckBox]      = []
         self._owner_visible:     list[_IconRadioButton]   = []
         self._owner_member_docs: list[_MemberDocWidget]   = []
         self._owner_opd_docs:    list[_OpdDocWidget]      = []
-        self._owner_areas:       list[QLineEdit]          = []
+        self._owner_share:       list[QLineEdit]          = []   # доля в праве
+        self._owner_m2:          list[QLabel]             = []   # производная площадь (read-only)
         self._owner_phones:      list[QLineEdit]          = []
         self._owner_emails:      list[QLineEdit]          = []
+        self._owner_since:       list[QLineEdit]          = []
         self._btn_save           = None
         self._setup_ui()
         self._apply_styles()
@@ -2310,6 +2344,7 @@ class PlotEditDialog(QDialog):
             self.inp_area.setCursorPosition(self.inp_area.cursorPosition()),
         ) if "." in t else None)
         self.inp_area.textChanged.connect(self._update_save_state)
+        self.inp_area.textChanged.connect(self._update_derived_m2)
         area_row = QHBoxLayout()
         area_row.setSpacing(6)
         area_row.addWidget(self.inp_area, stretch=1)
@@ -2319,10 +2354,21 @@ class PlotEditDialog(QDialog):
         _f_ic.setPixelSize(18)
         self._btn_distribute.setFont(_f_ic)
         self._btn_distribute.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_distribute.setToolTip("Равномерно распределить площадь по собственникам")
-        self._btn_distribute.clicked.connect(self._distribute_area)
+        self._btn_distribute.setToolTip("Поровну распределить доли между собственниками")
+        self._btn_distribute.clicked.connect(self._distribute_shares)
         area_row.addWidget(self._btn_distribute)
         form.addRow("Площадь, м²:", area_row)
+
+        # Вид права (как в выписке ЕГРН) — определяет, как делить начисление
+        self.cb_form = QComboBox()
+        for f in ownership.FORMS:
+            self.cb_form.addItem(ownership.FORM_LABELS[f], f)
+        cur_form = ownership.plot_ownership_form(self._plot_data)
+        i = self.cb_form.findData(cur_form)
+        if i >= 0:
+            self.cb_form.setCurrentIndex(i)
+        self.cb_form.currentIndexChanged.connect(self._on_form_changed)
+        form.addRow("Вид права:", self.cb_form)
 
         self._egrn_doc = _EgrnDocWidget(self._plot_data.get("egrn_doc", ""))
         form.addRow("Выписка ЕГРН:", self._egrn_doc)
@@ -2367,11 +2413,16 @@ class PlotEditDialog(QDialog):
         lbl_opd_hdr.setStyleSheet("color:#07414F; background:transparent;")
         lbl_opd_hdr.installEventFilter(_TooltipFilter("Заявление на ОПД", lbl_opd_hdr))
         hdr_lay.addWidget(lbl_opd_hdr)
-        lbl_area = QLabel("м²")
-        lbl_area.setFixedWidth(80)
-        lbl_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_area.setStyleSheet("color:#9CA3AF; font-size:12px;")
-        hdr_lay.addWidget(lbl_area)
+        self._lbl_share_hdr = QLabel("Доля")
+        self._lbl_share_hdr.setFixedWidth(64)
+        self._lbl_share_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_share_hdr.setStyleSheet("color:#9CA3AF; font-size:12px;")
+        hdr_lay.addWidget(self._lbl_share_hdr)
+        lbl_m2 = QLabel("м² (расч.)")
+        lbl_m2.setFixedWidth(72)
+        lbl_m2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_m2.setStyleSheet("color:#9CA3AF; font-size:12px;")
+        hdr_lay.addWidget(lbl_m2)
         lbl_phone_hdr = QLabel("Телефон")
         lbl_phone_hdr.setFixedWidth(120)
         lbl_phone_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2382,8 +2433,14 @@ class PlotEditDialog(QDialog):
         lbl_email_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_email_hdr.setStyleSheet("color:#9CA3AF; font-size:12px;")
         hdr_lay.addWidget(lbl_email_hdr)
+        lbl_since_hdr = QLabel("Владеет с")
+        lbl_since_hdr.setFixedWidth(92)
+        lbl_since_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_since_hdr.setStyleSheet("color:#9CA3AF; font-size:12px;")
+        hdr_lay.addWidget(lbl_since_hdr)
+        # Заглушка под кнопки «В архив» (только в режиме редактирования) и удаления
         btn_stub = QWidget()
-        btn_stub.setFixedWidth(28)
+        btn_stub.setFixedWidth(62 if self._is_edit else 28)
         btn_stub.setStyleSheet("background:transparent;")
         hdr_lay.addWidget(btn_stub)
         lay.addWidget(hdr_row)
@@ -2394,21 +2451,37 @@ class PlotEditDialog(QDialog):
         self._owners_vlay.setSpacing(6)
         self._owners_vlay.setContentsMargins(0, 0, 0, 0)
 
-        existing_owners = self._plot_data.get("owners", [])
-        for owner in existing_owners:
+        # Показываем только текущих владельцев (без until); выбывшие — в архиве.
+        current_owners = [o for o in self._plot_data.get("owners", []) or []
+                          if not ownership.owner_until(o)]
+        for owner in current_owners:
             self._add_owner_field(_owner_name(owner), _is_owner(owner),
-                                  _owner_area(owner), _is_visible(owner),
+                                  _owner_share_str(owner), _is_visible(owner),
                                   _owner_member_doc(owner), _owner_opd_doc(owner),
-                                  _owner_phone(owner), _owner_email(owner))
+                                  _owner_phone(owner), _owner_email(owner),
+                                  since=ownership.owner_since(owner))
         self._sync_visible_auto()
 
         lay.addWidget(self._owners_container)
 
-        btn_add_owner = QPushButton("＋  Добавить")
+        btn_add_owner = QPushButton("＋  Добавить собственника")
         btn_add_owner.setObjectName("btnSecondary")
         btn_add_owner.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_add_owner.clicked.connect(lambda: self._add_owner_field("", True, None))
+        btn_add_owner.clicked.connect(lambda: self._add_owner_field("", True, ""))
         lay.addWidget(btn_add_owner)
+
+        # ── Секция «Архив (бывшие собственники)» ───────────────────────────
+        self._archive_lbl = QLabel("Архив (бывшие собственники)")
+        self._archive_lbl.setStyleSheet(
+            "color:#6B7280; font-size:12px; font-weight:600; margin-top:6px;")
+        lay.addWidget(self._archive_lbl)
+        self._archive_container = QWidget()
+        self._archive_container.setStyleSheet("background:transparent;")
+        self._archive_vlay = QVBoxLayout(self._archive_container)
+        self._archive_vlay.setSpacing(4)
+        self._archive_vlay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self._archive_container)
+        self._render_archive()
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -2436,12 +2509,14 @@ class PlotEditDialog(QDialog):
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
+        self._apply_form_ui()
+        self._update_derived_m2()
         self._update_save_state()
 
     def _add_owner_field(self, name: str, is_owner: bool = True,
-                         area: float | None = None, is_visible: bool = False,
+                         share: str = "", is_visible: bool = False,
                          doc_path: str = "", opd_path: str = "",
-                         phone: str = "", email: str = ""):
+                         phone: str = "", email: str = "", since=None):
         row = QWidget()
         row.setStyleSheet("background:transparent;")
         rlay = QHBoxLayout(row)
@@ -2474,24 +2549,27 @@ class PlotEditDialog(QDialog):
         self._owner_opd_docs.append(opd_doc)
         rlay.addWidget(opd_doc)
 
-        area_inp = QLineEdit("" if area is None else f"{area:g}")
-        area_inp.setPlaceholderText("м²")
-        area_inp.setFixedWidth(80)
-        area_inp.setEnabled(is_owner)
-        area_inp.setValidator(QRegularExpressionValidator(
-            QRegularExpression(r"^\d{0,5}([.,]\d{0,2})?$"), area_inp
+        # Доля в праве (как в ЕГРН: 1/2, 21/100). Площадь доли — производная.
+        share_inp = QLineEdit(share or "")
+        share_inp.setPlaceholderText("1/2")
+        share_inp.setFixedWidth(64)
+        share_inp.setEnabled(is_owner)
+        share_inp.textChanged.connect(self._update_save_state)
+        share_inp.textChanged.connect(self._update_derived_m2)
+        chk.stateChanged.connect(lambda checked, s=share_inp: (
+            s.setEnabled(bool(checked)),
+            s.clear() if not checked else None,
         ))
-        area_inp.textEdited.connect(lambda t, w=area_inp: (
-            w.setText(t.replace(".", ",")),
-            w.setCursorPosition(w.cursorPosition()),
-        ) if "." in t else None)
-        area_inp.textChanged.connect(self._update_save_state)
-        chk.stateChanged.connect(lambda checked, a=area_inp: (
-            a.setEnabled(bool(checked)),
-            a.clear() if not checked else None,
-        ))
-        self._owner_areas.append(area_inp)
-        rlay.addWidget(area_inp)
+        chk.stateChanged.connect(lambda _: self._update_derived_m2())
+        self._owner_share.append(share_inp)
+        rlay.addWidget(share_inp)
+
+        m2_lbl = QLabel("—")
+        m2_lbl.setFixedWidth(72)
+        m2_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        m2_lbl.setStyleSheet("color:#9CA3AF; background:transparent; font-size:12px;")
+        self._owner_m2.append(m2_lbl)
+        rlay.addWidget(m2_lbl)
 
         phone_inp = QLineEdit(phone)
         phone_inp.setPlaceholderText("+7 (xxx) xxx-xx-xx")
@@ -2505,6 +2583,35 @@ class PlotEditDialog(QDialog):
         self._owner_emails.append(email_inp)
         rlay.addWidget(email_inp)
 
+        since_text = since.strftime("%d.%m.%Y") if isinstance(since, date) else ""
+        since_inp = QLineEdit(since_text)
+        since_inp.setPlaceholderText("дд.мм.гггг")
+        since_inp.setFixedWidth(92)
+        since_inp.setValidator(QRegularExpressionValidator(
+            QRegularExpression(r"^\d{0,2}\.?\d{0,2}\.?\d{0,4}$"), since_inp
+        ))
+        self._owner_since.append(since_inp)
+        rlay.addWidget(since_inp)
+
+        # Кнопка «В архив» (фиксирует дату ухода и снимок долга) — только при
+        # редактировании существующего участка.
+        if self._is_edit:
+            btn_arch = QPushButton(chr(0xE149))   # archive
+            btn_arch.setFixedSize(28, 28)
+            btn_arch.setFont(QFont("Material Symbols Rounded", 16))
+            btn_arch.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_arch.setToolTip("В архив (зафиксировать дату ухода и долг)")
+            btn_arch.setStyleSheet(
+                "QPushButton{background:transparent;border:none;color:#6B7280;}"
+                "QPushButton:hover{color:#07414F;}"
+            )
+            btn_arch.clicked.connect(
+                lambda _, r=row, i=inp, c=chk, v=vis, m=mem_doc, o=opd_doc,
+                       sh=share_inp, ph=phone_inp, em=email_inp, sc=since_inp, ml=m2_lbl:
+                    self._archive_owner(r, i, c, v, m, o, sh, ph, em, sc, ml)
+            )
+            rlay.addWidget(btn_arch)
+
         btn = QPushButton(chr(0xE92B))
         btn.setFixedSize(28, 28)
         btn.setFont(QFont("Material Symbols Rounded", 16))
@@ -2514,33 +2621,46 @@ class PlotEditDialog(QDialog):
             "QPushButton:hover{color:#B91C1C;}"
         )
         btn.clicked.connect(
-            lambda _, r=row, i=inp, c=chk, v=vis, m=mem_doc, o=opd_doc, a=area_inp,
-                   ph=phone_inp, em=email_inp:
-                self._remove_owner_field(r, i, c, v, m, o, a, ph, em)
+            lambda _, r=row, i=inp, c=chk, v=vis, m=mem_doc, o=opd_doc, sh=share_inp,
+                   ph=phone_inp, em=email_inp, sc=since_inp, ml=m2_lbl:
+                self._remove_owner_field(r, i, c, v, m, o, sh, ph, em, sc, ml)
         )
         rlay.addWidget(btn)
         self._owners_vlay.addWidget(row)
+        self._apply_form_to_row(share_inp, m2_lbl, chk)
         self._update_save_state()
+        self._update_derived_m2()
 
     def _remove_owner_field(self, row: QWidget, inp: QLineEdit,
                              chk: _IconCheckBox, vis: _IconRadioButton,
                              mem_doc: "_MemberDocWidget", opd_doc: "_OpdDocWidget",
-                             area_inp: QLineEdit, phone_inp: QLineEdit,
-                             email_inp: QLineEdit):
+                             share_inp: QLineEdit, phone_inp: QLineEdit,
+                             email_inp: QLineEdit, since_inp: QLineEdit | None = None,
+                             m2_lbl: "QLabel | None" = None):
         for lst, item in ((self._owner_inputs,       inp),
                           (self._owner_checks,        chk),
                           (self._owner_visible,       vis),
                           (self._owner_member_docs,   mem_doc),
                           (self._owner_opd_docs,      opd_doc),
-                          (self._owner_areas,         area_inp),
+                          (self._owner_share,         share_inp),
+                          (self._owner_m2,            m2_lbl),
                           (self._owner_phones,        phone_inp),
-                          (self._owner_emails,        email_inp)):
-            if item in lst:
+                          (self._owner_emails,        email_inp),
+                          (self._owner_since,         since_inp)):
+            if item is not None and item in lst:
                 lst.remove(item)
         row.setParent(None)
         row.deleteLater()
         self._update_save_state()
+        self._update_derived_m2()
         QTimer.singleShot(0, self.adjustSize)
+
+    def _current_form(self) -> str:
+        return self.cb_form.currentData() if hasattr(self, "cb_form") else ownership.FORM_JOINT
+
+    def _owner_indices(self) -> list[int]:
+        """Индексы строк-собственников (галочка «собственник» включена)."""
+        return [i for i, c in enumerate(self._owner_checks) if c.isChecked()]
 
     def _update_save_state(self):
         if self._btn_save is None:
@@ -2549,67 +2669,133 @@ class PlotEditDialog(QDialog):
             all(inp.text().strip() for inp in self._owner_inputs)
             if self._owner_inputs else True
         )
-        area_ok = True
-        try:
-            total_raw = self.inp_area.text().replace(",", ".")
-            total = float(total_raw) if total_raw.strip() else None
-        except ValueError:
-            total = None
+        form = self._current_form()
+        owner_idxs = self._owner_indices()
 
-        owner_sum = 0.0
-        n_filled = 0
-        for a in self._owner_areas:
-            raw = a.text().replace(",", ".")
-            if raw.strip():
-                try:
-                    owner_sum += float(raw)
-                    n_filled += 1
-                except ValueError:
-                    pass
+        shares_ok = True
+        warn = ""
+        if form == ownership.FORM_INDIVIDUAL:
+            if len(owner_idxs) > 1:
+                shares_ok = False
+                warn = "Индивидуальная собственность — должен быть один собственник (доля 1/1)."
+        elif form == ownership.FORM_SHARED:
+            # Сумма долей должна равняться 1
+            total = 0.0
+            all_filled = True
+            for i in owner_idxs:
+                v = ownership.parse_share(self._owner_share[i].text())
+                if v is None:
+                    all_filled = False
+                else:
+                    total += v
+            if not owner_idxs:
+                shares_ok = True
+            elif not all_filled:
+                shares_ok = False
+                warn = "Долевая собственность — укажите долю каждого собственника (напр. 1/2)."
+            elif abs(total - 1.0) > 1e-6:
+                shares_ok = False
+                warn = f"Сумма долей должна равняться 1 (сейчас {total:.4f}).".rstrip("0").rstrip(".")
+        # FORM_JOINT — доли не нужны, ограничений нет
 
-        if total is not None:
-            # Допуск: max ошибка округления до 2 знаков на каждого заполненного собственника
-            tolerance = n_filled * 0.005 + 1e-9
-            area_ok = abs(owner_sum - total) <= tolerance
-        elif n_filled > 0:
-            # У собственников заполнены м², а у участка — нет
-            area_ok = False
-
-        ok = fio_ok and area_ok
+        ok = fio_ok and shares_ok
         self._btn_save.setEnabled(ok)
         self._btn_save.setCursor(
             Qt.CursorShape.PointingHandCursor if ok else Qt.CursorShape.ArrowCursor
         )
-        # Подсказка о площади
-        _text = "Площадь участка должна равняться площади собственников"
-        if area_ok:
+        if warn:
             self._area_warning.setStyleSheet(
-                "color:#9CA3AF; background:transparent; font-size:12px;"
-            )
+                "color:#B45309; background:transparent; font-size:12px; font-weight:600;")
+            self._area_warning.setText(f"ℹ  {warn}")
         else:
+            note = {
+                ownership.FORM_INDIVIDUAL: "Индивидуальная собственность: вся сумма начисляется одному.",
+                ownership.FORM_SHARED: "Долевая собственность: начисление делится по доле каждого.",
+                ownership.FORM_JOINT: "Совместная собственность: делится поровну; ответственность солидарная.",
+            }.get(form, "")
             self._area_warning.setStyleSheet(
-                "color:#B45309; background:transparent; font-size:12px; font-weight:600;"
-            )
-        self._area_warning.setText(f"ℹ  {_text}")
+                "color:#9CA3AF; background:transparent; font-size:12px;")
+            self._area_warning.setText(f"ℹ  {note}")
 
-    def _distribute_area(self):
-        raw = self.inp_area.text().replace(",", ".").strip()
+    def _distribute_shares(self):
+        """Поровну распределить доли между собственниками (для долевой)."""
+        idxs = self._owner_indices()
+        idxs = [i for i in idxs if self._owner_inputs[i].text().strip()]
+        n = len(idxs)
+        if n == 0:
+            return
+        for i in idxs:
+            self._owner_share[i].setText(f"1/{n}")
+        self._update_derived_m2()
+        self._update_save_state()
+
+    # ── вид права / доли / производная площадь ───────────────────────────
+
+    def _plot_area_value(self) -> float | None:
+        raw = self.inp_area.text().strip().replace(",", ".")
         if not raw:
-            return
+            return None
         try:
-            total = float(raw)
+            v = float(raw)
+            return v if v > 0 else None
         except ValueError:
+            return None
+
+    def _weights_for_form(self, owner_rows: list, form: str) -> list[float]:
+        """Веса собственников по виду права (для производной площади/хранения)."""
+        n = len(owner_rows)
+        if n == 0:
+            return []
+        if form == ownership.FORM_SHARED:
+            shares = [ownership.parse_share(r.get("share", "")) for r in owner_rows]
+            if all(s is not None for s in shares) and sum(shares) > 0:  # type: ignore[arg-type]
+                tot = sum(shares)  # type: ignore[arg-type]
+                return [s / tot for s in shares]  # type: ignore[operator]
+            return [1.0 / n] * n
+        # individual / joint → поровну (для individual обычно один собственник)
+        return [1.0 / n] * n
+
+    def _derived_area_for_share(self, share: str) -> float | None:
+        area_val = self._plot_area_value()
+        s = ownership.parse_share(share)
+        if area_val is None or s is None:
+            return None
+        return round(s * area_val, 2)
+
+    def _on_form_changed(self):
+        self._apply_form_ui()
+        self._update_derived_m2()
+        self._update_save_state()
+
+    def _apply_form_to_row(self, share_inp, _m2_lbl=None, _chk=None):
+        """Поле «Доля» в строке видно только для долевой собственности."""
+        show_share = (self._current_form() == ownership.FORM_SHARED)
+        share_inp.setVisible(show_share)
+
+    def _apply_form_ui(self):
+        is_shared = (self._current_form() == ownership.FORM_SHARED)
+        for s in self._owner_share:
+            s.setVisible(is_shared)
+        if hasattr(self, "_lbl_share_hdr"):
+            self._lbl_share_hdr.setVisible(is_shared)
+        if hasattr(self, "_btn_distribute"):
+            self._btn_distribute.setVisible(is_shared)
+
+    def _update_derived_m2(self):
+        if not self._owner_m2:
             return
-        # Собираем индексы собственников с заполненными именами
-        owners = []
-        for i, inp in enumerate(self._owner_inputs):
-            if inp.text().strip():
-                owners.append(i)
-        if not owners:
-            return
-        per_owner = total / len(owners)
-        for i in owners:
-            self._owner_areas[i].setText(f"{per_owner:g}")
+        area_val = self._plot_area_value()
+        form = self._current_form()
+        owner_positions = [i for i, c in enumerate(self._owner_checks) if c.isChecked()]
+        owner_rows = [{"share": self._owner_share[i].text()} for i in owner_positions]
+        weights = self._weights_for_form(owner_rows, form)
+        wmap = {pos: weights[k] for k, pos in enumerate(owner_positions)}
+        for i, lbl in enumerate(self._owner_m2):
+            w = wmap.get(i)
+            if area_val is None or w is None:
+                lbl.setText("—")
+            else:
+                lbl.setText(f"{round(w * area_val, 2):g}")
 
     def _sync_visible_auto(self):
         checked = [i for i, c in enumerate(self._owner_checks) if c.isChecked()]
@@ -2630,26 +2816,7 @@ class PlotEditDialog(QDialog):
         if not num:
             QMessageBox.warning(self, "Ошибка", "Укажите номер участка")
             return
-        owners = []
-        for inp, chk, vis, mem_doc, opd_doc, area_inp, phone_inp, email_inp in zip(
-                self._owner_inputs, self._owner_checks, self._owner_visible,
-                self._owner_member_docs, self._owner_opd_docs, self._owner_areas,
-                self._owner_phones, self._owner_emails):
-            name = inp.text().strip()
-            if not name:
-                continue
-            raw = area_inp.text().strip().replace(",", ".")
-            area: float | None = None
-            if raw:
-                try:
-                    v = float(raw)
-                    if v > 0:
-                        area = v
-                except ValueError:
-                    pass
-            owners.append(_make_owner(name, chk.isChecked(), area, vis.isChecked(),
-                                       mem_doc.get_path(), opd_doc.get_path(),
-                                       phone_inp.text().strip(), email_inp.text().strip()))
+        form = self._current_form()
 
         area_raw = self.inp_area.text().strip().replace(",", ".")
         area_val: float | None = None
@@ -2663,21 +2830,50 @@ class PlotEditDialog(QDialog):
                                     "Площадь должна быть положительным числом")
                 return
 
-        # Автораспределение оставшейся площади между собственниками без явно заданной
-        if area_val is not None and owners:
-            owner_idxs = [i for i, o in enumerate(owners) if _is_owner(o)]
-            if owner_idxs:
-                unset    = [i for i in owner_idxs if _owner_area(owners[i]) is None]
-                assigned = sum(_owner_area(owners[i]) or 0.0 for i in owner_idxs)
-                remaining = round(area_val - assigned, 10)
-                if unset and remaining > 0:
-                    share = round(remaining / len(unset), 2)
-                    for i in unset[:-1]:
-                        owners[i] = {**owners[i], "area": share}
-                    last_share = round(remaining - share * (len(unset) - 1), 2)
-                    owners[unset[-1]] = {**owners[unset[-1]], "area": last_share}
+        # Сырьё по строкам
+        raw_rows = []
+        for inp, chk, vis, mem_doc, opd_doc, share_inp, phone_inp, email_inp, since_inp in zip(
+                self._owner_inputs, self._owner_checks, self._owner_visible,
+                self._owner_member_docs, self._owner_opd_docs, self._owner_share,
+                self._owner_phones, self._owner_emails, self._owner_since):
+            name = inp.text().strip()
+            if not name:
+                continue
+            raw_rows.append({
+                "name": name, "is_owner": chk.isChecked(), "visible": vis.isChecked(),
+                "mem": mem_doc.get_path(), "opd": opd_doc.get_path(),
+                "phone": phone_inp.text().strip(), "email": email_inp.text().strip(),
+                "since": self._date_text_to_iso(since_inp.text()),
+                "share": share_inp.text().strip(),
+            })
 
-        result = {"num": num, "owners": owners}
+        # Веса собственников по виду права → производная площадь доли
+        owner_rows = [r for r in raw_rows if r["is_owner"]]
+        weights = self._weights_for_form(owner_rows, form)
+
+        owners = []
+        wi = 0
+        for r in raw_rows:
+            share_to_store = ""
+            area_to_store: float | None = None
+            if r["is_owner"]:
+                w = weights[wi] if wi < len(weights) else None
+                wi += 1
+                if area_val is not None and w is not None:
+                    area_to_store = round(w * area_val, 2)
+                if form == ownership.FORM_INDIVIDUAL:
+                    share_to_store = "1/1"
+                elif form == ownership.FORM_SHARED:
+                    share_to_store = r["share"]
+                # FORM_JOINT — доли не выделены, share не храним
+            owners.append(_make_owner(
+                r["name"], r["is_owner"], area_to_store, r["visible"],
+                r["mem"], r["opd"], r["phone"], r["email"],
+                since=r["since"], share=share_to_store))
+
+        # Текущие (из виджетов) + выбывшие (хранятся ради истории владения).
+        result = {"num": num, "owners": owners + self._departed,
+                  "ownership_form": form}
         if area_val is not None:
             result["area"] = area_val
         egrn_path = self._egrn_doc.get_path()
@@ -2685,7 +2881,8 @@ class PlotEditDialog(QDialog):
             result["egrn_doc"] = egrn_path
         for k in ("billing_type", "meter_commission_date", "meter_act_number",
                   "meter_location", "norm_kw", "norm_start_date",
-                  "direct_contract_date", "direct_contract_number", "billing_history"):
+                  "direct_contract_date", "direct_contract_number", "billing_history",
+                  "ownership_history"):
             if k in self._plot_data:
                 result[k] = self._plot_data[k]
         self._result = result
@@ -2693,6 +2890,181 @@ class PlotEditDialog(QDialog):
 
     def get_result(self) -> dict:
         return getattr(self, "_result", {})
+
+    @staticmethod
+    def _date_text_to_iso(text: str) -> str:
+        """'дд.мм.гггг' → 'гггг-мм-дд'. Пусто/ошибка → ''."""
+        text = (text or "").strip()
+        if not text:
+            return ""
+        try:
+            return datetime.strptime(text, "%d.%m.%Y").date().isoformat()
+        except ValueError:
+            return ""
+
+    # ── архив (бывшие собственники) ──────────────────────────────────────
+
+    def _render_archive(self):
+        """Перерисовывает секцию архива из self._departed."""
+        while self._archive_vlay.count():
+            item = self._archive_vlay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+        has = bool(self._departed)
+        self._archive_lbl.setVisible(has)
+        self._archive_container.setVisible(has)
+        if not has:
+            return
+
+        for idx, owner in enumerate(self._departed):
+            row = QWidget()
+            row.setStyleSheet("background:transparent;")
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+
+            until = ownership.owner_until(owner)
+            until_txt = until.strftime("%d.%m.%Y") if until else "—"
+            debt = owner.get("debt_at_exit") if isinstance(owner, dict) else None
+            debt_txt = (f"  ·  долг на дату ухода: {fmt_money(debt)}"
+                        if debt is not None else "")
+            lbl = QLabel(f"{_owner_name(owner)}  ·  владел по {until_txt}{debt_txt}")
+            lbl.setStyleSheet("color:#6B7280; background:transparent; font-size:12px;")
+            h.addWidget(lbl, stretch=1)
+
+            btn_restore = QPushButton("↩ Вернуть")
+            btn_restore.setObjectName("btnSecondary")
+            btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_restore.clicked.connect(lambda _, i=idx: self._restore_owner(i))
+            h.addWidget(btn_restore)
+
+            btn_del = QPushButton(chr(0xE92B))
+            btn_del.setFixedSize(28, 28)
+            btn_del.setFont(QFont("Material Symbols Rounded", 16))
+            btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_del.setToolTip("Удалить из архива безвозвратно")
+            btn_del.setStyleSheet(
+                "QPushButton{background:transparent;border:none;color:#DC2626;}"
+                "QPushButton:hover{color:#B91C1C;}")
+            btn_del.clicked.connect(lambda _, i=idx: self._delete_archived(i))
+            h.addWidget(btn_del)
+
+            self._archive_vlay.addWidget(row)
+
+    def _archive_owner(self, row, inp, chk, vis, mem_doc, opd_doc,
+                       share_inp, phone_inp, email_inp, since_inp, m2_lbl=None):
+        """Переносит текущего собственника в архив: спрашивает дату ухода,
+        фиксирует снимок долга, проставляет until."""
+        name = inp.text().strip()
+        if not name:
+            QMessageBox.warning(self, "В архив", "Сначала укажите ФИО собственника.")
+            return
+        exit_date = self._ask_exit_date()
+        if exit_date is None:
+            return
+        exit_iso = exit_date.isoformat()
+
+        share = share_inp.text().strip()
+        # Площадь доли — производная (доля × площадь участка), хранится для совместимости.
+        area_v = self._derived_area_for_share(share)
+        owner = _make_owner(name, chk.isChecked(), area_v, vis.isChecked(),
+                            mem_doc.get_path(), opd_doc.get_path(),
+                            phone_inp.text().strip(), email_inp.text().strip(),
+                            since=self._date_text_to_iso(since_inp.text()),
+                            until=exit_iso, share=share)
+        owner["debt_at_exit"] = self._compute_debt_snapshot(name, exit_date)
+
+        self._departed.append(owner)
+        self._remove_owner_field(row, inp, chk, vis, mem_doc, opd_doc,
+                                 share_inp, phone_inp, email_inp, since_inp, m2_lbl)
+        self._render_archive()
+
+    def _restore_owner(self, idx: int):
+        """Возвращает собственника из архива в текущие (снимает until/снимок)."""
+        if not (0 <= idx < len(self._departed)):
+            return
+        owner = self._departed.pop(idx)
+        if isinstance(owner, dict):
+            owner.pop("until", None)
+            owner.pop("debt_at_exit", None)
+        self._add_owner_field(_owner_name(owner), _is_owner(owner),
+                              _owner_share_str(owner), _is_visible(owner),
+                              _owner_member_doc(owner), _owner_opd_doc(owner),
+                              _owner_phone(owner), _owner_email(owner),
+                              since=ownership.owner_since(owner))
+        self._sync_visible_auto()
+        self._render_archive()
+        QTimer.singleShot(0, self.adjustSize)
+
+    def _delete_archived(self, idx: int):
+        if not (0 <= idx < len(self._departed)):
+            return
+        name = _owner_name(self._departed[idx])
+        reply = QMessageBox.question(
+            self, "Удалить из архива",
+            f"Удалить «{name}» из архива безвозвратно?\n"
+            f"История владения этого собственника будет потеряна.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._departed.pop(idx)
+        self._render_archive()
+
+    def _compute_debt_snapshot(self, name: str, exit_date) -> float:
+        """Долг собственника по членским взносам на дату ухода (фиксируется)."""
+        try:
+            from core import vznosy
+            rates = vznosy.load_rates()
+            adj = vznosy.load_adjustments()
+            area = vznosy.plot_area_map().get(str(self._plot_data.get("num", "")))
+            plot_num = str(self._plot_data.get("num", ""))
+            current = [o for o in self._plot_data.get("owners", []) or []
+                       if not ownership.owner_until(o)]
+            rows = vznosy.balances_by_owner(
+                plot_num, area, exit_date, rates, adj, self._df, current,
+                ownership_form=self._plot_data.get("ownership_form"))
+            return round(next((r.debt for r in rows if r.name == name), 0.0), 2)
+        except Exception:
+            return 0.0
+
+    def _ask_exit_date(self):
+        """Маленький диалог выбора даты ухода. Возвращает date или None."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Дата выбытия собственника")
+        dlg.setModal(True)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(18, 16, 18, 14)
+        v.setSpacing(10)
+        lbl = QLabel("Дата перехода права (с этой даты участок принадлежит\n"
+                     "уже новому собственнику):")
+        lbl.setStyleSheet("color:#374151; background:transparent; font-size:13px;")
+        v.addWidget(lbl)
+        de = QDateEdit(calendarPopup=True)
+        de.setDisplayFormat("dd.MM.yyyy")
+        de.setDate(QDate.currentDate())
+        v.addWidget(de)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("В архив")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        v.addWidget(btns)
+        dlg.setStyleSheet(
+            "QDialog{background:#FFFFFF;} QLabel{background:transparent;}"
+            "QDateEdit{background:#F8F9FA;border:1px solid #D1D5DB;border-radius:5px;"
+            "padding:6px 8px;font-size:13px;color:#374151;}"
+            "QDialogButtonBox QPushButton{background:#4F46E5;color:#fff;border:none;"
+            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
+            "QDialogButtonBox QPushButton[text='Отмена']{background:#E5E7EB;color:#6B7280;}")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return de.date().toPyDate()
 
     def _apply_styles(self):
         self.setStyleSheet("""
@@ -2951,3 +3323,4 @@ class DocsWidget(QWidget):
         self.status_label.setText(
             f"Документов: {attached} из {total} прикреплено"
         )
+

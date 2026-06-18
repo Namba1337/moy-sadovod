@@ -355,11 +355,31 @@ class EnergyDebtWidget(QWidget):
         self._rebuild()
 
     def _export_debtor_receipts(self):
-        if not getattr(self, "_last_debts", None):
+        if self._df is None or len(self._df) == 0:
             QMessageBox.information(self, "Квитанции", "Сначала загрузите выписку.")
             return
-        debtors = [(p, info) for p, info in self._last_debts.items()
-                   if info["debt"] > 0.5]
+        meters = energy.load_meters()
+        rates = energy.load_rates()
+        repls = energy.load_replacements()
+        baseline = energy.load_baseline()
+        plots_recs = energy.load_plots()
+        by_num = {str(p.get("num", "")): p for p in plots_recs}
+        as_of = self.date_as_of.date().toPyDate()
+
+        # Должник = участок, где задолженность у ТЕКУЩЕГО собственника.
+        debtors: list[tuple[str, str]] = []
+        for plot in self._plot_list():
+            rec = by_num.get(plot, {})
+            owners_list = rec.get("owners", []) or []
+            rows = energy.balances_by_owner(
+                plot, as_of, meters, rates, repls, baseline, self._df,
+                owners_list, ownership_form=rec.get("ownership_form"),
+                plots=plots_recs)
+            cur_debt = sum(r.debt for r in rows if r.is_current)
+            if cur_debt > 0.5:
+                cur_name = next((r.name for r in rows if r.is_current), "")
+                debtors.append((plot, cur_name))
+
         if not debtors:
             QMessageBox.information(self, "Квитанции", "Должников нет — квитанции не нужны.")
             return
@@ -372,13 +392,10 @@ class EnergyDebtWidget(QWidget):
             QMessageBox.critical(self, "Ошибка", f"Не удалось импортировать модуль квитанций:\n{e}")
             return
 
-        owners = energy.owners_map()
-        as_of = self.date_as_of.date().toPyDate()
         ok = 0
         errors = []
-        for plot, info in debtors:
-            owner = (owners.get(plot, [""])[0] or "").split()
-            surname = owner[0] if owner else ""
+        for plot, cur_name in debtors:
+            surname = cur_name.split()[0] if cur_name else ""
             fname = f"Уч_{plot}"
             if surname:
                 safe_surname = re.sub(r"[^\w\-]", "_", surname)

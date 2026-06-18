@@ -21,6 +21,7 @@ from typing import Optional
 import pandas as pd
 
 from core import energy
+from core import ownership as own
 from core.utils import _read_json, _ensure_df, DATA_DIR
 VZNOSY_RATES_FILE = os.path.join(DATA_DIR, "snt_vznosy_rates.json")
 VZNOSY_ADJ_FILE = os.path.join(DATA_DIR, "snt_vznosy_adjustments.json")
@@ -422,6 +423,165 @@ def balance_for_plot(plot: str, area: Optional[float], as_of: date,
         breakdown=breakdown,
         area_missing_warning=any(y.area_missing for y in breakdown),
     )
+
+
+# ── разбивка баланса по собственникам ─────────────────────────────────
+
+@dataclass
+class OwnerBalance:
+    name: str
+    is_current: bool                 # владеет на дату as_of
+    since: Optional[date]
+    until: Optional[date]
+    charged: float
+    paid: float
+    debt: float
+
+
+def _owner_weights(active: list, tariff: Optional[dict],
+                   form: Optional[str] = None) -> list[float]:
+    """Веса деления суммы периода между одновременными совладельцами.
+
+    Если задан вид права ``form`` (как в ЕГРН) — делим строго по нему:
+
+    * ``individual`` — вся сумма единственному собственнику;
+    * ``shared`` (долевая) — по доле в праве (``share``); доля применяется
+      и к фиксированному взносу, и к тарифу «за м²» (площадь доли =
+      доля × площадь участка), поэтому деление суммы периода по доле верно
+      в обоих случаях;
+    * ``joint`` (совместная) — поровну (доли не выделены).
+
+    Если ``form`` не задан (старые данные) — прежнее поведение: тариф «за м²»
+    делится по площади владельцев, иначе по доле/поровну. Так расчёт у старых
+    участков не меняется, пока вид права не выбран явно.
+    """
+    n = len(active)
+    if n == 0:
+        return []
+    if form == own.FORM_INDIVIDUAL or form == own.FORM_JOINT:
+        return [1.0 / n] * n
+    if form == own.FORM_SHARED:
+        return own.effective_weights(active)
+
+    # legacy (вид права не задан)
+    if tariff is not None and tariff.get("per_sqm"):
+        areas = [own.owner_area(o) for o in active]
+        if all(a is not None and a > 0 for a in areas):
+            total = sum(areas)  # type: ignore[arg-type]
+            if total > 0:
+                return [a / total for a in areas]  # type: ignore[operator]
+    return own.effective_weights(active)
+
+
+def _find_period(d: date, breakdown: list[PeriodCharge]) -> Optional[PeriodCharge]:
+    """Период начисления, в который попадает дата d (breakdown отсортирован)."""
+    for pc in breakdown:
+        if d < pc.period_from:
+            continue
+        if pc.period_to is None or d <= pc.period_to:
+            return pc
+    return None
+
+
+def balances_by_owner(plot: str, area: Optional[float], as_of: date,
+                      rates: list, adjustments: dict, df,
+                      owners: list,
+                      ownership_form: Optional[str] = None) -> list[OwnerBalance]:
+    """Раскладывает начисления и платежи участка по собственникам во времени.
+
+    Правила атрибуции:
+
+    * начисление за период относится к собственнику(ам), владевшим участком
+      на **начало периода** (``period_from``); при долевой собственности
+      делится между совладельцами (по площади для тарифа «за м²», иначе по
+      доле в праве);
+    * платёж относится к собственнику(ам), владевшим участком на **дату
+      платежа**, и делится по тем же весам периода, в который он попал.
+
+    Долг прежнего собственника остаётся за ним: платёж нового собственника
+    гасит только его собственный баланс и не «перетекает» на чужой долг.
+
+    Если у участка нет истории владения (ни одной даты ``since``/``until``),
+    все начисления и платежи сходятся на текущих собственниках — поведение
+    совпадает с прежним «весь долг на участок». Сумма ``charged``/``paid`` по
+    всем владельцам реконсилируется с :func:`balance_for_plot` (за исключением
+    редкого случая платежей внутри периода, помеченного «не учитывать»).
+
+    Возвращает список :class:`OwnerBalance`: сначала текущие собственники,
+    затем бывшие (свежие — выше); при «провале» в истории добавляется запись
+    «Собственник не определён».
+    """
+    owners = owners or []
+    breakdown = charged_periods_breakdown(plot, area, as_of, rates, adjustments)
+
+    charged_acc: dict[int, float] = {}
+    paid_acc: dict[int, float] = {}
+    unknown_charged = 0.0
+    unknown_paid = 0.0
+
+    # Начисления → собственник на начало периода
+    for pc in breakdown:
+        if pc.ignored or pc.amount is None:
+            continue
+        active = own.owners_at(owners, pc.period_from)
+        if not active:
+            unknown_charged += pc.amount
+            continue
+        weights = _owner_weights(active, pc.tariff, ownership_form)
+        for o, w in zip(active, weights):
+            charged_acc[id(o)] = charged_acc.get(id(o), 0.0) + pc.amount * w
+
+    # Платежи → собственник на дату платежа
+    for p in payments_breakdown(plot, df, adjustments):
+        d = p["date"]
+        if d is None or d > as_of:
+            continue
+        active = own.owners_at(owners, d)
+        if not active:
+            unknown_paid += p["amount"]
+            continue
+        pc = _find_period(d, breakdown)
+        weights = _owner_weights(active, pc.tariff if pc else None, ownership_form)
+        for o, w in zip(active, weights):
+            paid_acc[id(o)] = paid_acc.get(id(o), 0.0) + p["amount"] * w
+
+    # Сборка по собственникам
+    rows: list[tuple[bool, date, OwnerBalance]] = []
+    for o in owners:
+        if not own.is_owner(o):
+            continue
+        oid = id(o)
+        c = charged_acc.get(oid, 0.0)
+        pd_ = paid_acc.get(oid, 0.0)
+        current = own.is_active_at(o, as_of)
+        if not current and c == 0.0 and pd_ == 0.0:
+            continue  # бывший владелец без движения в его период — не показываем
+        rows.append((current, own.owner_until(o) or date.max,
+                     OwnerBalance(
+                         name=own.owner_name(o),
+                         is_current=current,
+                         since=own.owner_since(o),
+                         until=own.owner_until(o),
+                         charged=c,
+                         paid=pd_,
+                         debt=c - pd_,
+                     )))
+
+    # Текущие сверху; среди прочих — свежие (больший until) выше
+    rows.sort(key=lambda t: (not t[0], -t[1].toordinal()))
+    out = [r[2] for r in rows]
+
+    if unknown_charged != 0.0 or unknown_paid != 0.0:
+        out.append(OwnerBalance(
+            name="Собственник не определён",
+            is_current=False,
+            since=None,
+            until=None,
+            charged=unknown_charged,
+            paid=unknown_paid,
+            debt=unknown_charged - unknown_paid,
+        ))
+    return out
 
 
 # ── палитра для UI ────────────────────────────────────────────────────

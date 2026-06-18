@@ -6,7 +6,7 @@ from datetime import date
 from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
+    QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
@@ -20,13 +20,12 @@ class VznosyAdjustmentDialog(QDialog):
     """Диалог добавления ручного платежа или переопределения начисления ЧВ."""
 
     KIND_LABELS = {
-        "payment_manual": "Ручной платёж",
         "charge_override": "Переопределение начисления за период",
         "exempt_period": "Освобождение от взноса за период",
     }
 
     def __init__(self, plot: str, parent=None,
-                 default_kind: str = "payment_manual"):
+                 default_kind: str = "charge_override"):
         super().__init__(parent)
         self._plot = plot
         self._result: dict | None = None
@@ -128,12 +127,7 @@ class VznosyAdjustmentDialog(QDialog):
 
     def _on_kind_changed(self):
         kind = self.cb_kind.currentData()
-        is_payment = (kind == "payment_manual")
-        self.cb_period.setEnabled(not is_payment)
-        if kind == "payment_manual":
-            self.inp_amount.setEnabled(True)
-            self.inp_amount.setPlaceholderText("например: 5000")
-        elif kind == "charge_override":
+        if kind == "charge_override":
             self.inp_amount.setEnabled(True)
             self.inp_amount.setPlaceholderText("новая сумма за период, ₽")
         else:  # exempt_period
@@ -182,7 +176,6 @@ class VznosyCardDialog(QDialog):
         self.setWindowTitle(f"Участок {plot} — карточка ЧВ")
         self.setMinimumSize(1010, 640)
         self.setModal(False)
-        self._rebuilding = False   # защита от рекурсии при установке чекбоксов
 
         self._setup_ui()
         self._rebuild()
@@ -225,17 +218,39 @@ class VznosyCardDialog(QDialog):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels([
             "Период", "Тариф", "Начислено", "Оплачено за период",
-            "Корректировка", "Баланс нараст.", "Не учитывать",
+            "Корректировка", "Баланс нараст.",
         ])
         hdr = self.table.horizontalHeader()
-        for c, w in enumerate([200, 240, 120, 140, 190, 130, 100]):
+        for c, w in enumerate([200, 240, 120, 140, 190, 130]):
             hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
             self.table.setColumnWidth(c, w)
         hdr.setStretchLastSection(False)
         lay.addWidget(self.table, 1)
+
+        # ── Разбивка по собственникам (видна при истории/совладельцах) ──
+        self.owners_lbl = QLabel("Разбивка по собственникам")
+        self.owners_lbl.setStyleSheet(
+            "color:#6366F1;background:transparent;font-size:12px;margin-top:8px;")
+        lay.addWidget(self.owners_lbl)
+
+        self.owners_table = QTableWidget(objectName="summaryTable")
+        self.owners_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.owners_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.owners_table.verticalHeader().setVisible(False)
+        self.owners_table.setColumnCount(5)
+        self.owners_table.setHorizontalHeaderLabels([
+            "Собственник", "Период владения", "Начислено", "Оплачено", "Долг",
+        ])
+        ohdr = self.owners_table.horizontalHeader()
+        for c, w in enumerate([280, 190, 120, 120, 120]):
+            ohdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+            self.owners_table.setColumnWidth(c, w)
+        ohdr.setStretchLastSection(True)
+        self.owners_table.setMaximumHeight(170)
+        lay.addWidget(self.owners_table)
 
         # ── Список ручных операций и корректировок ────────────────
         adj_lbl = QLabel("Ручные операции и корректировки")
@@ -260,14 +275,9 @@ class VznosyCardDialog(QDialog):
 
         # ── Кнопки внизу ──────────────────────────────────────────
         bottom = QHBoxLayout()
-        btn_pay = QPushButton("Ручной платёж", objectName="btnSecondary")
-        btn_pay.clicked.connect(lambda: self._add_adjustment("payment_manual"))
-        bottom.addWidget(btn_pay)
-
-        btn_over = QPushButton("🛠️  Переопределить начисление за период",
-                               objectName="btnSecondary")
-        btn_over.clicked.connect(lambda: self._add_adjustment("charge_override"))
-        bottom.addWidget(btn_over)
+        btn_adj = QPushButton("Корректировка начислений", objectName="btnSecondary")
+        btn_adj.clicked.connect(lambda: self._add_adjustment("charge_override"))
+        bottom.addWidget(btn_adj)
 
         btn_pdf = QPushButton("📄  Сохранить PDF-квитанцию", objectName="btnSecondary")
         btn_pdf.clicked.connect(self._on_pdf)
@@ -334,10 +344,8 @@ class VznosyCardDialog(QDialog):
 
         # Главная таблица периодов
         self.table.setRowCount(len(bal.breakdown))
-        self._rebuilding = True
-        try:
-            cum = 0.0
-            for r, y in enumerate(bal.breakdown):
+        cum = 0.0
+        for r, y in enumerate(bal.breakdown):
                 # Метка периода
                 if y.period_to:
                     period_label = (f"{y.period_from.strftime('%d.%m.%Y')}"
@@ -412,37 +420,6 @@ class VznosyCardDialog(QDialog):
                     (cum_text, cum_color),
                 ], ignored=y.ignored)
 
-                # Чекбокс «Не учитывать»
-                cb_widget = QWidget()
-                cb_widget.setStyleSheet("background: transparent;")
-                cb_layout = QHBoxLayout(cb_widget)
-                cb_layout.setContentsMargins(0, 0, 0, 0)
-                cb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                cb = QCheckBox()
-                cb.setChecked(y.ignored)
-                cb.setToolTip(
-                    "Снять флаг — период снова учитывается" if y.ignored
-                    else "Поставить флаг — период будет исключён из расчёта"
-                )
-                cb.setStyleSheet("""
-                    QCheckBox::indicator { width: 16px; height: 16px; }
-                    QCheckBox::indicator:unchecked {
-                        border: 2px solid #D1D5DB; border-radius: 3px;
-                        background: #F8F9FA;
-                    }
-                    QCheckBox::indicator:checked {
-                        border: 2px solid #DC2626; border-radius: 3px;
-                        background: #4a1a22;
-                    }
-                """)
-                cb.toggled.connect(
-                    lambda checked, pk=period_key: self._toggle_ignore_period(pk, checked)
-                )
-                cb_layout.addWidget(cb)
-                self.table.setCellWidget(r, 6, cb_widget)
-        finally:
-            self._rebuilding = False
-
         # Таблица корректировок
         plot_adjs = list(adj.get(self._plot, []) or [])
         plot_adjs_idx = list(enumerate(plot_adjs))
@@ -500,6 +477,9 @@ class VznosyCardDialog(QDialog):
             self.adj_table.setCellWidget(r, 5, btn)
             self.adj_table.setRowHeight(r, 28)
 
+        # Разбивка по собственникам
+        self._rebuild_owners(rates, adj, area)
+
         # Сводка
         self.summary_lbl.setText(
             f"Начислено: {fmt_money(bal.charged)}  ·  "
@@ -507,6 +487,58 @@ class VznosyCardDialog(QDialog):
             f"баланс: {fmt_money(bal.debt)}  ·  "
             f"на {self._as_of.strftime('%d.%m.%Y')}"
         )
+
+    def _rebuild_owners(self, rates, adj, area):
+        from core import vznosy
+        from core import ownership as own
+        rec = energy.plot_record(self._plot)
+        recs = rec.get("owners", []) or []
+        owner_count = sum(1 for o in recs if own.is_owner(o))
+        # Секция нужна, только когда есть что разделять: совладельцы или история.
+        show = owner_count > 1 or own.has_history(recs)
+        self.owners_lbl.setVisible(show)
+        self.owners_table.setVisible(show)
+        if not show:
+            return
+
+        rows = vznosy.balances_by_owner(self._plot, area, self._as_of,
+                                        rates, adj, self._df, recs,
+                                        ownership_form=rec.get("ownership_form"))
+        self.owners_table.setRowCount(len(rows))
+        for r, ob in enumerate(rows):
+            status = "текущий" if ob.is_current else "прежний"
+            name_text = f"{ob.name}  ({status})"
+            period_text = self._fmt_ownership_period(ob.since, ob.until)
+            debt_color = ("#DC2626" if ob.debt > 0.005
+                          else ("#059669" if ob.debt < -0.005 else "#6B7280"))
+            cells = [
+                (name_text, "#374151" if ob.is_current else "#9CA3AF"),
+                (period_text, "#6B7280"),
+                (fmt_money(ob.charged), "#374151"),
+                (fmt_money(ob.paid), "#059669" if ob.paid else "#9CA3AF"),
+                (fmt_money(ob.debt), debt_color),
+            ]
+            for c, (text, color) in enumerate(cells):
+                it = QTableWidgetItem(text)
+                if c == 0:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+                if color:
+                    it.setForeground(QColor(color))
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.owners_table.setItem(r, c, it)
+            self.owners_table.setRowHeight(r, 28)
+
+    @staticmethod
+    def _fmt_ownership_period(since, until) -> str:
+        if since and until:
+            return f"{since.strftime('%d.%m.%Y')}—{until.strftime('%d.%m.%Y')}"
+        if since:
+            return f"с {since.strftime('%d.%m.%Y')}"
+        if until:
+            return f"по {until.strftime('%d.%m.%Y')}"
+        return "—"
 
     def _set_year_row(self, r: int, cells: list, *, ignored: bool = False):
         dim_color = QColor("#3a4a56")   # приглушённый цвет для игнорируемых строк
@@ -554,50 +586,6 @@ class VznosyCardDialog(QDialog):
             vznosy.save_adjustments(adj)
             self._rebuild()
 
-    def _toggle_ignore_period(self, period_from: str, ignore: bool):
-        """Устанавливает или снимает флаг «Не учитывать» для периода.
-
-        Удаляет как новые (ignore_period + period_from) так и старые
-        (ignore_year + year) записи, чтобы снятие галки работало
-        при загрузке проекта, сохранённого в старом формате.
-        """
-        if self._rebuilding:
-            return
-        from core import vznosy
-        try:
-            from datetime import datetime as _dt
-            period_year = _dt.strptime(period_from, "%Y-%m-%d").year
-        except Exception:
-            period_year = None
-
-        adj = vznosy.load_adjustments()
-        items = adj.setdefault(self._plot, [])
-
-        def _is_ignore_for_this_period(a: dict) -> bool:
-            kind = a.get("kind")
-            if kind == vznosy.KIND_IGNORE_PERIOD:
-                return a.get("period_from") == period_from
-            if kind == vznosy.KIND_IGNORE_YEAR and period_year is not None:
-                try:
-                    return int(a.get("year", 0)) == period_year
-                except (TypeError, ValueError):
-                    pass
-            return False
-
-        adj[self._plot] = [a for a in items if not _is_ignore_for_this_period(a)]
-        if ignore:
-            adj[self._plot].append({
-                "kind": vznosy.KIND_IGNORE_PERIOD,
-                "period_from": period_from,
-                "date": date.today().isoformat(),
-                "amount": None,
-                "note": "Не учитывать",
-            })
-        if not adj[self._plot]:
-            adj.pop(self._plot, None)
-        vznosy.save_adjustments(adj)
-        self._rebuild()
-
     def _on_pdf(self):
         try:
             from core import receipt
@@ -618,3 +606,4 @@ class VznosyCardDialog(QDialog):
             QMessageBox.information(self, "Квитанция", f"Сохранено:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+

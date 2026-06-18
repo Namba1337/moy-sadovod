@@ -191,5 +191,187 @@ class BalanceTests(unittest.TestCase):
         self.assertTrue(bal.area_missing_warning)
 
 
+RATES_PER_SQM = [
+    {"date": "2024-01-01", "amount": "", "per_sqm": True, "rate_sqm": "10", "note": ""},
+]
+
+
+class BalancesByOwnerTests(unittest.TestCase):
+    def test_no_history_single_owner_reconciles(self):
+        df = _make_df([
+            {"Дата": "2024-06-15", "Сумма": 10000, "Списание": 0,
+             "Категория": "Членские взносы", "Участок": "15", "Назначение": ""},
+        ])
+        owners = [{"name": "Иванов", "is_owner": True}]
+        bal = vznosy.balance_for_plot("15", None, date(2025, 12, 31),
+                                       RATES_FIXED, {}, df)
+        rows = vznosy.balances_by_owner("15", None, date(2025, 12, 31),
+                                         RATES_FIXED, {}, df, owners)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].name, "Иванов")
+        self.assertTrue(rows[0].is_current)
+        self.assertAlmostEqual(rows[0].charged, bal.charged)
+        self.assertAlmostEqual(rows[0].paid, bal.paid)
+        self.assertAlmostEqual(rows[0].debt, bal.debt)
+
+    def test_sequential_transfer(self):
+        df = _make_df([
+            {"Дата": "2024-06-15", "Сумма": 10000, "Списание": 0,
+             "Категория": "Членские взносы", "Участок": "15", "Назначение": ""},
+            {"Дата": "2025-06-15", "Сумма": 5000, "Списание": 0,
+             "Категория": "Членские взносы", "Участок": "15", "Назначение": ""},
+        ])
+        owners = [
+            {"name": "Продавец", "is_owner": True, "until": "2025-01-01"},
+            {"name": "Покупатель", "is_owner": True, "since": "2025-01-01"},
+        ]
+        rows = vznosy.balances_by_owner("15", None, date(2025, 12, 31),
+                                         RATES_FIXED, {}, df, owners)
+        by = {r.name: r for r in rows}
+        # 2024 (10000) → продавцу, он же заплатил 10000 → долг 0
+        self.assertAlmostEqual(by["Продавец"].charged, 10000)
+        self.assertAlmostEqual(by["Продавец"].paid, 10000)
+        self.assertAlmostEqual(by["Продавец"].debt, 0)
+        self.assertFalse(by["Продавец"].is_current)
+        # 2025 (12000) → покупателю, заплатил 5000 → долг 7000
+        self.assertAlmostEqual(by["Покупатель"].charged, 12000)
+        self.assertAlmostEqual(by["Покупатель"].paid, 5000)
+        self.assertAlmostEqual(by["Покупатель"].debt, 7000)
+        self.assertTrue(by["Покупатель"].is_current)
+        # текущий собственник идёт первым
+        self.assertEqual(rows[0].name, "Покупатель")
+
+    def test_reconciles_with_plot_balance_after_transfer(self):
+        df = _make_df([
+            {"Дата": "2024-06-15", "Сумма": 10000, "Списание": 0,
+             "Категория": "Членские взносы", "Участок": "15", "Назначение": ""},
+            {"Дата": "2025-06-15", "Сумма": 5000, "Списание": 0,
+             "Категория": "Членские взносы", "Участок": "15", "Назначение": ""},
+        ])
+        owners = [
+            {"name": "Продавец", "is_owner": True, "until": "2025-01-01"},
+            {"name": "Покупатель", "is_owner": True, "since": "2025-01-01"},
+        ]
+        bal = vznosy.balance_for_plot("15", None, date(2025, 12, 31),
+                                       RATES_FIXED, {}, df)
+        rows = vznosy.balances_by_owner("15", None, date(2025, 12, 31),
+                                         RATES_FIXED, {}, df, owners)
+        self.assertAlmostEqual(sum(r.charged for r in rows), bal.charged)
+        self.assertAlmostEqual(sum(r.paid for r in rows), bal.paid)
+        self.assertAlmostEqual(sum(r.debt for r in rows), bal.debt)
+
+    def test_co_owners_per_sqm_split_by_area(self):
+        df = _make_df([
+            {"Дата": "2024-06-15", "Сумма": 3000, "Списание": 0,
+             "Категория": "Членские взносы", "Участок": "15", "Назначение": ""},
+        ])
+        owners = [
+            {"name": "A", "is_owner": True, "area": 400},
+            {"name": "B", "is_owner": True, "area": 200},
+        ]
+        rows = vznosy.balances_by_owner("15", 600.0, date(2024, 12, 31),
+                                         RATES_PER_SQM, {}, df, owners)
+        by = {r.name: r for r in rows}
+        # charge 2024 = 10 * 600 = 6000, делится по площади 400:200
+        self.assertAlmostEqual(by["A"].charged, 4000)
+        self.assertAlmostEqual(by["B"].charged, 2000)
+        # платёж 3000 в 2024 (период per_sqm) делится по площади → 2000/1000
+        self.assertAlmostEqual(by["A"].paid, 2000)
+        self.assertAlmostEqual(by["B"].paid, 1000)
+
+    def test_co_owners_fixed_equal_split(self):
+        owners = [
+            {"name": "A", "is_owner": True},
+            {"name": "B", "is_owner": True},
+        ]
+        rows = vznosy.balances_by_owner("15", None, date(2024, 12, 31),
+                                         RATES_FIXED, {}, None, owners)
+        by = {r.name: r for r in rows}
+        self.assertAlmostEqual(by["A"].charged, 5000)
+        self.assertAlmostEqual(by["B"].charged, 5000)
+
+    def test_unknown_owner_bucket_on_gap(self):
+        # Начисления с 2024, а собственник записан только с 2025 → провал
+        owners = [{"name": "Поздний", "is_owner": True, "since": "2025-01-01"}]
+        rows = vznosy.balances_by_owner("15", None, date(2025, 12, 31),
+                                         RATES_FIXED, {}, None, owners)
+        by = {r.name: r for r in rows}
+        self.assertIn("Собственник не определён", by)
+        self.assertAlmostEqual(by["Собственник не определён"].charged, 10000)
+        self.assertAlmostEqual(by["Поздний"].charged, 12000)
+
+    def test_contacts_excluded(self):
+        owners = [
+            {"name": "Собственник", "is_owner": True},
+            {"name": "Контакт", "is_owner": False},
+        ]
+        rows = vznosy.balances_by_owner("15", None, date(2024, 12, 31),
+                                         RATES_FIXED, {}, None, owners)
+        self.assertEqual([r.name for r in rows], ["Собственник"])
+
+
+class OwnershipFormTests(unittest.TestCase):
+    """Деление начисления по виду права (как в ЕГРН)."""
+
+    def test_individual_all_to_one(self):
+        owners = [{"name": "Один", "is_owner": True}]
+        rows = vznosy.balances_by_owner(
+            "15", None, date(2024, 12, 31), RATES_FIXED, {}, None, owners,
+            ownership_form="individual")
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0].charged, 10000)
+
+    def test_shared_fixed_by_share(self):
+        owners = [
+            {"name": "A", "is_owner": True, "share": "1/4"},
+            {"name": "B", "is_owner": True, "share": "3/4"},
+        ]
+        rows = vznosy.balances_by_owner(
+            "15", None, date(2024, 12, 31), RATES_FIXED, {}, None, owners,
+            ownership_form="shared")
+        by = {r.name: r for r in rows}
+        self.assertAlmostEqual(by["A"].charged, 2500)   # 1/4 * 10000
+        self.assertAlmostEqual(by["B"].charged, 7500)   # 3/4 * 10000
+
+    def test_shared_per_sqm_uses_share_not_area(self):
+        # Площадь намеренно НЕ пропорциональна доле — деление должно идти по ДОЛЕ.
+        owners = [
+            {"name": "A", "is_owner": True, "share": "1/4", "area": 400},
+            {"name": "B", "is_owner": True, "share": "3/4", "area": 200},
+        ]
+        rows = vznosy.balances_by_owner(
+            "15", 600.0, date(2024, 12, 31), RATES_PER_SQM, {}, None, owners,
+            ownership_form="shared")
+        by = {r.name: r for r in rows}
+        # charge 2024 = 10 * 600 = 6000 → по доле 1/4 : 3/4
+        self.assertAlmostEqual(by["A"].charged, 1500)
+        self.assertAlmostEqual(by["B"].charged, 4500)
+
+    def test_joint_equal_regardless_of_area(self):
+        owners = [
+            {"name": "A", "is_owner": True, "area": 400},
+            {"name": "B", "is_owner": True, "area": 200},
+        ]
+        rows = vznosy.balances_by_owner(
+            "15", 600.0, date(2024, 12, 31), RATES_PER_SQM, {}, None, owners,
+            ownership_form="joint")
+        by = {r.name: r for r in rows}
+        # совместная → поровну, несмотря на разные площади
+        self.assertAlmostEqual(by["A"].charged, 3000)
+        self.assertAlmostEqual(by["B"].charged, 3000)
+
+    def test_legacy_form_none_unchanged_per_sqm_by_area(self):
+        # Без вида права (старые данные) per_sqm по-прежнему делится по площади.
+        owners = [
+            {"name": "A", "is_owner": True, "area": 400},
+            {"name": "B", "is_owner": True, "area": 200},
+        ]
+        rows = vznosy.balances_by_owner(
+            "15", 600.0, date(2024, 12, 31), RATES_PER_SQM, {}, None, owners)
+        by = {r.name: r for r in rows}
+        self.assertAlmostEqual(by["A"].charged, 4000)
+        self.assertAlmostEqual(by["B"].charged, 2000)
+
+
 if __name__ == "__main__":
     unittest.main()
