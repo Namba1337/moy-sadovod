@@ -1287,34 +1287,6 @@ class _BranchColumnDelegate(_CellDelegate):
 #  Вспомогательные UI-виджеты                                                 #
 # =========================================================================== #
 
-class _ElidedLabel(QLabel):
-    """QLabel с усечением '...' при нехватке места.
-    Ключевое отличие от QLabel: minimumWidth = 0, поэтому соседние виджеты
-    в QHBoxLayout не «уезжают» за границу при длинном тексте."""
-
-    def __init__(self, text: str, parent=None):
-        super().__init__(parent)
-        self._full = text
-        self.setMinimumWidth(0)
-
-    def setText(self, text: str):
-        self._full = text
-        self.update()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setPen(QColor("#1F2937"))
-        p.setFont(self.font())
-        elided = p.fontMetrics().elidedText(
-            self._full, Qt.TextElideMode.ElideRight, self.width()
-        )
-        p.drawText(
-            self.rect(),
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-            elided,
-        )
-
-
 # =========================================================================== #
 #  Всплывающая палитра цветов                                                 #
 # =========================================================================== #

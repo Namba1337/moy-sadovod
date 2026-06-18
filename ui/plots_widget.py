@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
 
 from core import ownership
 from core.utils import DATA_DIR, fmt_money
-from ui.plot_detection import _PLOTS_FILE
 
 
 def _plot_num_key(s: str):
@@ -31,46 +30,11 @@ def _plot_num_key(s: str):
         return (1, 0, s)
 
 
-def _load_plot_order() -> list[str]:
-    """Возвращает список номеров участков из snt_plots.json, отсортированный по _plot_num_key."""
-    try:
-        if os.path.exists(_PLOTS_FILE):
-            with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            nums = [str(e.get("num", "")) for e in data if e.get("num")]
-            return sorted(set(nums), key=_plot_num_key)
-    except Exception:
-        pass
-    return []
-
-
-def _owner_name(owner) -> str:
-    if isinstance(owner, dict):
-        return owner.get("name", "")
-    return str(owner)
-
-
-def _is_owner(owner) -> bool:
-    """Является ли владелец собственником (is_owner=True по умолчанию).
-    Обратная совместимость: старые записи с relation=Главный/Собственник → True."""
-    if isinstance(owner, dict):
-        if "is_owner" in owner:
-            return bool(owner["is_owner"])
-        rel = owner.get("relation", "")
-        return rel in ("", "Главный собственник", "Собственник")
-    return True
-
-
-def _owner_area(owner) -> float | None:
-    if isinstance(owner, dict):
-        v = owner.get("area")
-        if v is None:
-            return None
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-    return None
+# Базовые аксессоры — единый источник логики в core.ownership
+# (обратная совместимость со строками и старым полем relation внутри).
+_owner_name = ownership.owner_name
+_is_owner = ownership.is_owner
+_owner_area = ownership.owner_area
 
 
 def _owner_share_str(owner) -> str:
@@ -181,23 +145,6 @@ class _AppTooltip:
     def hide(cls):
         if cls._w is not None:
             cls._w.hide()
-
-
-class _HoverTooltipLabel(QLabel):
-    """QLabel с кастомной всплывашкой вместо нативного setToolTip."""
-
-    def __init__(self, tip: str, parent=None):
-        super().__init__(parent)
-        self._tip = tip
-
-    def enterEvent(self, event):
-        from PyQt6.QtGui import QCursor
-        _AppTooltip.show_at(self._tip, QCursor.pos())
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        _AppTooltip.hide()
-        super().leaveEvent(event)
 
 
 class _TooltipFilter(QObject):
@@ -472,47 +419,6 @@ class PlotsTreeModel(QAbstractItemModel):
                     return float("inf")
             self._root.children.sort(key=_area_key, reverse=reverse)
         self.endResetModel()
-
-    # -- mutations ----------------------------------------------------------- #
-
-    def add_owner(self, plot_node: "_PlotNode", name: str,
-                  is_owner: bool = True) -> QModelIndex:
-        """Добавляет владельца в участок и возвращает индекс строки участка."""
-        plot = plot_node.plot_ref
-        owners = plot.setdefault("owners", [])
-        new_idx = len(owners)
-        owners.append(_make_owner(name, is_owner))
-        parent_mi = self.createIndex(plot_node.row(), 0, plot_node)
-        self.beginInsertRows(parent_mi, new_idx, new_idx)
-        owner_node = _PlotNode("owner", plot_ref=plot, owner_idx=new_idx, parent=plot_node)
-        plot_node.children.append(owner_node)
-        self.endInsertRows()
-        # Обновляем ФИО в родительской строке
-        fio_col = self.COLUMNS.index("Контактное лицо")
-        fio_mi = self.createIndex(plot_node.row(), fio_col, plot_node)
-        self.dataChanged.emit(fio_mi, fio_mi)
-        return parent_mi
-
-    def remove_owner(self, owner_node: _PlotNode):
-        """Удаляет владельца из участка."""
-        plot_node = owner_node.parent
-        owners = owner_node.plot_ref.get("owners", [])
-        idx = owner_node.owner_idx
-        if idx >= len(owners):
-            return
-        owners.pop(idx)
-        parent_mi = self.createIndex(plot_node.row(), 0, plot_node)
-        child_row = owner_node.row()
-        self.beginRemoveRows(parent_mi, child_row, child_row)
-        plot_node.children.remove(owner_node)
-        for i, child in enumerate(plot_node.children):
-            child.owner_idx = i
-        self.endRemoveRows()
-        # Обновляем ФИО в родительской строке
-        fio_col = self.COLUMNS.index("Контактное лицо")
-        fio_mi = self.createIndex(plot_node.row(), fio_col, plot_node)
-        self.dataChanged.emit(fio_mi, fio_mi)
-
 
 # ============================================================================ #
 #  Делегат столбца «Контактное лицо»                                          #
@@ -1171,6 +1077,96 @@ _TREE_STYLE = """
 """
 
 _SB_W = 12  # ширина скроллбара — должна совпадать с QSS выше
+
+# Светлые фоновые варианты цветов долга для строк таблиц (debt_color → bg).
+_DEBT_COLOR_LIGHT = {
+    "#2e7d32": "#c8e6c9",
+    "#f9a825": "#fff9c4",
+    "#ef6c00": "#ffe0b2",
+    "#c62828": "#ffcdd2",
+}
+
+
+# ============================================================================ #
+#  Базовая плоская модель таблиц-долгов                                        #
+# ============================================================================ #
+
+class _FlatTableModel(QAbstractItemModel):
+    """Плоская модель для таблиц долгов. Подклассы задают ``COLUMNS``.
+
+    Строка — dict с ключами ``_text_/_sort_/_fg_/_bg_/_bold_/_tip_<col>``.
+    Используется вкладками «Членские взносы» и «Электроэнергия».
+    """
+
+    COLUMNS: list[str] = []
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows: list[dict] = []
+
+    def load(self, rows: list[dict]):
+        self.beginResetModel()
+        self._rows = list(rows)
+        self.endResetModel()
+
+    def top_nodes(self) -> list[dict]:
+        return self._rows
+
+    def index(self, row, column, parent=QModelIndex()):
+        if not self.hasIndex(row, column, parent):
+            return QModelIndex()
+        return self.createIndex(row, column, self._rows[row])
+
+    def parent(self, index):
+        return QModelIndex()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self.COLUMNS)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        col = self.COLUMNS[index.column()]
+        if role == Qt.ItemDataRole.DisplayRole:
+            return row.get(f"_text_{col}", "")
+        if role == Qt.ItemDataRole.UserRole:
+            return row.get(f"_sort_{col}", 0.0)
+        if role == Qt.ItemDataRole.ForegroundRole:
+            fg = row.get(f"_fg_{col}")
+            return QColor(fg) if fg else None
+        if role == Qt.ItemDataRole.BackgroundRole:
+            bg = row.get(f"_bg_{col}")
+            return QColor(bg) if bg else None
+        if role == Qt.ItemDataRole.FontRole:
+            if row.get(f"_bold_{col}"):
+                f = QFont()
+                f.setBold(True)
+                return f
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return row.get(f"_tip_{col}", "")
+        return None
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            if 0 <= section < len(self.COLUMNS):
+                return self.COLUMNS[section]
+        return None
+
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        if not (0 <= column < len(self.COLUMNS)):
+            return
+        col = self.COLUMNS[column]
+        sort_key = f"_sort_{col}"
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(
+            key=lambda r: (r.get(sort_key) is None, r.get(sort_key, 0.0)),
+            reverse=(order == Qt.SortOrder.DescendingOrder),
+        )
+        self.layoutChanged.emit()
 
 
 # ============================================================================ #
@@ -1910,20 +1906,6 @@ class PlotsWidget(QWidget):
                         break
                 self._save()
                 self._rebuild_table()
-
-    def _delete_plot(self, plot: dict):
-        reply = QMessageBox.question(
-            self, "Удаление участка",
-            f"Удалить участок № {plot.get('num', '?')}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            if hasattr(self, "_check_delegate"):
-                self._check_delegate.remove_plot(str(plot.get("num", "")))
-            self._plots = [p for p in self._plots if p is not plot]
-            self._save()
-            self._rebuild_table()
 
     def _import_from_excel(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -3101,226 +3083,4 @@ class PlotEditDialog(QDialog):
             QPushButton:hover { background: #E8F0F5; border: 1px solid #07414F; }
             QPushButton:pressed { background: #D5E5ED; }
         """)
-
-
-# ============================================================================ #
-#  DocCell / DocsWidget                                                        #
-# ============================================================================ #
-
-class DocCell(QWidget):
-    """
-    Ячейка документа: иконка-статус (✔️/—) + кнопка скрепки для прикрепления файла.
-    Эмитит сигнал при изменении.
-    """
-    changed = pyqtSignal()
-
-    def __init__(self, plot_num: str, doc_key: str,
-                 file_path: str = "", parent=None):
-        super().__init__(parent)
-        self._plot = plot_num
-        self._doc_key = doc_key
-        self._path = file_path
-
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 2, 6, 2)
-        lay.setSpacing(6)
-
-        self.lbl_status = QLabel()
-        self.lbl_status.setFixedWidth(20)
-        self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self.lbl_status)
-
-        self.btn_attach = QPushButton()
-        self.btn_attach.setFixedSize(28, 28)
-        self.btn_attach.setToolTip("Прикрепить / заменить файл")
-        self.btn_attach.clicked.connect(self._on_attach)
-        lay.addWidget(self.btn_attach)
-
-        self.btn_open = QPushButton("↗️")
-        self.btn_open.setFixedSize(28, 28)
-        self.btn_open.setToolTip("Открыть прикреплённый файл")
-        self.btn_open.clicked.connect(self._on_open)
-        lay.addWidget(self.btn_open)
-
-        lay.addStretch()
-        self._refresh()
-
-    def _refresh(self):
-        has = bool(self._path and os.path.exists(self._path))
-        if has:
-            self.lbl_status.setText("✔️")
-            self.lbl_status.setStyleSheet("color:#059669;font-size:14px;font-weight:700;")
-            self.btn_attach.setText("📎")
-            self.btn_attach.setStyleSheet(
-                "QPushButton{background:#0d3b1a;border:1px solid #2e7d32;"
-                "border-radius:5px;font-size:13px;}"
-                "QPushButton:hover{background:#1b5e20;}"
-            )
-            self.btn_open.setEnabled(True)
-            self.btn_open.setStyleSheet(
-                "QPushButton{background:#F0F2F5;border:1px solid #D1D5DB;"
-                "border-radius:5px;color:#6366F1;font-size:12px;}"
-                "QPushButton:hover{background:#E5E7EB;}"
-            )
-        else:
-            self.lbl_status.setText("—")
-            self.lbl_status.setStyleSheet("color:#6B7280;font-size:14px;font-weight:700;")
-            self.btn_attach.setText("📎")
-            self.btn_attach.setStyleSheet(
-                "QPushButton{background:#F0F2F5;border:1px solid #D1D5DB;"
-                "border-radius:5px;font-size:13px;}"
-                "QPushButton:hover{background:#E5E7EB;}"
-            )
-            self.btn_open.setEnabled(False)
-            self.btn_open.setStyleSheet(
-                "QPushButton{background:#0d1720;border:1px solid #1b2a3c;"
-                "border-radius:5px;color:#9CA3AF;font-size:12px;}"
-            )
-
-    def _on_attach(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Прикрепить файл", "", "Все файлы (*.*)"
-        )
-        if not path:
-            return
-        self._path = path
-        self._refresh()
-        self.changed.emit()
-
-    def _on_open(self):
-        if not self._path or not os.path.exists(self._path):
-            QMessageBox.warning(self, "Ошибка", "Файл не найден")
-            return
-        try:
-            os.startfile(self._path)
-        except Exception:
-            QMessageBox.warning(self, "Ошибка", "Не удалось открыть файл")
-
-    def get_path(self) -> str:
-        return self._path
-
-
-class DocsWidget(QWidget):
-    """Вкладка документов: таблица по участку и типу документа."""
-
-    DATA_FILE = os.path.join(DATA_DIR, "snt_docs.json")
-    DOC_TYPES = [
-        "Паспорт",
-        "Договор",
-        "Схема участка",
-        "Прочие документы",
-    ]
-
-    def __init__(self):
-        super().__init__()
-        self.setAutoFillBackground(True)
-        self._docs = self._load()
-        self._cells: dict[tuple[str, str], DocCell] = {}
-        self._setup_ui()
-        self._rebuild_table()
-
-    def _load(self) -> dict:
-        try:
-            if os.path.exists(self.DATA_FILE):
-                with open(self.DATA_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return {}
-
-    def _save(self):
-        try:
-            with open(self.DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._docs, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    def reload(self):
-        self._docs = self._load()
-        self._cells.clear()
-        self._rebuild_table()
-
-    def refresh_plots(self):
-        self._cells.clear()
-        self._rebuild_table()
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(14)
-
-        top_bar = QHBoxLayout()
-        title = QLabel("Документы")
-        title.setObjectName("pageTitle")
-        top_bar.addWidget(title)
-        top_bar.addStretch()
-
-        btn_save = QPushButton("Сохранить")
-        btn_save.setObjectName("btnPrimary")
-        btn_save.clicked.connect(self._save)
-        top_bar.addWidget(btn_save)
-        layout.addLayout(top_bar)
-
-        self.status_label = QLabel("Документы не загружены", objectName="statusLabel")
-        layout.addWidget(self.status_label)
-
-        self.table = QTableWidget(objectName="mainTable")
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSortingEnabled(False)
-        layout.addWidget(self.table)
-
-    def _rebuild_table(self):
-        self.table.blockSignals(True)
-        self.table.clearContents()
-
-        plot_order = _load_plot_order()
-        rows = len(plot_order)
-        cols = 1 + len(self.DOC_TYPES)
-        self.table.setRowCount(rows)
-        self.table.setColumnCount(cols)
-
-        headers = ["Участок"] + self.DOC_TYPES
-        self.table.setHorizontalHeaderLabels(headers)
-
-        for r_idx, plot in enumerate(plot_order):
-            plot_item = QTableWidgetItem(f"уч. {plot}")
-            plot_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            plot_item.setForeground(QColor("#6366F1"))
-            f = plot_item.font(); f.setBold(True); plot_item.setFont(f)
-            self.table.setItem(r_idx, 0, plot_item)
-
-            plot_docs = self._docs.get(str(plot), {})
-            for c_idx, doc_key in enumerate(self.DOC_TYPES, start=1):
-                cell = DocCell(str(plot), doc_key, plot_docs.get(doc_key, ""), self)
-                cell.changed.connect(
-                    lambda _, p=str(plot), d=doc_key, w=cell: self._on_doc_changed(p, d, w)
-                )
-                self.table.setCellWidget(r_idx, c_idx, cell)
-                self._cells[(str(plot), doc_key)] = cell
-            self.table.setRowHeight(r_idx, 34)
-
-        self.table.blockSignals(False)
-        self._update_status()
-
-    def _on_doc_changed(self, plot: str, doc_key: str, cell: DocCell):
-        self._docs.setdefault(str(plot), {})[doc_key] = cell.get_path()
-        self._save()
-        self._update_status()
-
-    def _update_status(self):
-        total = 0
-        attached = 0
-        for plot in _load_plot_order():
-            for doc_key in self.DOC_TYPES:
-                path = self._docs.get(str(plot), {}).get(doc_key, "")
-                total += 1
-                if path:
-                    attached += 1
-        self.status_label.setText(
-            f"Документов: {attached} из {total} прикреплено"
-        )
 

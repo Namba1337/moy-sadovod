@@ -5,9 +5,8 @@
 import unittest
 from datetime import date
 
-import pandas as pd
-
 from core import energy
+from tests._util import make_df as _make_df
 
 
 RATES = [
@@ -15,12 +14,6 @@ RATES = [
     {"date": "2025-05-01", "rate": "5.85", "note": ""},
     {"date": "2026-05-01", "rate": "6.28", "note": ""},
 ]
-
-
-def _make_df(records):
-    df = pd.DataFrame(records)
-    df["Дата"] = pd.to_datetime(df["Дата"])
-    return df
 
 
 class RateAtTests(unittest.TestCase):

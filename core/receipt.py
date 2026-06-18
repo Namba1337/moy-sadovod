@@ -16,12 +16,6 @@ from core.utils import fmt_money
 _MONTHS = ["янв", "фев", "мар", "апр", "май", "июн",
            "июл", "авг", "сен", "окт", "ноя", "дек"]
 
-def _fmt_kwh(v: float | None) -> str:
-    if v is None:
-        return "—"
-    return f"{v:.0f}"
-
-
 def _fmt_balance_cols(balance: float) -> tuple[str, str]:
     """Возвращает (долг, переплата) — одно заполнено, второе '—'."""
     if balance > 0.005:

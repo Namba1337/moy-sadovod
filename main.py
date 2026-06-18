@@ -13,18 +13,15 @@ from core.utils import DATA_DIR
 from core.updater import APP_VERSION, UpdateChecker
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QListWidget, QListWidgetItem, QStackedWidget, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit, QComboBox,
-    QDateEdit, QFrame, QFileDialog, QMessageBox, QMenu, QInputDialog, QDialog,
-    QCheckBox, QSpinBox,
-    QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem,
-    QFormLayout, QDialogButtonBox, QScrollArea, QSizePolicy,
-    QStyleOption, QStyle,
+    QStackedWidget, QLabel, QPushButton,
+    QTableWidget, QHeaderView, QLineEdit, QComboBox,
+    QDateEdit, QFrame, QFileDialog, QMessageBox,
+    QScrollArea, QStyleOption, QStyle,
 )
 from PyQt6.QtCore import (Qt, QPoint, QRectF, QTimer, pyqtSignal,
                            QPropertyAnimation, QParallelAnimationGroup,
-                           QEasingCurve, QAbstractAnimation)
-from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPainter, QPixmap, QPen, QFontDatabase, QPalette, QBitmap, QPainterPath
+                           QEasingCurve)
+from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPainter, QPixmap, QFontDatabase, QPalette, QBitmap, QPainterPath
 
 
 from ui.energy_card import MeterReplacementDialog, PlotCardDialog

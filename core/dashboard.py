@@ -141,34 +141,9 @@ def _periods() -> list[Period]:
     return out
 
 
-@dataclass
-class PeriodPair:
-    current: Optional[Period]
-    previous: Optional[Period]
-
-
 def get_all_periods() -> list[Period]:
     """Все периоды ЧВ, отсортированные от самого раннего к самому позднему."""
     return _periods()
-
-
-def resolve_periods(as_of: date) -> PeriodPair:
-    """Текущий период — содержащий as_of; прошлый — предыдущий по списку."""
-    periods = _periods()
-    if not periods:
-        return PeriodPair(None, None)
-
-    cur_idx: Optional[int] = None
-    for i, p in enumerate(periods):
-        if p.date_from <= as_of <= p.date_to:
-            cur_idx = i
-            break
-    if cur_idx is None:
-        cur_idx = len(periods) - 1 if as_of > periods[-1].date_to else 0
-
-    cur = periods[cur_idx]
-    prev = periods[cur_idx - 1] if cur_idx > 0 else None
-    return PeriodPair(cur, prev)
 
 
 # ── агрегаты по потокам ───────────────────────────────────────────────

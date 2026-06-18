@@ -5,9 +5,8 @@
 import unittest
 from datetime import date
 
-import pandas as pd
-
 from core import vznosy
+from tests._util import make_df as _make_df
 
 
 RATES_FIXED = [
@@ -20,12 +19,6 @@ RATES_MIXED = [
     {"date": "2025-01-01", "amount": "12000", "per_sqm": False, "rate_sqm": "", "note": ""},
     {"date": "2026-01-01", "amount": "",      "per_sqm": True,  "rate_sqm": "15.00", "note": ""},
 ]
-
-
-def _make_df(records):
-    df = pd.DataFrame(records)
-    df["Дата"] = pd.to_datetime(df["Дата"])
-    return df
 
 
 class TariffAtTests(unittest.TestCase):
