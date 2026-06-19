@@ -3537,6 +3537,9 @@ class DetailWidget(QWidget):
         if df_idx is not None and self.df_full is not None and df_idx in self.df_full.index:
             for col, val in result.items():
                 if col in self.df_full.columns:
+                    cur_dtype = self.df_full[col].dtype
+                    if cur_dtype.kind == "f" and isinstance(val, str) and val.strip() == "":
+                        val = 0.0
                     self.df_full.at[df_idx, col] = val
                     self._manual_cells.add((df_idx, col))
             self.df_full["Дата"] = pd.to_datetime(self.df_full["Дата"], errors="coerce")
