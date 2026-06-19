@@ -48,7 +48,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 #: Текущая версия приложения. ЕДИНСТВЕННАЯ ТОЧКА ИСТИНЫ.
 #: При релизе: поднять здесь → прогнать build.bat → обновить Gist.
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 
 #: URL публичного JSON-манифеста обновлений (GitHub Gist raw или любой HTTPS).
 #: Как создать Gist: https://gist.github.com → New gist → Public.
