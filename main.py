@@ -4,7 +4,7 @@ import json
 import os
 import zipfile
 import faulthandler
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -1090,7 +1090,7 @@ def _qt_msg_handler(msg_type, context, message):
         try:
             _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
             with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-                f.write(f"\n[Qt Critical] {message}\n")
+                f.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] [Qt Critical] {message}\n")
         except Exception:
             pass
         try:
@@ -1112,7 +1112,7 @@ def _excepthook(exc_type, exc_value, exc_tb):
     try:
         _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(f"\n{'='*60}\n{tb}\n")
+            f.write(f"\n{'='*60}\n[{datetime.now():%Y-%m-%d %H:%M:%S}]\n{tb}\n")
     except Exception:
         pass
     try:
