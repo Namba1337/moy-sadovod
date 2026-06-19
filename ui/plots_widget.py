@@ -953,7 +953,11 @@ class _CheckDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
     def eventFilter(self, obj, event):
-        if obj is self._view.viewport():
+        try:
+            view = self._view
+        except RuntimeError:
+            return False
+        if obj is view.viewport():
             if event.type() == QEvent.Type.MouseMove:
                 idx    = self._view.indexAt(event.position().toPoint())
                 on_btn = self._is_btn(idx)
