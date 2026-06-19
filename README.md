@@ -89,28 +89,54 @@ GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "ghp_ВАШ_ТОКЕН_ЗДЕ
 
 ### Выпуск новой версии
 
-1. Поднять номер версии в `core/updater.py`:
+1. Поднять номер версии в `core/updater.py` — **единственная точка истины**:
    ```python
    APP_VERSION = "1.0.1"
    ```
-2. Запустить `build.bat` — он:
-   - синхронизирует версию в `installer.iss`,
-   - соберёт `dist\MoySadovod.exe`,
-   - упакует `installer\MoySadovod_Setup_v1.0.1.exe`,
-   - сгенерирует `MoySadovod_Setup_v1.0.1.exe.sha256` рядом.
-3. Закоммитить и поставить тег:
+2. Закоммитить и запушить все изменения через VS Code (Commit → Sync).
+
+3. Запустить `build.bat` — он:
+   - читает версию из `core/updater.py`,
+   - собирает `dist\MoySadovod.exe` (PyInstaller),
+   - упаковывает `installer\MoySadovod_Setup_v1.0.1.exe` (Inno Setup),
+   - генерирует `installer\MoySadovod_Setup_v1.0.1.exe.sha256`.
+
+   > `installer.iss` при этом **не изменяется** — версия передаётся через
+   > флаг `/DAppVersion=` компилятору Inno Setup. Дополнительный коммит
+   > после сборки не нужен.
+
+4. Поставить аннотированный тег и запушить его:
    ```
-   git tag v1.0.1
-   git push --tags
+   git tag -a v1.0.1 -m "v1.0.1"
+   git push origin v1.0.1
    ```
-4. На GitHub: **Releases → Draft new release** → выбрать тег `v1.0.1`,
+
+5. Собрать список изменений для release notes (опционально):
+   ```
+   git log v1.0.0..v1.0.1 --oneline
+   ```
+
+6. На GitHub: **Releases → Draft new release** → выбрать тег `v1.0.1`,
    приложить ОБА файла (`.exe` и `.sha256`) как assets, заполнить
    release notes (их увидит пользователь в диалоге обновления) → **Publish**.
+
+7. Открыть Gist и обновить `update.json`:
+   ```json
+   {
+     "version": "1.0.1",
+     "notes": "Что нового...",
+     "download_url": "https://github.com/Namba1337/snt_helper_app_public_releases/releases/download/v1.0.1/MoySadovod_Setup_v1.0.1.exe",
+     "sha256": "<хеш из .sha256 файла>",
+     "size_bytes": 0
+   }
+   ```
+   Нажать **Update** — установленные клиенты получат уведомление при
+   следующем запуске.
 
 После публикации все установленные клиенты при следующем запуске увидят
 плашку «Доступна новая версия» с кнопкой «Обновить». При нажатии:
 1. Скачивается установщик в `%TEMP%\MoySadovod_update\`.
-2. Проверяется SHA-256 (если `.sha256` приложен к релизу).
+2. Проверяется SHA-256 (из поля `sha256` в `update.json`).
 3. Запускается Inno Setup в тихом режиме (`/SILENT /CLOSEAPPLICATIONS
    /RESTARTAPPLICATIONS`), приложение завершается, установщик
    обновляет файлы и заново запускает приложение.
