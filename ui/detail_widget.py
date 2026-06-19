@@ -3527,7 +3527,11 @@ class DetailWidget(QWidget):
         dlg = EditOperationDialog(node.data, breakdown, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        result = dlg.get_result()
+        try:
+            result = dlg.get_result()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось получить данные из формы:\n{e}")
+            return
         df_idx = node.df_idx
         new_breakdown = result.pop("_breakdown", None)
         if df_idx is not None and self.df_full is not None and df_idx in self.df_full.index:
@@ -3538,19 +3542,30 @@ class DetailWidget(QWidget):
             self.df_full["Дата"] = pd.to_datetime(self.df_full["Дата"], errors="coerce")
             if new_breakdown is not None:
                 self._set_breakdown(df_idx, new_breakdown)
-        self.apply_filters()
+        try:
+            self.apply_filters()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка обновления таблицы:\n{e}")
+            return
         if new_breakdown:
             idx = self.model.index_for_df_idx(df_idx)
             if idx.isValid():
                 self.tree.expand(idx)
-        self.dataLoaded.emit(self.df_full)
+        try:
+            self.dataLoaded.emit(self.df_full)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка обновления вкладок:\n{e}")
 
     # ----------------------------------------------------- добавить строку -- #
     def _add_row(self):
         dlg = AddRowDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        row_data = dlg.get_result()
+        try:
+            row_data = dlg.get_result()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось получить данные из формы:\n{e}")
+            return
         new_breakdown = row_data.pop("_breakdown", None)
 
         if self.df_full is None:
@@ -3584,7 +3599,10 @@ class DetailWidget(QWidget):
             idx = self.model.index_for_df_idx(new_idx)
             if idx.isValid():
                 self.tree.expand(idx)
-        self.dataLoaded.emit(self.df_full)
+        try:
+            self.dataLoaded.emit(self.df_full)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка обновления вкладок:\n{e}")
 
     # --------------------------------------------------------- загрузка --- #
     def load_file(self):
@@ -3663,7 +3681,10 @@ class DetailWidget(QWidget):
         df = _ensure_meta_columns(df)
         self.df_full = df
         self.apply_filters()
-        self.dataLoaded.emit(self.df_full)
+        try:
+            self.dataLoaded.emit(self.df_full)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка восстановления данных:\n{e}")
 
     def get_manual_cells_data(self) -> list:
         """Сериализует _manual_cells для сохранения в проект."""
@@ -3754,10 +3775,13 @@ class DetailWidget(QWidget):
         msg.exec()
         if msg.clickedButton() is not btn_yes:
             return
-        self.df_full = self.df_full.drop(list(indices)).reset_index(drop=True)
-        self._check_delegate.clear_selection()
-        self.apply_filters()
-        self.dataLoaded.emit(self.df_full)
+        try:
+            self.df_full = self.df_full.drop(list(indices)).reset_index(drop=True)
+            self._check_delegate.clear_selection()
+            self.apply_filters()
+            self.dataLoaded.emit(self.df_full)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка удаления строк:\n{e}")
 
     # ------------------------------------------------------------ экспорт -- #
     def _export_excel(self):
@@ -3828,7 +3852,13 @@ class DetailWidget(QWidget):
 
     # ------------------------------------------------------ редактирование -- #
     def _on_cell_edited(self, node: _Node, col: str):
-        """Слот модели: переносит правку ячейки обратно в df_full."""
+        """Слот модели: переносит правки ячейки обратно в df_full."""
+        try:
+            self._on_cell_edited_impl(node, col)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка сохранения ячейки:\n{e}")
+
+    def _on_cell_edited_impl(self, node: _Node, col: str):
         if self.df_full is None:
             return
 
@@ -3839,11 +3869,11 @@ class DetailWidget(QWidget):
                     self.df_full.at[df_idx, "Сумма"] = node.data["Сумма"]
                 elif col == "Дата":
                     self.df_full.at[df_idx, "Дата"] = node.data["Дата"]
-                else:
-                    self.df_full.at[df_idx, col] = node.data[col]
-                    if col == "Категория" and node.data[col]:
-                        if self.combo_cat.findText(node.data[col]) == -1:
-                            self.combo_cat.addItem(node.data[col])
+            else:
+                self.df_full.at[df_idx, col] = node.data[col]
+                if col == "Категория" and node.data[col]:
+                    if node.data[col] not in self._category_delegate._items:
+                        self._category_delegate._items.append(node.data[col])
                 self._manual_rows.add(df_idx)
                 self._manual_cells.add((df_idx, col))
         else:  # split — сохраняем разбивку родителя
@@ -3898,13 +3928,16 @@ class DetailWidget(QWidget):
     def _duplicate_op(self, op_node: _Node):
         if self.df_full is None or op_node.df_idx not in self.df_full.index:
             return
-        new_idx = int(self.df_full.index.max()) + 1
-        self.df_full.loc[new_idx] = self.df_full.loc[op_node.df_idx].copy()
-        self.apply_filters()
-        idx = self.model.index_for_df_idx(new_idx)
-        if idx.isValid():
-            self.tree.setCurrentIndex(idx)
-        self.dataLoaded.emit(self.df_full)
+        try:
+            new_idx = int(self.df_full.index.max()) + 1
+            self.df_full.loc[new_idx] = self.df_full.loc[op_node.df_idx].copy()
+            self.apply_filters()
+            idx = self.model.index_for_df_idx(new_idx)
+            if idx.isValid():
+                self.tree.setCurrentIndex(idx)
+            self.dataLoaded.emit(self.df_full)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка дублирования операции:\n{e}")
 
     def _delete_op(self, op_node: _Node):
         reply = QMessageBox.question(
@@ -3914,7 +3947,10 @@ class DetailWidget(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        if self.df_full is not None and op_node.df_idx in self.df_full.index:
-            self.df_full = self.df_full.drop(index=op_node.df_idx)
-        self.apply_filters()
-        self.dataLoaded.emit(self.df_full)
+        try:
+            if self.df_full is not None and op_node.df_idx in self.df_full.index:
+                self.df_full = self.df_full.drop(index=op_node.df_idx)
+            self.apply_filters()
+            self.dataLoaded.emit(self.df_full)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка удаления операции:\n{e}")

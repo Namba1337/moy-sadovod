@@ -1,8 +1,9 @@
-﻿import sys
+import sys
 import re
 import json
 import os
 import zipfile
+import faulthandler
 from datetime import date
 from pathlib import Path
 
@@ -1079,7 +1080,66 @@ class MainWindow(QMainWindow):
         """)
 
 
+_CRASH_LOG = Path(os.environ.get("APPDATA", Path.home())) / "MoySadovod" / "crash.log"
+
+
+def _qt_msg_handler(msg_type, context, message):
+    """Перехватывает Qt-сообщения уровня Critical/Fatal — логирует и показывает диалог."""
+    from PyQt6.QtCore import QtMsgType
+    if msg_type in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+        try:
+            _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+                f.write(f"\n[Qt Critical] {message}\n")
+        except Exception:
+            pass
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                QMessageBox.critical(
+                    None,
+                    "Ошибка приложения",
+                    f"Критическая ошибка Qt:\n\n{message}\n\n"
+                    f"Подробности сохранены в:\n{_CRASH_LOG}",
+                )
+        except Exception:
+            pass
+
+
+def _excepthook(exc_type, exc_value, exc_tb):
+    import traceback
+    tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    try:
+        _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n{tb}\n")
+    except Exception:
+        pass
+    try:
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+        QMessageBox.critical(
+            None,
+            "Ошибка приложения",
+            f"Произошла непредвиденная ошибка:\n\n"
+            f"{exc_type.__name__}: {exc_value}\n\n"
+            f"Подробности сохранены в:\n{_CRASH_LOG}",
+        )
+    except Exception:
+        pass
+    sys.exit(1)
+
+
 def main():
+    sys.excepthook = _excepthook
+
+    try:
+        _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+        faulthandler.enable(file=open(_CRASH_LOG, "a", encoding="utf-8"))
+    except Exception:
+        faulthandler.enable()
+
     os.makedirs(DATA_DIR, exist_ok=True)
 
     # Миграция: все участки без типа расчёта получают тип 1 (счётчик).
@@ -1096,6 +1156,9 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("Мой Садовод")
+
+    from PyQt6.QtCore import qInstallMessageHandler
+    qInstallMessageHandler(_qt_msg_handler)
 
     _icon_path = Path(__file__).parent / "resources" / "images" / "logo_2.ico"
     if _icon_path.exists():
