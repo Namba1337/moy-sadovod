@@ -1,5 +1,5 @@
 #define AppName "Мой Садовод"
-#define AppVersion "0.4.2"
+#define AppVersion "0.4.3"
 #define AppPublisher "СНТ"
 #define AppExeName "MoySadovod.exe"
 #define SourceExe "dist\MoySadovod.exe"
