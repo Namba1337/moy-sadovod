@@ -8,8 +8,8 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
-    QWidget,
+    QMessageBox, QPushButton, QTableWidget, QTabWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from core import energy
@@ -209,10 +209,13 @@ class VznosyCardDialog(QDialog):
         self.warning_lbl.setVisible(False)
         lay.addWidget(self.warning_lbl)
 
-        # ── Главная таблица: разбивка по периодам ──────────────────────
-        years_lbl = QLabel("Разбивка по периодам", objectName="filterLabel")
-        years_lbl.setStyleSheet("color:#6366F1;background:transparent;font-size:12px;margin-top:4px;")
-        lay.addWidget(years_lbl)
+        # ── Вкладки ──────────────────────────────────────────────
+        self.tabs = QTabWidget(objectName="vznosyTabs")
+
+        # Вкладка 1: разбивка по периодам
+        tab1 = QWidget()
+        t1_lay = QVBoxLayout(tab1)
+        t1_lay.setContentsMargins(0, 4, 0, 0)
 
         self.table = QTableWidget(objectName="summaryTable")
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -228,13 +231,13 @@ class VznosyCardDialog(QDialog):
             hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
             self.table.setColumnWidth(c, w)
         hdr.setStretchLastSection(False)
-        lay.addWidget(self.table, 1)
+        t1_lay.addWidget(self.table, 1)
+        self.tabs.addTab(tab1, "Разбивка по периодам")
 
-        # ── Разбивка по собственникам (видна при истории/совладельцах) ──
-        self.owners_lbl = QLabel("Разбивка по собственникам")
-        self.owners_lbl.setStyleSheet(
-            "color:#6366F1;background:transparent;font-size:12px;margin-top:8px;")
-        lay.addWidget(self.owners_lbl)
+        # Вкладка 2: разбивка по собственникам
+        tab2 = QWidget()
+        t2_lay = QVBoxLayout(tab2)
+        t2_lay.setContentsMargins(0, 4, 0, 0)
 
         self.owners_table = QTableWidget(objectName="summaryTable")
         self.owners_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -249,13 +252,13 @@ class VznosyCardDialog(QDialog):
             ohdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
             self.owners_table.setColumnWidth(c, w)
         ohdr.setStretchLastSection(True)
-        self.owners_table.setMaximumHeight(170)
-        lay.addWidget(self.owners_table)
+        t2_lay.addWidget(self.owners_table, 1)
+        self._owners_tab_idx = self.tabs.addTab(tab2, "Разбивка по собственникам")
 
-        # ── Список ручных операций и корректировок ────────────────
-        adj_lbl = QLabel("Ручные операции и корректировки")
-        adj_lbl.setStyleSheet("color:#6366F1;background:transparent;font-size:12px;margin-top:8px;")
-        lay.addWidget(adj_lbl)
+        # Вкладка 3: ручные операции и корректировки
+        tab3 = QWidget()
+        t3_lay = QVBoxLayout(tab3)
+        t3_lay.setContentsMargins(0, 4, 0, 0)
 
         self.adj_table = QTableWidget(objectName="summaryTable")
         self.adj_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -270,8 +273,10 @@ class VznosyCardDialog(QDialog):
             ahdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
             self.adj_table.setColumnWidth(c, w)
         ahdr.setStretchLastSection(False)
-        self.adj_table.setMaximumHeight(180)
-        lay.addWidget(self.adj_table)
+        t3_lay.addWidget(self.adj_table, 1)
+        self.tabs.addTab(tab3, "Ручные операции и корректировки")
+
+        lay.addWidget(self.tabs, 1)
 
         # ── Кнопки внизу ──────────────────────────────────────────
         bottom = QHBoxLayout()
@@ -312,6 +317,20 @@ class VznosyCardDialog(QDialog):
                 border-right: 1px solid #E5E7EB; border-bottom: 2px solid #6366F1;
                 padding: 6px 8px; font-size: 12px; font-weight: 600;
             }
+            QTabWidget#vznosyTabs::pane {
+                border: 1px solid #E5E7EB; border-radius: 6px; background: #FFFFFF;
+            }
+            QTabBar::tab {
+                background: #F3F4F6; color: #6B7280; border: 1px solid #E5E7EB;
+                border-bottom: none; border-top-left-radius: 6px;
+                border-top-right-radius: 6px; padding: 8px 16px;
+                font-size: 12px; font-weight: 500; margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: #FFFFFF; color: #4F46E5; font-weight: 700;
+                border-bottom: 2px solid #4F46E5;
+            }
+            QTabBar::tab:hover:!selected { background: #E5E7EB; color: #374151; }
         """)
 
     def _rebuild(self):
@@ -496,8 +515,7 @@ class VznosyCardDialog(QDialog):
         owner_count = sum(1 for o in recs if own.is_owner(o))
         # Секция нужна, только когда есть что разделять: совладельцы или история.
         show = owner_count > 1 or own.has_history(recs)
-        self.owners_lbl.setVisible(show)
-        self.owners_table.setVisible(show)
+        self.tabs.setTabVisible(self._owners_tab_idx, show)
         if not show:
             return
 
