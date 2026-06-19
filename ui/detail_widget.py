@@ -3467,7 +3467,7 @@ class DetailWidget(QWidget):
         if self.df_full is None:
             return
         if "_breakdown" not in self.df_full.columns:
-            self.df_full["_breakdown"] = None
+            self.df_full["_breakdown"] = pd.Series(dtype="object", index=self.df_full.index)
         self.df_full.at[df_idx, "_breakdown"] = _dump_breakdown(items)
 
     def _add_split(self, op_node: _Node):
