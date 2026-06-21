@@ -1,22 +1,22 @@
-import json
+﻿import json
 import os
 from datetime import date, datetime
 
 import pandas as pd
 from PyQt6.QtCore import (
     Qt, QDate, QEvent, QModelIndex, QAbstractItemModel, QObject, QPoint, QRect, QRectF,
-    QRegularExpression, QTimer, pyqtSignal,
+    QRegularExpression, QSize, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBitmap, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygon,
-    QRegion, QRegularExpressionValidator,
+    QBitmap, QColor, QFont, QFontMetrics, QIcon, QPainter, QPen, QPixmap,
+    QPolygon, QRegion, QRegularExpressionValidator,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout,
     QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QTableWidget, QTableWidgetItem, QTreeView, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTreeView, QVBoxLayout, QWidget,
 )
 
 from core import ownership
@@ -75,14 +75,56 @@ def _mat_font(pixel_size: int = 20, fill: int = 0) -> QFont:
     return f
 
 
+def _mat_icon(codepoint: int, size: int = 16, fill: int = 0,
+              color: str = "#07414F") -> QIcon:
+    """Рендерит символ Material Symbols в QIcon (для кнопок с текстом)."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setFont(_mat_font(size, fill))
+    p.setPen(QColor(color))
+    p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, chr(codepoint))
+    p.end()
+    return QIcon(pm)
+
+
 _F_STAR_OUTLINE  = _mat_font(20, fill=0)
 _F_STAR_FILLED   = _mat_font(20, fill=1)
 _F_CHEVRON       = _mat_font(18, fill=0)
 _F_COPY_OUTLINE  = _mat_font(18, fill=0)
-_F_COPY_FILLED   = _mat_font(18, fill=1)
 
 
-def _make_copy_btn(target_inp) -> "QPushButton":
+_copy_toasts: list = []  # держим ссылку, чтобы GC не удалил до показа
+
+
+def _show_copy_toast(anchor) -> None:
+    dialog = anchor.window()
+    toast = QLabel("Скопировано", dialog)
+    toast.setStyleSheet(
+        "QLabel{background:#C9D8E2; color:#07414F; border-radius:6px;"
+        " padding:2px 10px; font-size:11px;}")
+    toast.adjustSize()
+
+    # Позиция — сразу после текста label (не всей ширины виджета)
+    text_w = anchor.fontMetrics().horizontalAdvance(anchor.text())
+    g = anchor.mapToGlobal(QPoint(text_w + 6, 0))
+    p = dialog.mapFromGlobal(g)
+    toast.move(p.x(), p.y() + (anchor.height() - toast.height()) // 2)
+    toast.raise_()
+    toast.show()
+    _copy_toasts.append(toast)
+
+    def _cleanup():
+        toast.deleteLater()
+        try:
+            _copy_toasts.remove(toast)
+        except ValueError:
+            pass
+
+    QTimer.singleShot(3000, _cleanup)
+
+
+def _make_copy_btn(target_inp, anchor_lbl=None) -> "QPushButton":
     from PyQt6.QtWidgets import QPushButton as _QB
     btn = _QB(chr(0xE2EC))
     btn.setFont(_F_COPY_OUTLINE)
@@ -93,20 +135,24 @@ def _make_copy_btn(target_inp) -> "QPushButton":
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def _enter(e, b=btn):
-        b.setFont(_F_COPY_FILLED)
         b.setStyleSheet(
             "QPushButton{background:transparent;border:none;color:#07414F;padding:0;}")
         _QB.enterEvent(b, e)
 
     def _leave(e, b=btn):
-        b.setFont(_F_COPY_OUTLINE)
         b.setStyleSheet(
             "QPushButton{background:transparent;border:none;color:#C9D8E2;padding:0;}")
         _QB.leaveEvent(b, e)
 
+    def _on_click():
+        text = target_inp.text()
+        if text:
+            QApplication.clipboard().setText(text)
+        _show_copy_toast(anchor_lbl if anchor_lbl is not None else btn)
+
     btn.enterEvent = _enter
     btn.leaveEvent = _leave
-    btn.clicked.connect(lambda: QApplication.clipboard().setText(target_inp.text()))
+    btn.clicked.connect(_on_click)
     return btn
 
 
@@ -132,12 +178,15 @@ def _make_owner(name: str, is_owner: bool = True, area: float | None = None,
                 is_visible: bool = False, member_doc: str = "",
                 opd_doc: str = "", phone: str = "",
                 email: str = "", since: str = "", until: str = "",
-                share: str = "", egrn_doc: str = "") -> dict:
+                share: str = "", egrn_doc: str = "",
+                is_member: bool = False) -> dict:
     d: dict = {"name": name, "is_owner": is_owner}
     if area is not None:
         d["area"] = area
     if is_visible:
         d["is_visible"] = True
+    if is_member:
+        d["is_member"] = True
     if member_doc:
         d["member_doc"] = member_doc
     if opd_doc:
@@ -2176,6 +2225,11 @@ class _IconRadioButton(QLabel):
             self._checked = False
         self._refresh()
 
+    def setInteractive(self, interactive: bool):
+        """Разрешает/запрещает взаимодействие без сброса состояния."""
+        self._enabled = bool(interactive)
+        self._refresh()
+
     def _refresh(self):
         self.setText(self._IC_ON if self._checked else self._IC_OFF)
         if not self._enabled:
@@ -2198,77 +2252,143 @@ class _IconRadioButton(QLabel):
 #  Виджет заявления о вступлении в члены СНТ                                  #
 # ============================================================================ #
 
-class _MemberDocWidget(QWidget):
-    """Кнопки управления прикреплённым документом.
+class _DocFieldWidget(QWidget):
+    """Поле документа, стилизованное под QLineEdit.
 
-    Состояние A (нет файла): vertical_align_bottom — загрузить.
-    Состояние B (файл есть): open_char (открыть) + autorenew (заменить)
-                              + contract_delete (удалить).
-    Иконка кнопки «открыть» и тексты подсказок задаются через keyword-параметры.
+    Edit + нет файла : граница, текст «+ Загрузить документ».
+    Edit + есть файл : граница, подчёркнутое имя файла.
+    View + нет файла : компактный бейдж «Отсутствует» + stretch (слева).
+    View + есть файл : без рамки, подчёркнутое имя файла, кликабельно.
     """
     path_changed = pyqtSignal(str)
 
+    # Стиль на контейнере (QWidget#_docFW), а не на внутренней QLabel —
+    # чтобы обойти dialog-level "QLabel{background:transparent;}"
+    _SS_BOX_EDIT = (
+        "QWidget#_docFW{background:#FFFFFF;border:1px solid #D1D5DB;"
+        "border-radius:6px;}")
+    _SS_BOX_VIEW = "QWidget#_docFW{background:transparent;border:none;}"
+    _SS_FIELD_TXT_EMPTY = (
+        "QLabel{background:transparent;border:none;padding:0;"
+        "font-size:12px;color:#9CA3AF;}")
+    _SS_FIELD_TXT_FILE = (
+        "QLabel{background:transparent;border:none;padding:0;"
+        "font-size:12px;color:#07414F;}")
+    _SS_ABSENT = (
+        "QLabel{background:#FEF3C7;color:#B45309;border-radius:6px;"
+        "padding:2px 10px;font-size:11px;}")
+
     def __init__(self, doc_path: str = "", *,
-                 open_char: str = chr(0xF565),
-                 upload_tip: str = "Загрузить заявление",
-                 open_tip: str = "Открыть заявление",
+                 upload_tip: str = "Загрузить документ",
                  parent=None):
         super().__init__(parent)
         self._path = doc_path
         self._upload_tip = upload_tip
-        self.setFixedWidth(80)
-        self.setStyleSheet("background:transparent;")
+        self._interactive = True
+        self.setObjectName("_docFW")
+        self.setFixedHeight(34)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(2, 0, 2, 0)
-        lay.setSpacing(2)
+        lay.setContentsMargins(10, 0, 4, 0)
+        lay.setSpacing(6)
 
-        f = QFont("Material Symbols Rounded")
-        f.setPixelSize(16)
+        # Иконка загрузки (Material Symbols, отдельная QLabel — нет проблем с выравниванием)
+        _if = QFont("Material Symbols Rounded")
+        _if.setPixelSize(14)
+        self._icon = QLabel(chr(0xE9FC))
+        self._icon.setFont(_if)
+        self._icon.setFixedSize(16, 16)
+        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._icon.setStyleSheet(
+            "QLabel{background:transparent;border:none;padding:0;color:#9CA3AF;}")
+        lay.addWidget(self._icon)
 
-        def _btn(char: str, color: str = "#07414F", hover: str = "#0B5A6E") -> QPushButton:
-            b = QPushButton(char)
-            b.setFont(f)
-            b.setFixedSize(24, 28)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Текстовое поле
+        self._field = QLabel()
+        self._field.setTextFormat(Qt.TextFormat.RichText)
+        self._field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._field.setStyleSheet(self._SS_FIELD_TXT_EMPTY)
+        self._field.mousePressEvent = self._on_click
+        lay.addWidget(self._field)
+
+        # Бейдж «Отсутствует» (view-режим без файла)
+        self._absent = QLabel("Отсутствует")
+        self._absent.setStyleSheet(self._SS_ABSENT)
+        self._absent.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self._absent.setVisible(False)
+        lay.addWidget(self._absent)
+
+        # Кнопка удаления — встроена сразу за полем, видна только в edit-режиме
+        _df = QFont("Material Symbols Rounded")
+        _df.setPixelSize(18)
+        self.del_btn = QPushButton(chr(0xE92B))
+        self.del_btn.setFont(_df)
+        self.del_btn.setFixedSize(26, 26)
+        self.del_btn.setFlat(True)
+        self.del_btn.setVisible(False)
+        self.del_btn.clicked.connect(self.delete_path)
+
+        def _sync_del(path, b=self.del_btn):
+            has = bool(path)
+            b.setEnabled(has)
+            b.setCursor(Qt.CursorShape.PointingHandCursor if has else Qt.CursorShape.ArrowCursor)
             b.setStyleSheet(
-                f"QPushButton{{background:transparent;border:none;color:{color};}}"
-                f"QPushButton:hover{{color:{hover};}}"
-            )
-            return b
+                "QPushButton{background:transparent;border:none;padding:0;"
+                f"color:{'#DC2626' if has else '#D1D5DB'};}}"
+                + ("QPushButton:hover{color:#B91C1C;}" if has else ""))
 
-        self._btn_upload  = _btn(chr(0xE258))
-        self._btn_open    = _btn(open_char)
-        self._btn_replace = _btn(chr(0xE863))
-        self._btn_delete  = _btn(chr(0xF5A2), "#DC2626", "#B91C1C")
-
-        self._btn_upload.installEventFilter(_TooltipFilter(upload_tip, self._btn_upload))
-        self._btn_open.installEventFilter(_TooltipFilter(open_tip, self._btn_open))
-        self._btn_replace.installEventFilter(_TooltipFilter("Заменить документ", self._btn_replace))
-        self._btn_delete.installEventFilter(_TooltipFilter("Удалить документ", self._btn_delete))
-
-        self._btn_upload.clicked.connect(self._on_upload)
-        self._btn_open.clicked.connect(self._on_open)
-        self._btn_replace.clicked.connect(self._on_upload)
-        self._btn_delete.clicked.connect(self._on_delete)
-
-        lay.addWidget(self._btn_upload)
-        lay.addWidget(self._btn_open)
-        lay.addWidget(self._btn_replace)
-        lay.addWidget(self._btn_delete)
+        self.path_changed.connect(_sync_del)
+        lay.addWidget(self.del_btn)
 
         self._refresh()
 
     def get_path(self) -> str:
         return self._path
 
+    def setEnabled(self, enabled: bool):
+        self._interactive = bool(enabled)
+        self._refresh()
+
+    def _display_name(self) -> str:
+        name = os.path.basename(self._path)
+        if len(name) > 24:
+            name = name[:24 - 3 - 7] + "…" + name[-7:]
+        return name
+
     def _refresh(self):
         has = bool(self._path)
-        self._btn_upload.setVisible(not has)
-        self._btn_open.setVisible(has)
-        self._btn_replace.setVisible(has)
-        self._btn_delete.setVisible(has)
+        absent_mode = not has and not self._interactive
+        edit_empty = not has and self._interactive
+
+        self._icon.setVisible(edit_empty)
+        self._field.setVisible(not absent_mode)
+        self._absent.setVisible(absent_mode)
+
+        if absent_mode:
+            self.setStyleSheet(self._SS_BOX_VIEW)
+            self._absent.adjustSize()
+        elif has:
+            name = self._display_name()
+            self.setStyleSheet(self._SS_BOX_EDIT)
+            self._field.setStyleSheet(self._SS_FIELD_TXT_FILE)
+            self._field.setText(f"<u>{name}</u>")
+            self._field.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.setStyleSheet(self._SS_BOX_EDIT)
+            self._field.setStyleSheet(self._SS_FIELD_TXT_EMPTY)
+            self._field.setText("Загрузить документ")
+            self._field.setCursor(Qt.CursorShape.PointingHandCursor)
+
         self.path_changed.emit(self._path)
+
+    def _on_click(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._path:
+            self._on_open()
+        elif self._interactive:
+            self._on_upload()
 
     def _on_upload(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -2288,35 +2408,36 @@ class _MemberDocWidget(QWidget):
         except Exception:
             QMessageBox.warning(self, "Ошибка", "Не удалось открыть файл")
 
-    def _on_delete(self):
+    def delete_path(self):
         self._path = ""
         self._refresh()
 
 
-class _OpdDocWidget(_MemberDocWidget):
-    """Кнопки управления заявлением на обработку персональных данных (ОПД)."""
+def _make_doc_delete_btn(doc_w: "_DocFieldWidget") -> "QPushButton":
+    """Кнопка удаления документа: серая когда пусто, красная когда есть файл."""
+    from PyQt6.QtWidgets import QPushButton as _QB
+    _f = QFont("Material Symbols Rounded")
+    _f.setPixelSize(18)
+    btn = _QB(chr(0xF5A2))
+    btn.setFont(_f)
+    btn.setFixedSize(26, 26)
+    btn.setFlat(True)
+    btn.setCursor(Qt.CursorShape.ArrowCursor)
 
-    def __init__(self, doc_path: str = "", parent=None):
-        super().__init__(
-            doc_path,
-            open_char=chr(0xE8E8),
-            upload_tip="Загрузить заявление на ОПД",
-            open_tip="Открыть заявление на ОПД",
-            parent=parent,
-        )
+    def _sync(path):
+        has = bool(path)
+        btn.setEnabled(has)
+        btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if has else Qt.CursorShape.ArrowCursor)
+        btn.setStyleSheet(
+            "QPushButton{background:transparent;border:none;padding:0;"
+            f"color:{'#DC2626' if has else '#D1D5DB'};}}"
+            + ("QPushButton:hover{color:#B91C1C;}" if has else ""))
 
-
-class _EgrnDocWidget(_MemberDocWidget):
-    """Кнопки управления выпиской ЕГРН участка."""
-
-    def __init__(self, doc_path: str = "", parent=None):
-        super().__init__(
-            doc_path,
-            open_char=chr(0xE73A),  # real_estate_agent
-            upload_tip="Загрузить выписку ЕГРН",
-            open_tip="Открыть выписку ЕГРН",
-            parent=parent,
-        )
+    doc_w.path_changed.connect(_sync)
+    btn.clicked.connect(doc_w.delete_path)
+    _sync(doc_w.get_path())
+    return btn
 
 
 # ============================================================================ #
@@ -2336,8 +2457,10 @@ class GroupEditDialog(QDialog):
         self._cards: list[dict] = []
         self._primary_idx = 0
         self._btn_save = None
-        self._btn_switch_edit: QPushButton | None = None
-        self._edit_mode: bool = is_new  # новая группа сразу в режиме редактирования
+        self._btn_switch_edit: QPushButton | None = None  # удалён, оставлен для совместимости
+        self._footer_view: QWidget | None = None
+        self._footer_edit: QWidget | None = None
+        self._warning: QLabel | None = None
         self._setup_ui()
         self._apply_styles()
 
@@ -2345,18 +2468,6 @@ class GroupEditDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 20, 20, 16)
         lay.setSpacing(10)
-
-        # -- Кнопка перехода в режим редактирования (только для существующей группы) --
-        if not self._is_new:
-            mode_bar = QHBoxLayout()
-            mode_bar.setContentsMargins(0, 0, 0, 0)
-            mode_bar.addStretch()
-            self._btn_switch_edit = QPushButton("✎  Редактировать")
-            self._btn_switch_edit.setObjectName("btnEditMode")
-            self._btn_switch_edit.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._btn_switch_edit.clicked.connect(lambda: self._set_edit_mode(True))
-            mode_bar.addWidget(self._btn_switch_edit)
-            lay.addLayout(mode_bar)
 
         # -- Дата начала группы --
         date_row = QHBoxLayout()
@@ -2427,7 +2538,7 @@ class GroupEditDialog(QDialog):
         sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
         lay.addWidget(sep)
 
-        # Режим просмотра: только "Закрыть"
+        # Футер: только "Закрыть" (сохранение — через per-card кнопки)
         self._footer_view = QWidget()
         fv_lay = QHBoxLayout(self._footer_view)
         fv_lay.setContentsMargins(0, 0, 0, 0)
@@ -2438,63 +2549,69 @@ class GroupEditDialog(QDialog):
         btn_close.clicked.connect(self.reject)
         fv_lay.addWidget(btn_close)
         lay.addWidget(self._footer_view)
+        self._footer_edit = None  # убран; сохранение — per-card
 
-        # Режим редактирования: "Отмена" + "Сохранить"
-        self._footer_edit = QWidget()
-        fe_lay = QHBoxLayout(self._footer_edit)
-        fe_lay.setContentsMargins(0, 0, 0, 0)
-        fe_lay.addStretch()
-        btn_cancel = QPushButton("Отмена")
-        btn_cancel.setObjectName("btnFooterCancel")
-        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_cancel.clicked.connect(self.reject)
-        fe_lay.addWidget(btn_cancel)
-        self._btn_save = QPushButton("Сохранить")
-        self._btn_save.setObjectName("btnFooterSave")
-        self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_save.clicked.connect(self._on_accept)
-        fe_lay.addWidget(self._btn_save)
-        lay.addWidget(self._footer_edit)
+        # Для новой группы — сразу в режим редактирования
+        if self._is_new:
+            for cd in self._cards:
+                self._set_card_edit_mode(cd, True)
+        self._update_edit_footer()
 
-        self._set_edit_mode(self._edit_mode)
+    def _any_editing(self) -> bool:
+        return any(cd.get("is_editing", False) for cd in self._cards)
 
-    def _set_edit_mode(self, mode: bool):
-        self._edit_mode = mode
-        for cd in self._cards:
-            self._set_card_edit_mode(cd, mode)
-        self._has_since.setEnabled(mode)
-        self._since_edit.setEnabled(mode and self._has_since.isChecked())
-        self._btn_add.setVisible(mode)
-        if self._btn_switch_edit is not None:
-            self._btn_switch_edit.setVisible(not mode)
-        self._footer_view.setVisible(not mode)
-        self._footer_edit.setVisible(mode)
+    def _update_edit_footer(self):
+        """Обновляет доступность поля даты по текущему состоянию карточек."""
+        if self._footer_view is None:
+            return  # вызван до завершения _setup_ui
+        editing = self._any_editing()
+        self._has_since.setEnabled(editing)
+        self._since_edit.setEnabled(editing and self._has_since.isChecked())
         self._update_save_state()
 
     def _set_card_edit_mode(self, cd: dict, mode: bool):
+        cd["is_editing"] = mode
         for key in ("name_inp", "phone", "email"):
             cd[key].setReadOnly(not mode)
-        cd["is_owner"].setEnabled(mode)
+        for role_key in ("rb_contact", "rb_owner", "rb_member"):
+            cd[role_key].setInteractive(mode)
         for doc_key in ("opd_doc", "egrn_doc", "member_doc"):
             cd[doc_key].setEnabled(mode)
+        for del_key in ("opd_del", "egrn_del", "member_del"):
+            cd[del_key].setVisible(mode)
+        # btn_edit — всегда виден в развёрнутом виде, стиль меняется через _refresh_btn_edit
+        # btn_del + btn_cancel + btn_save_card — только в режиме редактирования
         cd["btn_del"].setVisible(mode)
+        cd["btn_cancel"].setVisible(mode)
+        cd["btn_save_card"].setVisible(mode)
+        # В режиме редактирования chevron не реагирует — меняем курсор
+        chevron_cursor = Qt.CursorShape.ArrowCursor if mode else Qt.CursorShape.PointingHandCursor
+        cd["chevron"].setCursor(chevron_cursor)
+        self._refresh_btn_edit(cd)
         star = cd["star_btn"]
         if mode:
             if not cd["_is_primary"]:
                 star.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
             star.setCursor(Qt.CursorShape.ArrowCursor)
+        self._update_edit_footer()
+
+    def _on_card_edit_click(self, cd: dict):
+        if cd["is_collapsed"]:
+            self._apply_collapse(cd, collapsed=False)
+        self._set_card_edit_mode(cd, True)
 
     def _on_add_person(self):
-        cd = self._add_owner_card({}, is_primary=not self._cards, expanded=True)
+        cd = self._add_owner_card({}, is_primary=not self._cards, expanded=True,
+                                   start_editing=True)
         # Collapse все остальные
         for other in self._cards:
             if other is not cd and not other["is_collapsed"]:
                 self._apply_collapse(other, collapsed=True)
 
     def _add_owner_card(self, owner: dict, *, is_primary: bool = False,
-                        expanded: bool = False):
-        cd: dict = {"is_collapsed": not expanded}
+                        expanded: bool = False, start_editing: bool = False):
+        cd: dict = {"is_collapsed": not expanded, "is_editing": False}
 
         card = QFrame()
         card.setObjectName("personCard")
@@ -2549,14 +2666,62 @@ class GroupEditDialog(QDialog):
         cd["hdr_lbl"] = hdr_lbl
         hdr_lyt.addWidget(hdr_lbl)
 
-        # Краткое имя (показывается только в свёрнутом состоянии)
+        # ── Левый кластер: кнопка редактирования + отмена + сохранить ──────
+        # (видны только в развёрнутом состоянии)
+
+        btn_edit = QPushButton()
+        btn_edit.setFlat(False)
+        btn_edit.setFixedHeight(26)
+        btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_edit.clicked.connect(lambda _, c=cd: self._on_card_edit_click(c))
+
+        def _edit_enter(e, b=btn_edit, c=cd):
+            if not c.get("is_editing", False):
+                b.setIcon(_mat_icon(0xF88D, 16, fill=1, color="#07414F"))
+            QPushButton.enterEvent(b, e)
+
+        def _edit_leave(e, b=btn_edit, c=cd):
+            if not c.get("is_editing", False):
+                b.setIcon(_mat_icon(0xF88D, 16, fill=0, color="#07414F"))
+            QPushButton.leaveEvent(b, e)
+
+        btn_edit.enterEvent = _edit_enter
+        btn_edit.leaveEvent = _edit_leave
+        cd["btn_edit"] = btn_edit
+        hdr_lyt.addWidget(btn_edit)
+
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.setFixedHeight(26)
+        btn_cancel.setStyleSheet(
+            "QPushButton{background:transparent;color:#6B7280;"
+            "border:1px solid #D1D5DB;border-radius:6px;"
+            "padding:3px 10px;font-size:12px;}"
+            "QPushButton:hover{background:#F3F4F6;border-color:#9CA3AF;}")
+        btn_cancel.clicked.connect(lambda _, c=cd: self._set_card_edit_mode(c, False))
+        cd["btn_cancel"] = btn_cancel
+        hdr_lyt.addWidget(btn_cancel)
+
+        btn_save_card = QPushButton("Сохранить")
+        btn_save_card.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_save_card.setFixedHeight(26)
+        btn_save_card.setStyleSheet(
+            "QPushButton{background:#07414F;color:white;border:none;"
+            "border-radius:6px;padding:3px 10px;font-size:12px;}"
+            "QPushButton:hover{background:#0B5A6E;}"
+            "QPushButton:disabled{background:#E5E7EB;color:#9CA3AF;}")
+        btn_save_card.clicked.connect(self._on_accept)
+        cd["btn_save_card"] = btn_save_card
+        hdr_lyt.addWidget(btn_save_card)
+
+        # ── Краткое имя (только в свёрнутом состоянии) ───────────────────
         name_summary = QLabel()
         name_summary.setStyleSheet("font-size:12px; color:#374151; background:transparent;")
         cd["name_summary"] = name_summary
         hdr_lyt.addWidget(name_summary)
         hdr_lyt.addStretch(1)
 
-        # Теги статуса (свёрнутое состояние)
+        # ── Теги статуса (только в свёрнутом состоянии) ──────────────────
         tags_w = QWidget()
         tags_w.setStyleSheet("background:transparent;")
         tags_lyt = QHBoxLayout(tags_w)
@@ -2577,10 +2742,11 @@ class GroupEditDialog(QDialog):
         cd["tags_w"] = tags_w
         hdr_lyt.addWidget(tags_w)
 
-        btn_del = QPushButton("✕")
+        # ── Правый кластер: "Удалить" (только в режиме редактирования) ───
+        btn_del = QPushButton("Удалить")
         btn_del.setObjectName("btnDelCard")
         btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_del.setFixedSize(22, 22)
+        btn_del.setFixedHeight(26)
         btn_del.clicked.connect(lambda _, c=cd: self._remove_card(c))
         cd["btn_del"] = btn_del
         hdr_lyt.addWidget(btn_del)
@@ -2612,20 +2778,23 @@ class GroupEditDialog(QDialog):
         inner_sep.setStyleSheet("color:#E5E7EB; background:#E5E7EB; max-height:1px;")
         content_lyt.addWidget(inner_sep)
 
-        # Строка 1: ФИО (единое поле)
+        # Строка 1: ФИО
         raw_name = owner.get("name", "") if isinstance(owner, dict) else str(owner or "")
         name_col = QVBoxLayout()
         name_col.setSpacing(3)
-        name_col.addWidget(QLabel("ФИО"))
+        lbl_fio = QLabel("ФИО")
+        lbl_fio.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
+        name_col.addWidget(lbl_fio)
         name_row_h = QHBoxLayout()
-        name_row_h.setSpacing(4)
         name_row_h.setContentsMargins(0, 0, 0, 0)
+        name_row_h.setSpacing(4)
         name_inp = QLineEdit(raw_name)
         name_inp.setPlaceholderText("Фамилия Имя Отчество")
+        name_inp.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         name_inp.textChanged.connect(self._update_save_state)
         name_inp.textChanged.connect(lambda _, c=cd: self._update_name_summary(c))
         name_row_h.addWidget(name_inp)
-        name_row_h.addWidget(_make_copy_btn(name_inp))
+        name_row_h.addWidget(_make_copy_btn(name_inp, lbl_fio))
         name_col.addLayout(name_row_h)
         cd["name_inp"] = name_inp
         content_lyt.addLayout(name_col)
@@ -2641,37 +2810,53 @@ class GroupEditDialog(QDialog):
         ]:
             col = QVBoxLayout()
             col.setSpacing(3)
-            col.addWidget(QLabel(label_txt))
+            lbl_contact = QLabel(label_txt)
+            lbl_contact.setStyleSheet(
+                "font-size:12px; color:#6B7280; background:transparent;")
+            col.addWidget(lbl_contact)
             inp_row = QHBoxLayout()
             inp_row.setSpacing(4)
             inp_row.setContentsMargins(0, 0, 0, 0)
             inp = QLineEdit(val)
             inp.setPlaceholderText(placeholder)
+            inp.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             inp_row.addWidget(inp)
-            inp_row.addWidget(_make_copy_btn(inp))
+            inp_row.addWidget(_make_copy_btn(inp, lbl_contact))
             col.addLayout(inp_row)
             contact_row.addLayout(col, stretch=1)
             cd[key] = inp
         content_lyt.addLayout(contact_row)
 
-        # Строка 3: Статус
-        status_row = QHBoxLayout()
-        status_row.setSpacing(24)
-        is_owner_val = owner.get("is_owner", True) if isinstance(owner, dict) else True
-        chk_owner = QCheckBox("Собственник")
-        chk_owner.setChecked(is_owner_val)
-        chk_owner.stateChanged.connect(lambda _, c=cd: self._update_tags(c))
-        cd["is_owner"] = chk_owner
-        status_row.addWidget(chk_owner)
+        # Строка 3: Роль (взаимоисключающие radio)
+        if isinstance(owner, dict):
+            if owner.get("is_visible", False):   init_role = "contact"
+            elif owner.get("is_owner", False):   init_role = "owner"
+            elif owner.get("is_member", False):  init_role = "member"
+            else:                                init_role = "contact"
+        else:
+            init_role = "contact"
 
-        has_member = bool(owner.get("member_doc", "") if isinstance(owner, dict) else "")
-        chk_member = QCheckBox("Член СНТ")
-        chk_member.setChecked(has_member)
-        chk_member.setEnabled(False)
-        cd["chk_member"] = chk_member
-        status_row.addWidget(chk_member)
-        status_row.addStretch()
-        content_lyt.addLayout(status_row)
+        role_row = QHBoxLayout()
+        role_row.setSpacing(16)
+        role_row.setContentsMargins(0, 0, 0, 0)
+        for role_key, role_lbl in [
+            ("contact", "Контактное лицо"),
+            ("owner",   "Собственник"),
+            ("member",  "Член СНТ"),
+        ]:
+            rb = _IconRadioButton(checked=(init_role == role_key))
+            rb.toggled.connect(lambda rk=role_key, c=cd: self._set_role(c, rk))
+            cd[f"rb_{role_key}"] = rb
+            item_lyt = QHBoxLayout()
+            item_lyt.setSpacing(4)
+            item_lyt.setContentsMargins(0, 0, 0, 0)
+            item_lyt.addWidget(rb)
+            lbl_r = QLabel(role_lbl)
+            lbl_r.setStyleSheet("font-size:12px; color:#374151; background:transparent;")
+            item_lyt.addWidget(lbl_r)
+            role_row.addLayout(item_lyt)
+        role_row.addStretch()
+        content_lyt.addLayout(role_row)
 
         # Строка 4: Документы
         docs_sep = QFrame()
@@ -2688,33 +2873,55 @@ class GroupEditDialog(QDialog):
         egrn_path   = owner.get("egrn_doc", "")   if isinstance(owner, dict) else ""
         member_path = owner.get("member_doc", "")  if isinstance(owner, dict) else ""
 
-        opd_w  = _OpdDocWidget(opd_path)
-        egrn_w = _EgrnDocWidget(egrn_path)
-        mem_w  = _MemberDocWidget(member_path)
+        opd_w  = _DocFieldWidget(opd_path, upload_tip="Загрузить согласие на ОПД")
+        egrn_w = _DocFieldWidget(egrn_path, upload_tip="Загрузить выписку ЕГРН")
+        mem_w  = _DocFieldWidget(member_path, upload_tip="Загрузить заявление в СНТ")
         cd["opd_doc"]    = opd_w
         cd["egrn_doc"]   = egrn_w
         cd["member_doc"] = mem_w
 
-        mem_w.path_changed.connect(
-            lambda path, cm=chk_member, c=cd: (
-                cm.setChecked(bool(path)),
-                self._update_tags(c),
-            )
-        )
+        mem_w.path_changed.connect(lambda path, c=cd: self._update_tags(c))
 
-        for label_txt, widget in [
-            ("Согласие на ОПД:", opd_w),
-            ("Выписка ЕГРН:", egrn_w),
-            ("Заявление на членство:", mem_w),
+        docs_lyt = QVBoxLayout()
+        docs_lyt.setSpacing(8)
+        docs_lyt.setContentsMargins(0, 0, 0, 0)
+
+        # Строка 1: Согласие на ОПД + Выписка ЕГРН (как Телефон/E-mail)
+        docs_row1 = QHBoxLayout()
+        docs_row1.setSpacing(8)
+        docs_row1.setContentsMargins(0, 0, 0, 0)
+        for lbl_txt, doc_w, del_key in [
+            ("Согласие на ОПД", opd_w, "opd_del"),
+            ("Выписка ЕГРН",    egrn_w, "egrn_del"),
         ]:
-            doc_row = QHBoxLayout()
-            lbl = QLabel(label_txt)
-            lbl.setFixedWidth(200)
-            lbl.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
-            doc_row.addWidget(lbl)
-            doc_row.addWidget(widget)
-            doc_row.addStretch()
-            content_lyt.addLayout(doc_row)
+            col = QVBoxLayout()
+            col.setSpacing(3)
+            col.setContentsMargins(0, 0, 0, 0)
+            lbl_d = QLabel(lbl_txt)
+            lbl_d.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
+            col.addWidget(lbl_d)
+            col.addWidget(doc_w)
+            docs_row1.addLayout(col, stretch=1)
+            cd[del_key] = doc_w.del_btn
+        docs_lyt.addLayout(docs_row1)
+
+        # Строка 2: Заявление в СНТ
+        mem_col = QVBoxLayout()
+        mem_col.setSpacing(3)
+        mem_col.setContentsMargins(0, 0, 0, 0)
+        lbl_mem = QLabel("Заявление в СНТ")
+        lbl_mem.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
+        mem_col.addWidget(lbl_mem)
+        mem_col.addWidget(mem_w)
+        docs_row2 = QHBoxLayout()
+        docs_row2.setSpacing(8)
+        docs_row2.setContentsMargins(0, 0, 0, 0)
+        docs_row2.addLayout(mem_col, stretch=1)
+        docs_row2.addStretch(1)
+        docs_lyt.addLayout(docs_row2)
+        cd["member_del"] = mem_w.del_btn
+
+        content_lyt.addLayout(docs_lyt)
 
         card_outer.addWidget(content)
 
@@ -2727,13 +2934,15 @@ class GroupEditDialog(QDialog):
         self._update_tags(cd)
         self._apply_collapse(cd, collapsed=cd["is_collapsed"])
         self._refresh_card_headers()
-        self._set_card_edit_mode(cd, self._edit_mode)
+        self._set_card_edit_mode(cd, start_editing)
         self._update_save_state()
         return cd
 
     # ── Collapse / expand ─────────────────────────────────────────────
 
     def _toggle_card(self, cd: dict):
+        if cd.get("is_editing", False):
+            return  # нельзя свернуть в режиме редактирования
         self._apply_collapse(cd, collapsed=not cd["is_collapsed"])
 
     def _apply_collapse(self, cd: dict, *, collapsed: bool):
@@ -2742,6 +2951,37 @@ class GroupEditDialog(QDialog):
         cd["name_summary"].setVisible(collapsed)
         cd["tags_w"].setVisible(collapsed)
         cd["chevron"].setText(chr(0xE313) if collapsed else chr(0xE316))
+        self._refresh_btn_edit(cd)
+
+    def _refresh_btn_edit(self, cd: dict):
+        """Обновляет btn_edit: скрыт (свёрнуто) / обычный / выделен (редактирование)."""
+        btn = cd["btn_edit"]
+        if cd["is_collapsed"]:
+            btn.setVisible(False)
+            return
+        btn.setVisible(True)
+        editing = cd.get("is_editing", False)
+        btn.setIconSize(QSize(16, 16))
+        btn.setFont(QFont())
+        btn.setText("Редактировать")
+        btn.setMinimumWidth(0)
+        btn.setMaximumWidth(16777215)
+        if editing:
+            btn.setIcon(_mat_icon(0xF88D, 16, fill=1, color="#07414F"))
+            btn.setStyleSheet(
+                "QPushButton{background:#C9D8E2;color:#07414F;"
+                "border:1px solid #07414F;border-radius:6px;"
+                "padding:4px 12px;font-size:12px;}")
+            btn.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            btn.setIcon(_mat_icon(0xF88D, 16, fill=0, color="#07414F"))
+            btn.setStyleSheet(
+                "QPushButton{background:transparent;color:#07414F;"
+                "border:1px solid #C9D8E2;border-radius:6px;"
+                "padding:4px 12px;font-size:12px;}"
+                "QPushButton:hover{background:#EBF4F6;border-color:#07414F;}")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.adjustSize()
 
     # ── Обновление Summary / тегов ────────────────────────────────────
 
@@ -2750,8 +2990,14 @@ class GroupEditDialog(QDialog):
         cd["name_summary"].setText(name)
 
     def _update_tags(self, cd: dict):
-        cd["tag_own"].setVisible(cd["is_owner"].isChecked())
-        cd["tag_mem"].setVisible(cd["chk_member"].isChecked())
+        cd["tag_own"].setVisible(cd["rb_owner"].isChecked())
+        cd["tag_mem"].setVisible(cd["rb_member"].isChecked())
+
+    def _set_role(self, cd: dict, role: str):
+        for key in ("rb_contact", "rb_owner", "rb_member"):
+            if key != f"rb_{role}":
+                cd[key].setChecked(False)
+        self._update_tags(cd)
 
     # ── Сделать главным / удалить ─────────────────────────────────────
 
@@ -2774,7 +3020,7 @@ class GroupEditDialog(QDialog):
         if self._cards and self._primary_idx >= len(self._cards):
             self._primary_idx = 0
         self._refresh_card_headers()
-        self._update_save_state()
+        self._update_edit_footer()
         QTimer.singleShot(0, self.adjustSize)
 
     def _refresh_card_headers(self):
@@ -2806,17 +3052,18 @@ class GroupEditDialog(QDialog):
     # ── Сохранение ────────────────────────────────────────────────────
 
     def _update_save_state(self):
-        if self._btn_save is None:
-            return
+        if self._warning is None:
+            return  # вызван до завершения _setup_ui
         has_any = bool(self._cards)
-        all_named = all(
-            cd["name_inp"].text().strip()
-            for cd in self._cards
-        )
+        all_named = all(cd["name_inp"].text().strip() for cd in self._cards)
         ok = has_any and all_named
-        self._btn_save.setEnabled(ok)
-        self._btn_save.setCursor(
-            Qt.CursorShape.PointingHandCursor if ok else Qt.CursorShape.ArrowCursor)
+        for cd in self._cards:
+            btn = cd.get("btn_save_card")
+            if btn is not None:
+                btn.setEnabled(ok)
+                btn.setCursor(
+                    Qt.CursorShape.PointingHandCursor if ok
+                    else Qt.CursorShape.ArrowCursor)
         if not has_any:
             self._warning.setText("Добавьте хотя бы одно лицо")
         elif not all_named:
@@ -2832,14 +3079,15 @@ class GroupEditDialog(QDialog):
                 continue
             owners.append(_make_owner(
                 name,
-                cd["is_owner"].isChecked(),
+                cd["rb_owner"].isChecked(),
                 None,
-                i == self._primary_idx,
+                cd["rb_contact"].isChecked(),
                 cd["member_doc"].get_path(),
                 cd["opd_doc"].get_path(),
                 cd["phone"].text().strip(),
                 cd["email"].text().strip(),
                 egrn_doc=cd["egrn_doc"].get_path(),
+                is_member=cd["rb_member"].isChecked(),
             ))
 
         since_iso = None
@@ -2877,10 +3125,23 @@ class GroupEditDialog(QDialog):
             }
             QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
             QPushButton#btnDelCard {
-                background: transparent; color: #9CA3AF; border: none;
-                border-radius: 4px; font-size: 12px; font-weight: 600;
+                background: transparent; color: #DC2626;
+                border: 1px solid #FCA5A5; border-radius: 6px;
+                padding: 3px 10px; font-size: 12px;
             }
-            QPushButton#btnDelCard:hover { color: #DC2626; background: #FEE2E2; }
+            QPushButton#btnDelCard:hover { background: #FEE2E2; border-color: #DC2626; }
+            QPushButton#btnCardCancel {
+                background: transparent; color: #6B7280;
+                border: 1px solid #D1D5DB; border-radius: 6px;
+                padding: 3px 10px; font-size: 12px;
+            }
+            QPushButton#btnCardCancel:hover { background: #F3F4F6; border-color: #9CA3AF; }
+            QPushButton#btnCardSave {
+                background: #07414F; color: white; border: none;
+                border-radius: 6px; padding: 3px 10px; font-size: 12px;
+            }
+            QPushButton#btnCardSave:hover { background: #0B5A6E; }
+            QPushButton#btnCardSave:disabled { background: #E5E7EB; color: #9CA3AF; }
             QPushButton#btnChevron {
                 background: transparent; color: #9CA3AF; border: none;
                 border-radius: 4px;
