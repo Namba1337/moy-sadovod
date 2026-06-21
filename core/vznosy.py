@@ -579,6 +579,42 @@ def balances_by_owner(plot: str, area: Optional[float], as_of: date,
     return out
 
 
+# ── баланс активной группы ────────────────────────────────────────────
+
+@dataclass
+class GroupBalance:
+    charged: float
+    paid: float
+    debt: float
+
+
+def balance_for_active_group(plot: str, area: Optional[float], as_of: date,
+                              rates: list, adjustments: dict, df,
+                              since: Optional[date] = None) -> GroupBalance:
+    """Баланс активной группы: только платежи и начисления >= since.
+
+    ``since`` — дата начала активной группы (может быть None для единственной
+    группы без истории). Если None — считается с самого начала (то есть
+    совпадает с balance_for_plot, игнорируя игнорируемые периоды).
+    """
+    breakdown = charged_periods_breakdown(plot, area, as_of, rates, adjustments)
+    charged = sum(
+        y.amount for y in breakdown
+        if y.amount is not None
+        and not y.ignored
+        and (since is None or y.period_from >= since)
+    )
+
+    paid = sum(
+        p["amount"] for p in payments_breakdown(plot, df, adjustments)
+        if p["date"] is not None
+        and p["date"] <= as_of
+        and (since is None or p["date"] >= since)
+    )
+
+    return GroupBalance(charged=charged, paid=paid, debt=charged - paid)
+
+
 # ── палитра для UI ────────────────────────────────────────────────────
 
 def debt_color(debt: float, annual_avg: float = 0.0) -> str:

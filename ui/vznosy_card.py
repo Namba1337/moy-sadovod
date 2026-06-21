@@ -253,7 +253,7 @@ class VznosyCardDialog(QDialog):
             self.owners_table.setColumnWidth(c, w)
         ohdr.setStretchLastSection(True)
         t2_lay.addWidget(self.owners_table, 1)
-        self._owners_tab_idx = self.tabs.addTab(tab2, "Разбивка по собственникам")
+        self._owners_tab_idx = self.tabs.addTab(tab2, "По группам / собственникам")
 
         # Вкладка 3: ручные операции и корректировки
         tab3 = QWidget()
@@ -511,37 +511,82 @@ class VznosyCardDialog(QDialog):
         from core import vznosy
         from core import ownership as own
         rec = energy.plot_record(self._plot)
-        recs = rec.get("owners", []) or []
-        owner_count = sum(1 for o in recs if own.is_owner(o))
-        # Секция нужна, только когда есть что разделять: совладельцы или история.
-        show = owner_count > 1 or own.has_history(recs)
-        self.tabs.setTabVisible(self._owners_tab_idx, show)
-        if not show:
-            return
 
-        rows = vznosy.balances_by_owner(self._plot, area, self._as_of,
-                                        rates, adj, self._df, recs,
-                                        ownership_form=rec.get("ownership_form"))
-        self.owners_table.setRowCount(len(rows))
-        for r, ob in enumerate(rows):
-            status = "текущий" if ob.is_current else "прежний"
-            name_text = f"{ob.name}  ({status})"
-            period_text = self._fmt_ownership_period(ob.since, ob.until)
-            debt_color = ("#DC2626" if ob.debt > 0.005
-                          else ("#059669" if ob.debt < -0.005 else "#6B7280"))
+        # Новая модель: groups
+        groups = own.plot_groups(rec)
+        archived = own.archived_groups(rec)
+        active = own.active_group(rec)
+        has_groups_model = "groups" in rec
+
+        if has_groups_model:
+            # Показываем вкладку, если есть архивные группы
+            show = bool(archived)
+            self.tabs.setTabVisible(self._owners_tab_idx, show)
+            if not show:
+                return
+            # Строки: сначала активная группа, затем архивные (свежие сверху)
+            all_rows = []
+            if active:
+                since = own.group_since(active)
+                try:
+                    gb = vznosy.balance_for_active_group(
+                        self._plot, area, self._as_of, rates, adj, self._df, since=since)
+                    all_rows.append({
+                        "name": own.group_label(active, empty="(нет лиц)"),
+                        "period": self._fmt_ownership_period(since, None),
+                        "charged": gb.charged,
+                        "paid": gb.paid,
+                        "debt": gb.debt,
+                        "is_current": True,
+                    })
+                except Exception:
+                    pass
+            for g in archived:
+                debt_v = (g.get("debt_at_close") or {}).get("vznosy", 0.0) or 0.0
+                all_rows.append({
+                    "name": own.group_label(g, empty="(без ФИО)"),
+                    "period": self._fmt_ownership_period(own.group_since(g), own.group_until(g)),
+                    "charged": None,
+                    "paid": None,
+                    "debt": debt_v,
+                    "is_current": False,
+                })
+        else:
+            # Старая модель: owners-based
+            recs = rec.get("owners", []) or []
+            owner_count = sum(1 for o in recs if own.is_owner(o))
+            show = owner_count > 1 or own.has_history(recs)
+            self.tabs.setTabVisible(self._owners_tab_idx, show)
+            if not show:
+                return
+            ob_rows = vznosy.balances_by_owner(self._plot, area, self._as_of,
+                                               rates, adj, self._df, recs,
+                                               ownership_form=rec.get("ownership_form"))
+            all_rows = [
+                {"name": f"{ob.name}  ({'текущий' if ob.is_current else 'прежний'})",
+                 "period": self._fmt_ownership_period(ob.since, ob.until),
+                 "charged": ob.charged, "paid": ob.paid, "debt": ob.debt,
+                 "is_current": ob.is_current}
+                for ob in ob_rows
+            ]
+
+        self.owners_table.setRowCount(len(all_rows))
+        for r, row in enumerate(all_rows):
+            debt_color = ("#DC2626" if row["debt"] > 0.005
+                          else ("#059669" if row["debt"] < -0.005 else "#6B7280"))
             cells = [
-                (name_text, "#374151" if ob.is_current else "#9CA3AF"),
-                (period_text, "#6B7280"),
-                (fmt_money(ob.charged), "#374151"),
-                (fmt_money(ob.paid), "#059669" if ob.paid else "#9CA3AF"),
-                (fmt_money(ob.debt), debt_color),
+                (row["name"], "#374151" if row["is_current"] else "#9CA3AF"),
+                (row["period"], "#6B7280"),
+                (fmt_money(row["charged"]) if row["charged"] is not None else "—", "#374151"),
+                (fmt_money(row["paid"]) if row["paid"] is not None else "—",
+                 "#059669" if row.get("paid") else "#9CA3AF"),
+                (fmt_money(row["debt"]), debt_color),
             ]
             for c, (text, color) in enumerate(cells):
                 it = QTableWidgetItem(text)
-                if c == 0:
-                    it.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                else:
-                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+                it.setTextAlignment(
+                    (Qt.AlignmentFlag.AlignLeft if c == 0 else Qt.AlignmentFlag.AlignCenter)
+                    | Qt.AlignmentFlag.AlignVCenter)
                 if color:
                     it.setForeground(QColor(color))
                 it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)

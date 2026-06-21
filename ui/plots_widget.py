@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout,
     QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QMessageBox, QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTableWidget, QTableWidgetItem, QTreeView, QVBoxLayout, QWidget,
 )
 
@@ -56,6 +56,60 @@ def _owner_member_doc(owner) -> str:
     return ""
 
 
+def _split_name(full_name: str) -> tuple:
+    """'Иванов Иван Иванович' → ('Иванов', 'Иван', 'Иванович')."""
+    parts = (full_name or "").strip().split(maxsplit=2)
+    return (parts[0] if parts else "",
+            parts[1] if len(parts) > 1 else "",
+            parts[2] if len(parts) > 2 else "")
+
+
+def _mat_font(pixel_size: int = 20, fill: int = 0) -> QFont:
+    """Material Symbols Rounded с нужным FILL axis (0=outline, 1=filled)."""
+    f = QFont("Material Symbols Rounded")
+    f.setPixelSize(pixel_size)
+    try:
+        f.setVariableAxis(QFont.Tag(b"FILL"), float(fill))
+    except Exception:
+        pass
+    return f
+
+
+_F_STAR_OUTLINE  = _mat_font(20, fill=0)
+_F_STAR_FILLED   = _mat_font(20, fill=1)
+_F_CHEVRON       = _mat_font(18, fill=0)
+_F_COPY_OUTLINE  = _mat_font(18, fill=0)
+_F_COPY_FILLED   = _mat_font(18, fill=1)
+
+
+def _make_copy_btn(target_inp) -> "QPushButton":
+    from PyQt6.QtWidgets import QPushButton as _QB
+    btn = _QB(chr(0xE2EC))
+    btn.setFont(_F_COPY_OUTLINE)
+    btn.setFixedSize(26, 26)
+    btn.setFlat(True)
+    btn.setStyleSheet(
+        "QPushButton{background:transparent;border:none;color:#C9D8E2;padding:0;}")
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _enter(e, b=btn):
+        b.setFont(_F_COPY_FILLED)
+        b.setStyleSheet(
+            "QPushButton{background:transparent;border:none;color:#07414F;padding:0;}")
+        _QB.enterEvent(b, e)
+
+    def _leave(e, b=btn):
+        b.setFont(_F_COPY_OUTLINE)
+        b.setStyleSheet(
+            "QPushButton{background:transparent;border:none;color:#C9D8E2;padding:0;}")
+        _QB.leaveEvent(b, e)
+
+    btn.enterEvent = _enter
+    btn.leaveEvent = _leave
+    btn.clicked.connect(lambda: QApplication.clipboard().setText(target_inp.text()))
+    return btn
+
+
 def _owner_opd_doc(owner) -> str:
     if isinstance(owner, dict):
         return owner.get("opd_doc", "")
@@ -78,7 +132,7 @@ def _make_owner(name: str, is_owner: bool = True, area: float | None = None,
                 is_visible: bool = False, member_doc: str = "",
                 opd_doc: str = "", phone: str = "",
                 email: str = "", since: str = "", until: str = "",
-                share: str = "") -> dict:
+                share: str = "", egrn_doc: str = "") -> dict:
     d: dict = {"name": name, "is_owner": is_owner}
     if area is not None:
         d["area"] = area
@@ -88,12 +142,12 @@ def _make_owner(name: str, is_owner: bool = True, area: float | None = None,
         d["member_doc"] = member_doc
     if opd_doc:
         d["opd_doc"] = opd_doc
+    if egrn_doc:
+        d["egrn_doc"] = egrn_doc
     if phone:
         d["phone"] = phone
     if email:
         d["email"] = email
-    # Поля истории владения (могут быть проставлены мастером «Сменить
-    # собственника»). Сохраняем как есть, чтобы редактор контактов их не терял.
     if since:
         d["since"] = since
     if until:
@@ -2152,6 +2206,7 @@ class _MemberDocWidget(QWidget):
                               + contract_delete (удалить).
     Иконка кнопки «открыть» и тексты подсказок задаются через keyword-параметры.
     """
+    path_changed = pyqtSignal(str)
 
     def __init__(self, doc_path: str = "", *,
                  open_char: str = chr(0xF565),
@@ -2213,6 +2268,7 @@ class _MemberDocWidget(QWidget):
         self._btn_open.setVisible(has)
         self._btn_replace.setVisible(has)
         self._btn_delete.setVisible(has)
+        self.path_changed.emit(self._path)
 
     def _on_upload(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -2264,54 +2320,795 @@ class _EgrnDocWidget(_MemberDocWidget):
 
 
 # ============================================================================ #
+#  GroupEditDialog — редактор состава одной группы                            #
+# ============================================================================ #
+
+class GroupEditDialog(QDialog):
+    """Редактор состава группы — сворачиваемые карточки."""
+
+    def __init__(self, group: dict, is_new: bool = False, parent=None):
+        super().__init__(parent)
+        self._group = group
+        self._is_new = is_new
+        self.setWindowTitle("Новая группа" if is_new else "Состав группы")
+        self.setMinimumWidth(640)
+        self.setModal(True)
+        self._cards: list[dict] = []
+        self._primary_idx = 0
+        self._btn_save = None
+        self._btn_switch_edit: QPushButton | None = None
+        self._edit_mode: bool = is_new  # новая группа сразу в режиме редактирования
+        self._setup_ui()
+        self._apply_styles()
+
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 20, 20, 16)
+        lay.setSpacing(10)
+
+        # -- Кнопка перехода в режим редактирования (только для существующей группы) --
+        if not self._is_new:
+            mode_bar = QHBoxLayout()
+            mode_bar.setContentsMargins(0, 0, 0, 0)
+            mode_bar.addStretch()
+            self._btn_switch_edit = QPushButton("✎  Редактировать")
+            self._btn_switch_edit.setObjectName("btnEditMode")
+            self._btn_switch_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_switch_edit.clicked.connect(lambda: self._set_edit_mode(True))
+            mode_bar.addWidget(self._btn_switch_edit)
+            lay.addLayout(mode_bar)
+
+        # -- Дата начала группы --
+        date_row = QHBoxLayout()
+        date_row.setSpacing(10)
+        lbl_since = QLabel("Дата начала группы:")
+        lbl_since.setStyleSheet("color:#374151; font-size:13px;")
+        date_row.addWidget(lbl_since)
+        self._has_since = QCheckBox("Указать дату")
+        since_val = ownership.group_since(self._group)
+        self._has_since.setChecked(since_val is not None)
+        date_row.addWidget(self._has_since)
+        self._since_edit = QDateEdit(calendarPopup=True)
+        self._since_edit.setDisplayFormat("dd.MM.yyyy")
+        if since_val:
+            self._since_edit.setDate(QDate(since_val.year, since_val.month, since_val.day))
+        else:
+            self._since_edit.setDate(QDate.currentDate())
+        self._since_edit.setEnabled(since_val is not None)
+        self._has_since.toggled.connect(self._since_edit.setEnabled)
+        date_row.addWidget(self._since_edit)
+        date_row.addStretch()
+        lay.addLayout(date_row)
+
+        # -- Scroll area for person cards --
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self._cards_container = QWidget()
+        self._cards_container.setStyleSheet("background:transparent;")
+        self._cards_vlay = QVBoxLayout(self._cards_container)
+        self._cards_vlay.setSpacing(6)
+        self._cards_vlay.setContentsMargins(0, 0, 4, 0)
+        self._cards_vlay.addStretch()
+
+        scroll.setWidget(self._cards_container)
+        scroll.setMinimumHeight(280)
+        lay.addWidget(scroll, stretch=1)
+
+        # Загружаем существующих участников
+        owners = ownership.group_owners(self._group)
+        primary_idx = 0
+        for i, o in enumerate(owners):
+            if isinstance(o, dict) and o.get("is_visible"):
+                primary_idx = i
+                break
+        for i, o in enumerate(owners):
+            self._add_owner_card(o, is_primary=(i == primary_idx),
+                                 expanded=(i == primary_idx))
+        self._primary_idx = primary_idx
+
+        # -- Кнопка добавить --
+        self._btn_add = QPushButton("＋  Добавить лицо")
+        self._btn_add.setObjectName("btnSecondary")
+        self._btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_add.clicked.connect(self._on_add_person)
+        lay.addWidget(self._btn_add)
+
+        # -- Предупреждение --
+        self._warning = QLabel()
+        self._warning.setStyleSheet("color:#DC2626; background:transparent; font-size:12px;")
+        self._warning.setWordWrap(True)
+        lay.addWidget(self._warning)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
+        lay.addWidget(sep)
+
+        # Режим просмотра: только "Закрыть"
+        self._footer_view = QWidget()
+        fv_lay = QHBoxLayout(self._footer_view)
+        fv_lay.setContentsMargins(0, 0, 0, 0)
+        fv_lay.addStretch()
+        btn_close = QPushButton("Закрыть")
+        btn_close.setObjectName("btnFooterClose")
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.clicked.connect(self.reject)
+        fv_lay.addWidget(btn_close)
+        lay.addWidget(self._footer_view)
+
+        # Режим редактирования: "Отмена" + "Сохранить"
+        self._footer_edit = QWidget()
+        fe_lay = QHBoxLayout(self._footer_edit)
+        fe_lay.setContentsMargins(0, 0, 0, 0)
+        fe_lay.addStretch()
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setObjectName("btnFooterCancel")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.clicked.connect(self.reject)
+        fe_lay.addWidget(btn_cancel)
+        self._btn_save = QPushButton("Сохранить")
+        self._btn_save.setObjectName("btnFooterSave")
+        self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_save.clicked.connect(self._on_accept)
+        fe_lay.addWidget(self._btn_save)
+        lay.addWidget(self._footer_edit)
+
+        self._set_edit_mode(self._edit_mode)
+
+    def _set_edit_mode(self, mode: bool):
+        self._edit_mode = mode
+        for cd in self._cards:
+            self._set_card_edit_mode(cd, mode)
+        self._has_since.setEnabled(mode)
+        self._since_edit.setEnabled(mode and self._has_since.isChecked())
+        self._btn_add.setVisible(mode)
+        if self._btn_switch_edit is not None:
+            self._btn_switch_edit.setVisible(not mode)
+        self._footer_view.setVisible(not mode)
+        self._footer_edit.setVisible(mode)
+        self._update_save_state()
+
+    def _set_card_edit_mode(self, cd: dict, mode: bool):
+        for key in ("name_inp", "phone", "email"):
+            cd[key].setReadOnly(not mode)
+        cd["is_owner"].setEnabled(mode)
+        for doc_key in ("opd_doc", "egrn_doc", "member_doc"):
+            cd[doc_key].setEnabled(mode)
+        cd["btn_del"].setVisible(mode)
+        star = cd["star_btn"]
+        if mode:
+            if not cd["_is_primary"]:
+                star.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            star.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _on_add_person(self):
+        cd = self._add_owner_card({}, is_primary=not self._cards, expanded=True)
+        # Collapse все остальные
+        for other in self._cards:
+            if other is not cd and not other["is_collapsed"]:
+                self._apply_collapse(other, collapsed=True)
+
+    def _add_owner_card(self, owner: dict, *, is_primary: bool = False,
+                        expanded: bool = False):
+        cd: dict = {"is_collapsed": not expanded}
+
+        card = QFrame()
+        card.setObjectName("personCard")
+        card_outer = QVBoxLayout(card)
+        card_outer.setContentsMargins(0, 0, 0, 0)
+        card_outer.setSpacing(0)
+        cd["widget"] = card
+
+        # ── Заголовок (всегда виден) ─────────────────────────────────────
+        hdr_w = QWidget()
+        hdr_w.setStyleSheet("background:transparent;")
+        hdr_lyt = QHBoxLayout(hdr_w)
+        hdr_lyt.setContentsMargins(10, 8, 10, 8)
+        hdr_lyt.setSpacing(6)
+
+        # Звёздочка — выбор главного (слева от ФИО)
+        # FILL=0 → outline, FILL=1 → filled (Material Symbols variable font)
+        star_btn = QPushButton(chr(0xE838))
+        star_btn.setFont(_F_STAR_OUTLINE)
+        star_btn.setFixedSize(26, 26)
+        star_btn.setFlat(True)
+        star_btn.setStyleSheet(
+            "QPushButton{background:transparent;border:none;color:#C9D8E2;padding:0;}")
+        star_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        star_btn.clicked.connect(lambda _, c=cd: self._set_primary(c))
+        cd["star_btn"] = star_btn
+        cd["_is_primary"] = False
+
+        def _star_enter(e, btn=star_btn, c=cd):
+            if not c["_is_primary"]:
+                btn.setFont(_F_STAR_FILLED)
+                btn.setStyleSheet(
+                    "QPushButton{background:transparent;border:none;"
+                    "color:#07414F;padding:0;}")
+            QWidget.enterEvent(btn, e)
+
+        def _star_leave(e, btn=star_btn, c=cd):
+            if not c["_is_primary"]:
+                btn.setFont(_F_STAR_OUTLINE)
+                btn.setStyleSheet(
+                    "QPushButton{background:transparent;border:none;"
+                    "color:#C9D8E2;padding:0;}")
+            QWidget.leaveEvent(btn, e)
+
+        star_btn.enterEvent = _star_enter
+        star_btn.leaveEvent = _star_leave
+        hdr_lyt.addWidget(star_btn)
+
+        # Метка роли (видна только у главного)
+        hdr_lbl = QLabel()
+        hdr_lbl.setStyleSheet("font-size:12px; font-weight:600; background:transparent;")
+        cd["hdr_lbl"] = hdr_lbl
+        hdr_lyt.addWidget(hdr_lbl)
+
+        # Краткое имя (показывается только в свёрнутом состоянии)
+        name_summary = QLabel()
+        name_summary.setStyleSheet("font-size:12px; color:#374151; background:transparent;")
+        cd["name_summary"] = name_summary
+        hdr_lyt.addWidget(name_summary)
+        hdr_lyt.addStretch(1)
+
+        # Теги статуса (свёрнутое состояние)
+        tags_w = QWidget()
+        tags_w.setStyleSheet("background:transparent;")
+        tags_lyt = QHBoxLayout(tags_w)
+        tags_lyt.setContentsMargins(0, 0, 0, 0)
+        tags_lyt.setSpacing(4)
+        tag_own = QLabel("Собственник")
+        tag_own.setStyleSheet(
+            "font-size:10px; padding:1px 7px; border-radius:99px;"
+            "background:#C9D8E2; color:#07414F;")
+        tag_mem = QLabel("Член СНТ")
+        tag_mem.setStyleSheet(
+            "font-size:10px; padding:1px 7px; border-radius:99px;"
+            "background:#D6EBD5; color:#2E7D32;")
+        tags_lyt.addWidget(tag_own)
+        tags_lyt.addWidget(tag_mem)
+        cd["tag_own"] = tag_own
+        cd["tag_mem"] = tag_mem
+        cd["tags_w"] = tags_w
+        hdr_lyt.addWidget(tags_w)
+
+        btn_del = QPushButton("✕")
+        btn_del.setObjectName("btnDelCard")
+        btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_del.setFixedSize(22, 22)
+        btn_del.clicked.connect(lambda _, c=cd: self._remove_card(c))
+        cd["btn_del"] = btn_del
+        hdr_lyt.addWidget(btn_del)
+
+        chevron = QPushButton()
+        chevron.setObjectName("btnChevron")
+        chevron.setFont(_F_CHEVRON)
+        chevron.setCursor(Qt.CursorShape.PointingHandCursor)
+        chevron.setFixedSize(22, 22)
+        chevron.clicked.connect(lambda _, c=cd: self._toggle_card(c))
+        cd["chevron"] = chevron
+        hdr_lyt.addWidget(chevron)
+
+        # Клик по заголовку (не по кнопкам) сворачивает/раскрывает
+        hdr_w.mousePressEvent = lambda ev, c=cd: self._toggle_card(c)
+        card_outer.addWidget(hdr_w)
+
+        # ── Содержимое (сворачивается) ────────────────────────────────────
+        content = QWidget()
+        content.setStyleSheet("background:transparent;")
+        content_lyt = QVBoxLayout(content)
+        content_lyt.setContentsMargins(14, 2, 14, 14)
+        content_lyt.setSpacing(8)
+        cd["content"] = content
+
+        # Разделитель между заголовком и содержимым
+        inner_sep = QFrame()
+        inner_sep.setFrameShape(QFrame.Shape.HLine)
+        inner_sep.setStyleSheet("color:#E5E7EB; background:#E5E7EB; max-height:1px;")
+        content_lyt.addWidget(inner_sep)
+
+        # Строка 1: ФИО (единое поле)
+        raw_name = owner.get("name", "") if isinstance(owner, dict) else str(owner or "")
+        name_col = QVBoxLayout()
+        name_col.setSpacing(3)
+        name_col.addWidget(QLabel("ФИО"))
+        name_row_h = QHBoxLayout()
+        name_row_h.setSpacing(4)
+        name_row_h.setContentsMargins(0, 0, 0, 0)
+        name_inp = QLineEdit(raw_name)
+        name_inp.setPlaceholderText("Фамилия Имя Отчество")
+        name_inp.textChanged.connect(self._update_save_state)
+        name_inp.textChanged.connect(lambda _, c=cd: self._update_name_summary(c))
+        name_row_h.addWidget(name_inp)
+        name_row_h.addWidget(_make_copy_btn(name_inp))
+        name_col.addLayout(name_row_h)
+        cd["name_inp"] = name_inp
+        content_lyt.addLayout(name_col)
+
+        # Строка 2: Телефон / E-mail
+        contact_row = QHBoxLayout()
+        contact_row.setSpacing(8)
+        phone_val = owner.get("phone", "") if isinstance(owner, dict) else ""
+        email_val = owner.get("email", "") if isinstance(owner, dict) else ""
+        for label_txt, placeholder, val, key in [
+            ("Телефон", "+7 (xxx) xxx-xx-xx", phone_val, "phone"),
+            ("E-mail", "email@example.com", email_val, "email"),
+        ]:
+            col = QVBoxLayout()
+            col.setSpacing(3)
+            col.addWidget(QLabel(label_txt))
+            inp_row = QHBoxLayout()
+            inp_row.setSpacing(4)
+            inp_row.setContentsMargins(0, 0, 0, 0)
+            inp = QLineEdit(val)
+            inp.setPlaceholderText(placeholder)
+            inp_row.addWidget(inp)
+            inp_row.addWidget(_make_copy_btn(inp))
+            col.addLayout(inp_row)
+            contact_row.addLayout(col, stretch=1)
+            cd[key] = inp
+        content_lyt.addLayout(contact_row)
+
+        # Строка 3: Статус
+        status_row = QHBoxLayout()
+        status_row.setSpacing(24)
+        is_owner_val = owner.get("is_owner", True) if isinstance(owner, dict) else True
+        chk_owner = QCheckBox("Собственник")
+        chk_owner.setChecked(is_owner_val)
+        chk_owner.stateChanged.connect(lambda _, c=cd: self._update_tags(c))
+        cd["is_owner"] = chk_owner
+        status_row.addWidget(chk_owner)
+
+        has_member = bool(owner.get("member_doc", "") if isinstance(owner, dict) else "")
+        chk_member = QCheckBox("Член СНТ")
+        chk_member.setChecked(has_member)
+        chk_member.setEnabled(False)
+        cd["chk_member"] = chk_member
+        status_row.addWidget(chk_member)
+        status_row.addStretch()
+        content_lyt.addLayout(status_row)
+
+        # Строка 4: Документы
+        docs_sep = QFrame()
+        docs_sep.setFrameShape(QFrame.Shape.HLine)
+        docs_sep.setStyleSheet("color:#E5E7EB; background:#E5E7EB; max-height:1px;")
+        content_lyt.addWidget(docs_sep)
+
+        docs_hdr = QLabel("Документы")
+        docs_hdr.setStyleSheet(
+            "font-size:11px; font-weight:600; color:#9CA3AF; background:transparent;")
+        content_lyt.addWidget(docs_hdr)
+
+        opd_path    = owner.get("opd_doc", "")    if isinstance(owner, dict) else ""
+        egrn_path   = owner.get("egrn_doc", "")   if isinstance(owner, dict) else ""
+        member_path = owner.get("member_doc", "")  if isinstance(owner, dict) else ""
+
+        opd_w  = _OpdDocWidget(opd_path)
+        egrn_w = _EgrnDocWidget(egrn_path)
+        mem_w  = _MemberDocWidget(member_path)
+        cd["opd_doc"]    = opd_w
+        cd["egrn_doc"]   = egrn_w
+        cd["member_doc"] = mem_w
+
+        mem_w.path_changed.connect(
+            lambda path, cm=chk_member, c=cd: (
+                cm.setChecked(bool(path)),
+                self._update_tags(c),
+            )
+        )
+
+        for label_txt, widget in [
+            ("Согласие на ОПД:", opd_w),
+            ("Выписка ЕГРН:", egrn_w),
+            ("Заявление на членство:", mem_w),
+        ]:
+            doc_row = QHBoxLayout()
+            lbl = QLabel(label_txt)
+            lbl.setFixedWidth(200)
+            lbl.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
+            doc_row.addWidget(lbl)
+            doc_row.addWidget(widget)
+            doc_row.addStretch()
+            content_lyt.addLayout(doc_row)
+
+        card_outer.addWidget(content)
+
+        # Вставляем до stretch
+        insert_idx = self._cards_vlay.count() - 1
+        self._cards_vlay.insertWidget(insert_idx, card)
+        self._cards.append(cd)
+
+        self._update_name_summary(cd)
+        self._update_tags(cd)
+        self._apply_collapse(cd, collapsed=cd["is_collapsed"])
+        self._refresh_card_headers()
+        self._set_card_edit_mode(cd, self._edit_mode)
+        self._update_save_state()
+        return cd
+
+    # ── Collapse / expand ─────────────────────────────────────────────
+
+    def _toggle_card(self, cd: dict):
+        self._apply_collapse(cd, collapsed=not cd["is_collapsed"])
+
+    def _apply_collapse(self, cd: dict, *, collapsed: bool):
+        cd["is_collapsed"] = collapsed
+        cd["content"].setVisible(not collapsed)
+        cd["name_summary"].setVisible(collapsed)
+        cd["tags_w"].setVisible(collapsed)
+        cd["chevron"].setText(chr(0xE313) if collapsed else chr(0xE316))
+
+    # ── Обновление Summary / тегов ────────────────────────────────────
+
+    def _update_name_summary(self, cd: dict):
+        name = cd["name_inp"].text().strip() or "(без имени)"
+        cd["name_summary"].setText(name)
+
+    def _update_tags(self, cd: dict):
+        cd["tag_own"].setVisible(cd["is_owner"].isChecked())
+        cd["tag_mem"].setVisible(cd["chk_member"].isChecked())
+
+    # ── Сделать главным / удалить ─────────────────────────────────────
+
+    def _set_primary(self, card_data: dict):
+        if card_data not in self._cards:
+            return
+        idx = self._cards.index(card_data)
+        if idx != 0:
+            self._cards.pop(idx)
+            self._cards.insert(0, card_data)
+            self._cards_vlay.insertWidget(0, card_data["widget"])
+        self._primary_idx = 0
+        self._refresh_card_headers()
+
+    def _remove_card(self, card_data: dict):
+        idx = self._cards.index(card_data)
+        card_data["widget"].setParent(None)
+        card_data["widget"].deleteLater()
+        self._cards.pop(idx)
+        if self._cards and self._primary_idx >= len(self._cards):
+            self._primary_idx = 0
+        self._refresh_card_headers()
+        self._update_save_state()
+        QTimer.singleShot(0, self.adjustSize)
+
+    def _refresh_card_headers(self):
+        for i, cd in enumerate(self._cards):
+            is_primary = (i == self._primary_idx)
+            cd["_is_primary"] = is_primary
+            star = cd["star_btn"]
+            if is_primary:
+                star.setFont(_F_STAR_FILLED)
+                star.setStyleSheet(
+                    "QPushButton{background:transparent;border:none;"
+                    "color:#07414F;padding:0;}")
+                star.setCursor(Qt.CursorShape.ArrowCursor)
+                cd["hdr_lbl"].setVisible(False)
+                cd["widget"].setStyleSheet(
+                    "QFrame#personCard{"
+                    "background:#EBF4F6;border:1.5px solid #C9D8E2;border-radius:10px;}")
+            else:
+                star.setFont(_F_STAR_OUTLINE)
+                star.setStyleSheet(
+                    "QPushButton{background:transparent;border:none;"
+                    "color:#C9D8E2;padding:0;}")
+                star.setCursor(Qt.CursorShape.PointingHandCursor)
+                cd["hdr_lbl"].setVisible(False)
+                cd["widget"].setStyleSheet(
+                    "QFrame#personCard{"
+                    "background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;}")
+
+    # ── Сохранение ────────────────────────────────────────────────────
+
+    def _update_save_state(self):
+        if self._btn_save is None:
+            return
+        has_any = bool(self._cards)
+        all_named = all(
+            cd["name_inp"].text().strip()
+            for cd in self._cards
+        )
+        ok = has_any and all_named
+        self._btn_save.setEnabled(ok)
+        self._btn_save.setCursor(
+            Qt.CursorShape.PointingHandCursor if ok else Qt.CursorShape.ArrowCursor)
+        if not has_any:
+            self._warning.setText("Добавьте хотя бы одно лицо")
+        elif not all_named:
+            self._warning.setText("Заполните хотя бы фамилию или имя для каждого лица")
+        else:
+            self._warning.setText("")
+
+    def _on_accept(self):
+        owners = []
+        for i, cd in enumerate(self._cards):
+            name = cd["name_inp"].text().strip()
+            if not name:
+                continue
+            owners.append(_make_owner(
+                name,
+                cd["is_owner"].isChecked(),
+                None,
+                i == self._primary_idx,
+                cd["member_doc"].get_path(),
+                cd["opd_doc"].get_path(),
+                cd["phone"].text().strip(),
+                cd["email"].text().strip(),
+                egrn_doc=cd["egrn_doc"].get_path(),
+            ))
+
+        since_iso = None
+        if self._has_since.isChecked():
+            since_iso = self._since_edit.date().toPyDate().isoformat()
+
+        result = dict(self._group)
+        result["owners"] = owners
+        result["since"] = since_iso
+        self._result = result
+        self.accept()
+
+    def get_result(self) -> dict:
+        return getattr(self, "_result", dict(self._group))
+
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            QDialog { background: #FFFFFF; color: #374151; }
+            QLabel  { background: transparent; color: #374151; font-size: 13px; }
+            QCheckBox { background: transparent; font-size: 13px; color: #374151; }
+            QScrollArea { background: transparent; border: none; }
+            QScrollArea > QWidget > QWidget { background: transparent; }
+            QLineEdit {
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 6px 10px; font-size: 13px;
+            }
+            QLineEdit:focus { border: 1px solid #07414F; }
+            QDateEdit {
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
+            }
+            QPushButton#btnSecondary {
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
+                border-radius: 6px; padding: 7px 14px; font-size: 13px;
+            }
+            QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
+            QPushButton#btnDelCard {
+                background: transparent; color: #9CA3AF; border: none;
+                border-radius: 4px; font-size: 12px; font-weight: 600;
+            }
+            QPushButton#btnDelCard:hover { color: #DC2626; background: #FEE2E2; }
+            QPushButton#btnChevron {
+                background: transparent; color: #9CA3AF; border: none;
+                border-radius: 4px;
+            }
+            QPushButton#btnChevron:hover { color: #374151; }
+            QDialogButtonBox QPushButton {
+                background: #07414F; color: white; border: none;
+                border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
+            }
+            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
+            QDialogButtonBox QPushButton:disabled { background: #E5E7EB; color: #9CA3AF; }
+            QDialogButtonBox QPushButton[text='Отмена'] {
+                background: #E5E7EB; color: #6B7280;
+            }
+            QDialogButtonBox QPushButton[text='Отмена']:hover {
+                background: #D1D5DB; color: #374151;
+            }
+        """)
+
+# ============================================================================ #
+#  GroupArchiveDialog — список архивных групп                                 #
+# ============================================================================ #
+
+class GroupArchiveDialog(QDialog):
+    """Диалог со списком всех архивных групп участка.
+
+    Позволяет просмотреть историю и при необходимости сделать группу активной
+    (что архивирует текущую активную). Сигнал ``groups_changed`` испускается,
+    если пользователь изменил состав групп.
+    """
+
+    groups_changed = pyqtSignal(list)  # новый список groups
+
+    def __init__(self, plot_data: dict, active_group: dict, df=None, parent=None):
+        super().__init__(parent)
+        self._plot_data = plot_data
+        self._active_group = active_group
+        self._df = df
+        self._groups = list(ownership.plot_groups(plot_data))
+        self.setWindowTitle("Архив групп")
+        self.setMinimumWidth(680)
+        self.setModal(True)
+        self._setup_ui()
+        self._apply_styles()
+
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(12)
+
+        title = QLabel("Архивные группы участка")
+        title.setStyleSheet(
+            "font-size:15px; font-weight:600; color:#374151; background:transparent;")
+        lay.addWidget(title)
+
+        archived = ownership.archived_groups({"groups": self._groups})
+        if not archived:
+            lbl = QLabel("Архивных групп нет.")
+            lbl.setStyleSheet("color:#9CA3AF; background:transparent; font-size:13px;")
+            lay.addWidget(lbl)
+        else:
+            for group in archived:
+                lay.addWidget(self._make_group_row(group))
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
+        lay.addWidget(sep)
+
+        close_btn = QPushButton("Закрыть")
+        close_btn.setObjectName("btnSecondary")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.reject)
+        lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+    def _make_group_row(self, group: dict) -> QWidget:
+        card = QFrame()
+        card.setStyleSheet(
+            "QFrame{background:#F8F9FA;border:1px solid #E5E7EB;border-radius:8px;}"
+        )
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(14, 12, 14, 12)
+        cl.setSpacing(6)
+
+        names = ownership.group_label(group, empty="(без ФИО)")
+        since = ownership.group_since(group)
+        until = ownership.group_until(group)
+        since_txt = since.strftime("%d.%m.%Y") if since else "начало"
+        until_txt = until.strftime("%d.%m.%Y") if until else "—"
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        name_lbl = QLabel(names)
+        name_lbl.setStyleSheet(
+            "font-size:13px; font-weight:600; color:#374151; background:transparent;")
+        name_lbl.setWordWrap(True)
+        top_row.addWidget(name_lbl, stretch=1)
+        period_lbl = QLabel(f"{since_txt} — {until_txt}")
+        period_lbl.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        top_row.addWidget(period_lbl)
+        cl.addLayout(top_row)
+
+        debt_v = (group.get("debt_at_close") or {}).get("vznosy")
+        debt_e = (group.get("debt_at_close") or {}).get("energy")
+        if debt_v is not None or debt_e is not None:
+            from core.utils import fmt_money
+            parts = []
+            if debt_v is not None:
+                parts.append(f"ЧВ: {fmt_money(debt_v)}")
+            if debt_e is not None:
+                parts.append(f"Электр.: {fmt_money(debt_e)}")
+            debt_lbl = QLabel("Долг на дату закрытия: " + "  ·  ".join(parts))
+            debt_lbl.setStyleSheet(
+                "font-size:12px; color:#6B7280; background:transparent;")
+            cl.addWidget(debt_lbl)
+
+        return card
+
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            QDialog { background: #FFFFFF; color: #374151; }
+            QLabel  { background: transparent; color: #374151; font-size: 13px; }
+            QLineEdit {
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 6px 10px; font-size: 13px;
+            }
+            QLineEdit:focus { border: 1px solid #07414F; }
+            QLineEdit[readOnly="true"] {
+                background: transparent; border: none;
+                color: #374151; padding: 6px 0;
+            }
+            QPushButton#btnSecondary {
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
+                border-radius: 6px; padding: 7px 14px; font-size: 13px;
+            }
+            QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
+            QPushButton#btnEditMode {
+                background: transparent; color: #07414F;
+                border: 1.5px solid #C9D8E2; border-radius: 6px;
+                padding: 5px 14px; font-size: 12px;
+            }
+            QPushButton#btnEditMode:hover { background: #EBF4F6; border-color: #07414F; }
+            QPushButton#btnFooterSave {
+                background: #07414F; color: white; border: none;
+                border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
+            }
+            QPushButton#btnFooterSave:hover { background: #0B5A6E; }
+            QPushButton#btnFooterSave:disabled { background: #E5E7EB; color: #9CA3AF; }
+            QPushButton#btnFooterClose, QPushButton#btnFooterCancel {
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
+                border-radius: 6px; padding: 8px 20px; font-size: 13px;
+            }
+            QPushButton#btnFooterClose:hover, QPushButton#btnFooterCancel:hover {
+                background: #D1D5DB; color: #374151;
+            }
+        """)
+
+
+# ============================================================================ #
 #  PlotEditDialog                                                              #
 # ============================================================================ #
 
 class PlotEditDialog(QDialog):
-    """Диалог добавления / редактирования участка."""
+    """Диалог добавления / редактирования участка (модель групп)."""
 
     _IC_FONT = "Material Symbols Rounded"
 
     def __init__(self, plot_data: dict | None = None, parent=None, df=None):
         super().__init__(parent)
         self._is_edit = plot_data is not None
-        self._plot_data = plot_data or {}
+        self._plot_data = dict(plot_data or {})
         self._df = df
-        # Выбывшие собственники (с until) не редактируются здесь, но сохраняются
-        # вместе с участком ради истории владения.
-        self._departed: list = [
-            o for o in self._plot_data.get("owners", []) or []
-            if ownership.owner_until(o)
-        ]
+
+        # Инициализируем рабочую копию списка групп
+        self._groups: list = list(ownership.plot_groups(self._plot_data))
+        if not any(g.get("until") is None for g in self._groups):
+            self._groups.append({"since": None, "until": None, "owners": []})
+
+        # Рабочая копия активной группы (редактируется через GroupEditDialog)
+        act_idx = next(i for i, g in enumerate(self._groups)
+                       if g.get("until") is None)
+        self._active_group = dict(self._groups[act_idx])
+        self._active_group["owners"] = list(
+            self._groups[act_idx].get("owners", []) or [])
+
         self.setWindowTitle("Редактировать участок" if self._is_edit else "Новый участок")
-        self.setMinimumWidth(920)
+        self.setMinimumWidth(680)
         self.setModal(True)
-        self._owner_inputs:      list[QLineEdit]         = []
-        self._owner_checks:      list[_IconCheckBox]      = []
-        self._owner_visible:     list[_IconRadioButton]   = []
-        self._owner_member_docs: list[_MemberDocWidget]   = []
-        self._owner_opd_docs:    list[_OpdDocWidget]      = []
-        self._owner_share:       list[QLineEdit]          = []   # доля в праве
-        self._owner_m2:          list[QLabel]             = []   # производная площадь (read-only)
-        self._owner_phones:      list[QLineEdit]          = []
-        self._owner_emails:      list[QLineEdit]          = []
-        self._owner_since:       list[QLineEdit]          = []
-        self._btn_save           = None
+        self._btn_save = None
+        self._btn_switch_edit: QPushButton | None = None
+        self._edit_mode: bool = not self._is_edit  # новый участок сразу в режиме редактирования
         self._setup_ui()
         self._apply_styles()
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 20)
-        lay.setSpacing(14)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(12)
 
-        form = QFormLayout()
-        form.setSpacing(10)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        # -- Кнопка перехода в режим редактирования (только для существующего участка) --
+        if self._is_edit:
+            mode_bar = QHBoxLayout()
+            mode_bar.setContentsMargins(0, 0, 0, 0)
+            mode_bar.addStretch()
+            self._btn_switch_edit = QPushButton("✎  Редактировать")
+            self._btn_switch_edit.setObjectName("btnEditMode")
+            self._btn_switch_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_switch_edit.clicked.connect(lambda: self._set_edit_mode(True))
+            mode_bar.addWidget(self._btn_switch_edit)
+            lay.addLayout(mode_bar)
 
+        # -- Номер + Площадь в одну строку --
+        fields_row = QHBoxLayout()
+        fields_row.setSpacing(16)
+
+        num_lyt = QVBoxLayout()
+        num_lyt.setSpacing(4)
+        num_lyt.addWidget(QLabel("Номер участка:"))
+        self._lbl_num = QLabel(str(self._plot_data.get("num", "") or "—"))
+        self._lbl_num.setStyleSheet(
+            "font-size:14px; font-weight:600; color:#07414F; background:transparent;")
+        num_lyt.addWidget(self._lbl_num)
         self.inp_num = QLineEdit(str(self._plot_data.get("num", "")))
         self.inp_num.setPlaceholderText("например: 15 или 15/207")
-        form.addRow("Номер участка:", self.inp_num)
+        self.inp_num.textChanged.connect(self._update_save_state)
+        num_lyt.addWidget(self.inp_num)
+        fields_row.addLayout(num_lyt, stretch=1)
 
         area_raw = self._plot_data.get("area")
         area_text = ""
@@ -2320,6 +3117,13 @@ class PlotEditDialog(QDialog):
                 area_text = f"{float(area_raw):g}"
             except (TypeError, ValueError):
                 area_text = str(area_raw)
+        area_lyt = QVBoxLayout()
+        area_lyt.setSpacing(4)
+        area_lyt.addWidget(QLabel("Площадь, м²:"))
+        self._lbl_area = QLabel((area_text + " м²") if area_text else "—")
+        self._lbl_area.setStyleSheet(
+            "font-size:14px; font-weight:600; color:#07414F; background:transparent;")
+        area_lyt.addWidget(self._lbl_area)
         self.inp_area = QLineEdit(area_text)
         self.inp_area.setPlaceholderText("например: 612")
         self.inp_area.setValidator(QRegularExpressionValidator(
@@ -2329,483 +3133,448 @@ class PlotEditDialog(QDialog):
             self.inp_area.setText(t.replace(".", ",")),
             self.inp_area.setCursorPosition(self.inp_area.cursorPosition()),
         ) if "." in t else None)
-        self.inp_area.textChanged.connect(self._update_save_state)
-        self.inp_area.textChanged.connect(self._update_derived_m2)
-        area_row = QHBoxLayout()
-        area_row.setSpacing(6)
-        area_row.addWidget(self.inp_area, stretch=1)
-        self._btn_distribute = QPushButton(chr(0xE897))
-        self._btn_distribute.setFixedSize(32, 32)
-        _f_ic = QFont("Material Symbols Rounded")
-        _f_ic.setPixelSize(18)
-        self._btn_distribute.setFont(_f_ic)
-        self._btn_distribute.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_distribute.setToolTip("Поровну распределить доли между собственниками")
-        self._btn_distribute.clicked.connect(self._distribute_shares)
-        area_row.addWidget(self._btn_distribute)
-        form.addRow("Площадь, м²:", area_row)
+        area_lyt.addWidget(self.inp_area)
+        fields_row.addLayout(area_lyt, stretch=1)
+        lay.addLayout(fields_row)
 
-        # Вид права (как в выписке ЕГРН) — определяет, как делить начисление
-        self.cb_form = QComboBox()
-        for f in ownership.FORMS:
-            self.cb_form.addItem(ownership.FORM_LABELS[f], f)
-        cur_form = ownership.plot_ownership_form(self._plot_data)
-        i = self.cb_form.findData(cur_form)
-        if i >= 0:
-            self.cb_form.setCurrentIndex(i)
-        self.cb_form.currentIndexChanged.connect(self._on_form_changed)
-        form.addRow("Вид права:", self.cb_form)
+        # -- Заголовок активной группы --
+        act_hdr = QHBoxLayout()
+        act_hdr.setContentsMargins(0, 4, 0, 0)
+        lbl_act = QLabel("Активная группа")
+        lbl_act.setStyleSheet(
+            "font-size:12px; font-weight:600; color:#6B7280; background:transparent;")
+        act_hdr.addWidget(lbl_act, stretch=1)
+        self._active_since_lbl = QLabel()
+        self._active_since_lbl.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        act_hdr.addWidget(self._active_since_lbl)
+        lay.addLayout(act_hdr)
 
-        self._egrn_doc = _EgrnDocWidget(self._plot_data.get("egrn_doc", ""))
-        form.addRow("Выписка ЕГРН:", self._egrn_doc)
-        lay.addLayout(form)
+        # -- Карточка активной группы --
+        self._active_card = QFrame()
+        self._active_card.setStyleSheet(
+            "QFrame#activeCard{"
+            "background:#EBF4F6;border:1px solid #C9D8E2;border-radius:8px;}"
+        )
+        self._active_card.setObjectName("activeCard")
+        card_lay = QHBoxLayout(self._active_card)
+        card_lay.setContentsMargins(14, 12, 14, 12)
+        card_lay.setSpacing(14)
 
-        # Заголовок секции владельцев с иконкой-подсказкой для чекбокса
-        hdr_row = QWidget()
-        hdr_row.setStyleSheet("background:transparent;")
-        hdr_lay = QHBoxLayout(hdr_row)
-        hdr_lay.setContentsMargins(0, 0, 0, 0)
-        hdr_lay.setSpacing(6)
-        lbl_fio = QLabel("Контактное лицо")
-        lbl_fio.setStyleSheet("color:#9CA3AF; font-size:12px;")
-        hdr_lay.addWidget(lbl_fio, stretch=1)
-        lbl_ic = QLabel("")   # article_person
-        f_ic = QFont(self._IC_FONT)
-        f_ic.setPixelSize(16)
-        lbl_ic.setFont(f_ic)
-        lbl_ic.setFixedSize(32, 32)
-        lbl_ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_ic.setStyleSheet("color:#07414F; background:transparent;")
-        lbl_ic.installEventFilter(_TooltipFilter("Собственник", lbl_ic))
-        hdr_lay.addWidget(lbl_ic)
-        lbl_vis_hdr = QLabel(chr(0xF454))   # bookmark_star
-        lbl_vis_hdr.setFont(f_ic)
-        lbl_vis_hdr.setFixedSize(32, 32)
-        lbl_vis_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_vis_hdr.setStyleSheet("color:#07414F; background:transparent;")
-        lbl_vis_hdr.installEventFilter(_TooltipFilter("Видимый", lbl_vis_hdr))
-        hdr_lay.addWidget(lbl_vis_hdr)
-        lbl_member_hdr = QLabel(chr(0xE7FD))   # person
-        lbl_member_hdr.setFont(f_ic)
-        lbl_member_hdr.setFixedWidth(80)
-        lbl_member_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_member_hdr.setStyleSheet("color:#07414F; background:transparent;")
-        lbl_member_hdr.installEventFilter(_TooltipFilter("Член СНТ", lbl_member_hdr))
-        hdr_lay.addWidget(lbl_member_hdr)
-        lbl_opd_hdr = QLabel(chr(0xF650))   # shield_person
-        lbl_opd_hdr.setFont(f_ic)
-        lbl_opd_hdr.setFixedWidth(80)
-        lbl_opd_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_opd_hdr.setStyleSheet("color:#07414F; background:transparent;")
-        lbl_opd_hdr.installEventFilter(_TooltipFilter("Заявление на ОПД", lbl_opd_hdr))
-        hdr_lay.addWidget(lbl_opd_hdr)
-        self._lbl_share_hdr = QLabel("Доля")
-        self._lbl_share_hdr.setFixedWidth(64)
-        self._lbl_share_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_share_hdr.setStyleSheet("color:#9CA3AF; font-size:12px;")
-        hdr_lay.addWidget(self._lbl_share_hdr)
-        lbl_m2 = QLabel("м² (расч.)")
-        lbl_m2.setFixedWidth(72)
-        lbl_m2.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_m2.setStyleSheet("color:#9CA3AF; font-size:12px;")
-        hdr_lay.addWidget(lbl_m2)
-        lbl_phone_hdr = QLabel("Телефон")
-        lbl_phone_hdr.setFixedWidth(120)
-        lbl_phone_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_phone_hdr.setStyleSheet("color:#9CA3AF; font-size:12px;")
-        hdr_lay.addWidget(lbl_phone_hdr)
-        lbl_email_hdr = QLabel("E-mail")
-        lbl_email_hdr.setFixedWidth(150)
-        lbl_email_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_email_hdr.setStyleSheet("color:#9CA3AF; font-size:12px;")
-        hdr_lay.addWidget(lbl_email_hdr)
-        lbl_since_hdr = QLabel("Владеет с")
-        lbl_since_hdr.setFixedWidth(92)
-        lbl_since_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_since_hdr.setStyleSheet("color:#9CA3AF; font-size:12px;")
-        hdr_lay.addWidget(lbl_since_hdr)
-        # Заглушка под кнопки «В архив» (только в режиме редактирования) и удаления
-        btn_stub = QWidget()
-        btn_stub.setFixedWidth(62 if self._is_edit else 28)
-        btn_stub.setStyleSheet("background:transparent;")
-        hdr_lay.addWidget(btn_stub)
-        lay.addWidget(hdr_row)
+        # Левая часть: ФИО + счётчики + отсутствующие документы
+        left_w = QWidget()
+        left_w.setStyleSheet("background:transparent;")
+        left_lyt = QVBoxLayout(left_w)
+        left_lyt.setContentsMargins(0, 0, 0, 0)
+        left_lyt.setSpacing(4)
 
-        self._owners_container = QWidget()
-        self._owners_container.setStyleSheet("background:transparent;")
-        self._owners_vlay = QVBoxLayout(self._owners_container)
-        self._owners_vlay.setSpacing(6)
-        self._owners_vlay.setContentsMargins(0, 0, 0, 0)
+        self._active_name_lbl = QLabel()
+        self._active_name_lbl.setStyleSheet(
+            "font-size:14px; font-weight:700; color:#07414F; background:transparent;")
+        self._active_name_lbl.setWordWrap(True)
+        left_lyt.addWidget(self._active_name_lbl)
 
-        # Показываем только текущих владельцев (без until); выбывшие — в архиве.
-        current_owners = [o for o in self._plot_data.get("owners", []) or []
-                          if not ownership.owner_until(o)]
-        for owner in current_owners:
-            self._add_owner_field(_owner_name(owner), _is_owner(owner),
-                                  _owner_share_str(owner), _is_visible(owner),
-                                  _owner_member_doc(owner), _owner_opd_doc(owner),
-                                  _owner_phone(owner), _owner_email(owner),
-                                  since=ownership.owner_since(owner))
-        self._sync_visible_auto()
+        self._active_counts_lbl = QLabel()
+        self._active_counts_lbl.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        left_lyt.addWidget(self._active_counts_lbl)
 
-        lay.addWidget(self._owners_container)
+        sep_line = QFrame()
+        sep_line.setFrameShape(QFrame.Shape.HLine)
+        sep_line.setStyleSheet("color:#C9D8E2; background:#C9D8E2; max-height:1px;")
+        left_lyt.addWidget(sep_line)
 
-        btn_add_owner = QPushButton("＋  Добавить собственника")
-        btn_add_owner.setObjectName("btnSecondary")
-        btn_add_owner.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_add_owner.clicked.connect(lambda: self._add_owner_field("", True, ""))
-        lay.addWidget(btn_add_owner)
+        self._active_missing_lbl = QLabel()
+        self._active_missing_lbl.setStyleSheet(
+            "font-size:12px; color:#9CA3AF; background:transparent;")
+        left_lyt.addWidget(self._active_missing_lbl)
+        left_lyt.addStretch()
+        card_lay.addWidget(left_w, stretch=1)
 
-        # ── Секция «Архив (бывшие собственники)» ───────────────────────────
-        self._archive_lbl = QLabel("Архив (бывшие собственники)")
-        self._archive_lbl.setStyleSheet(
-            "color:#6B7280; font-size:12px; font-weight:600; margin-top:6px;")
-        lay.addWidget(self._archive_lbl)
-        self._archive_container = QWidget()
-        self._archive_container.setStyleSheet("background:transparent;")
-        self._archive_vlay = QVBoxLayout(self._archive_container)
-        self._archive_vlay.setSpacing(4)
-        self._archive_vlay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self._archive_container)
-        self._render_archive()
+        # Правая часть: карточка долга + кнопка редактирования
+        right_w = QWidget()
+        right_w.setStyleSheet("background:transparent;")
+        right_w.setFixedWidth(220)
+        right_lyt = QVBoxLayout(right_w)
+        right_lyt.setContentsMargins(0, 0, 0, 0)
+        right_lyt.setSpacing(8)
+
+        # Карточка долга
+        self._debt_card = QFrame()
+        self._debt_card.setStyleSheet(
+            "QFrame{background:#FFFFFF;border:1px solid #C9D8E2;border-radius:6px;}")
+        debt_lay = QVBoxLayout(self._debt_card)
+        debt_lay.setContentsMargins(10, 8, 10, 8)
+        debt_lay.setSpacing(4)
+        debt_title = QLabel("Долг / Аванс")
+        debt_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        debt_title.setStyleSheet(
+            "font-size:11px; font-weight:600; color:#6B7280; background:transparent;")
+        debt_lay.addWidget(debt_title)
+
+        vzn_row = QHBoxLayout()
+        vzn_row.addWidget(QLabel("ЧВ:"))
+        self._debt_vzn_lbl = QLabel("—")
+        self._debt_vzn_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._debt_vzn_lbl.setStyleSheet("font-size:12px; font-weight:600; background:transparent;")
+        vzn_row.addWidget(self._debt_vzn_lbl, stretch=1)
+        debt_lay.addLayout(vzn_row)
+
+        en_row = QHBoxLayout()
+        en_row.addWidget(QLabel("Электр.:"))
+        self._debt_en_lbl = QLabel("—")
+        self._debt_en_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._debt_en_lbl.setStyleSheet("font-size:12px; font-weight:600; background:transparent;")
+        en_row.addWidget(self._debt_en_lbl, stretch=1)
+        debt_lay.addLayout(en_row)
+        right_lyt.addWidget(self._debt_card)
+
+        btn_edit_group = QPushButton("Редактировать состав")
+        btn_edit_group.setObjectName("btnSecondary")
+        btn_edit_group.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_edit_group.clicked.connect(self._on_edit_active_group)
+        right_lyt.addWidget(btn_edit_group)
+        right_lyt.addStretch()
+        card_lay.addWidget(right_w)
+
+        lay.addWidget(self._active_card)
+        self._refresh_active_card()
+
+        # -- Кнопка архивирования (только для существующего участка) --
+        if self._is_edit:
+            btn_archive_group = QPushButton(
+                "Отправить активную группу в архив и добавить новую")
+            btn_archive_group.setObjectName("btnSecondary")
+            btn_archive_group.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_archive_group.clicked.connect(self._on_archive_active_group)
+            lay.addWidget(btn_archive_group)
+
+        # -- Предыдущая группа --
+        self._prev_section = QWidget()
+        self._prev_section.setStyleSheet("background:transparent;")
+        prev_lyt = QVBoxLayout(self._prev_section)
+        prev_lyt.setContentsMargins(0, 0, 0, 0)
+        prev_lyt.setSpacing(6)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
-        lay.addWidget(sep)
+        prev_lyt.addWidget(sep)
 
-        self._area_warning = QLabel()
-        self._area_warning.setObjectName("areaWarning")
-        self._area_warning.setWordWrap(True)
-        self._area_warning.setStyleSheet(
-            "color:#9CA3AF; background:transparent; font-size:12px;"
-        )
-        lay.addWidget(self._area_warning)
+        prev_hdr = QHBoxLayout()
+        lbl_prev = QLabel("Предыдущая группа")
+        lbl_prev.setStyleSheet(
+            "font-size:12px; font-weight:600; color:#6B7280; background:transparent;")
+        prev_hdr.addWidget(lbl_prev, stretch=1)
+        self._prev_until_lbl = QLabel()
+        self._prev_until_lbl.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        prev_hdr.addWidget(self._prev_until_lbl)
+        prev_lyt.addLayout(prev_hdr)
 
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        self._btn_save = btns.button(QDialogButtonBox.StandardButton.Ok)
-        self._btn_save.setText("Сохранить")
-        btn_cancel = btns.button(QDialogButtonBox.StandardButton.Cancel)
-        btn_cancel.setText("Отмена")
+        self._prev_card_container = QWidget()
+        self._prev_card_container.setStyleSheet("background:transparent;")
+        self._prev_card_lyt = QVBoxLayout(self._prev_card_container)
+        self._prev_card_lyt.setContentsMargins(0, 0, 0, 0)
+        prev_lyt.addWidget(self._prev_card_container)
+
+        btn_view_arch = QPushButton("Перейти в архив групп")
+        btn_view_arch.setObjectName("btnSecondary")
+        btn_view_arch.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_view_arch.clicked.connect(self._on_view_archive)
+        prev_lyt.addWidget(btn_view_arch)
+
+        lay.addWidget(self._prev_section)
+        self._refresh_prev_section()
+
+        # -- Footer --
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
+        lay.addWidget(sep2)
+
+        # Режим просмотра: только "Закрыть"
+        self._footer_view = QWidget()
+        fv_lay = QHBoxLayout(self._footer_view)
+        fv_lay.setContentsMargins(0, 0, 0, 0)
+        fv_lay.addStretch()
+        btn_close = QPushButton("Закрыть")
+        btn_close.setObjectName("btnFooterClose")
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.clicked.connect(self.reject)
+        fv_lay.addWidget(btn_close)
+        lay.addWidget(self._footer_view)
+
+        # Режим редактирования: "Отмена" + "Сохранить"
+        self._footer_edit = QWidget()
+        fe_lay = QHBoxLayout(self._footer_edit)
+        fe_lay.setContentsMargins(0, 0, 0, 0)
+        fe_lay.addStretch()
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setObjectName("btnFooterCancel")
         btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        btns.accepted.connect(self._on_accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
+        btn_cancel.clicked.connect(self.reject)
+        fe_lay.addWidget(btn_cancel)
+        self._btn_save = QPushButton("Сохранить")
+        self._btn_save.setObjectName("btnFooterSave")
+        self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_save.clicked.connect(self._on_accept)
+        fe_lay.addWidget(self._btn_save)
+        lay.addWidget(self._footer_edit)
 
-        self._apply_form_ui()
-        self._update_derived_m2()
+        self._set_edit_mode(self._edit_mode)
+
+    def _set_edit_mode(self, mode: bool):
+        self._edit_mode = mode
+        # Обновляем view-лейблы текущими значениями из полей
+        self._lbl_num.setText(self.inp_num.text() or "—")
+        area_raw = self.inp_area.text().strip()
+        self._lbl_area.setText((area_raw + " м²") if area_raw else "—")
+        # Переключаем лейблы vs поля
+        self._lbl_num.setVisible(not mode)
+        self.inp_num.setVisible(mode)
+        self._lbl_area.setVisible(not mode)
+        self.inp_area.setVisible(mode)
+        # Кнопка "Редактировать"
+        if self._btn_switch_edit is not None:
+            self._btn_switch_edit.setVisible(not mode)
+        # Футер
+        self._footer_view.setVisible(not mode)
+        self._footer_edit.setVisible(mode)
         self._update_save_state()
 
-    def _add_owner_field(self, name: str, is_owner: bool = True,
-                         share: str = "", is_visible: bool = False,
-                         doc_path: str = "", opd_path: str = "",
-                         phone: str = "", email: str = "", since=None):
-        row = QWidget()
-        row.setStyleSheet("background:transparent;")
-        rlay = QHBoxLayout(row)
-        rlay.setContentsMargins(0, 0, 0, 0)
-        rlay.setSpacing(6)
+    def _refresh_active_card(self):
+        owners = ownership.group_owners(self._active_group)
 
-        inp = QLineEdit(name)
-        inp.setPlaceholderText("Фамилия Имя Отчество")
-        inp.textChanged.connect(self._update_save_state)
-        self._owner_inputs.append(inp)
-        rlay.addWidget(inp, stretch=1)
+        # Имя главного участника (is_visible=True), иначе первый в списке
+        main = next((o for o in owners if isinstance(o, dict) and o.get("is_visible")),
+                    owners[0] if owners else None)
+        name = ownership.owner_name(main) if main else "(нет лиц)"
+        self._active_name_lbl.setText(name)
 
-        chk = _IconCheckBox(checked=is_owner)
-        self._owner_checks.append(chk)
-        rlay.addWidget(chk)
+        # Дата начала (в заголовке)
+        since = ownership.group_since(self._active_group)
+        self._active_since_lbl.setText(
+            f"Активна с: {since.strftime('%d.%m.%Y')}" if since else "Активна с: —")
 
-        effective_visible = is_visible and is_owner
-        vis = _IconRadioButton(checked=effective_visible, enabled=is_owner)
-        self._owner_visible.append(vis)
-        chk.stateChanged.connect(lambda checked, v=vis: v.setLogicalEnabled(checked))
-        chk.stateChanged.connect(lambda _: self._sync_visible_auto())
-        vis.toggled.connect(lambda v=vis: self._on_visible_selected(v))
-        rlay.addWidget(vis)
+        # Счётчики
+        n_owners = sum(1 for o in owners if ownership.is_owner(o))
+        n_contacts = sum(1 for o in owners if not ownership.is_owner(o))
+        n_members = sum(1 for o in owners if isinstance(o, dict) and o.get("member_doc"))
+        count_lines = []
+        if n_owners:
+            count_lines.append(f"Собственники: {n_owners}")
+        if n_members:
+            count_lines.append(f"Члены СНТ: {n_members}")
+        if n_contacts:
+            count_lines.append(f"Прочие контактные лица: {n_contacts}")
+        self._active_counts_lbl.setText("  ·  ".join(count_lines) if count_lines else "")
 
-        mem_doc = _MemberDocWidget(doc_path)
-        self._owner_member_docs.append(mem_doc)
-        rlay.addWidget(mem_doc)
+        # Отсутствующие документы
+        missing = []
+        no_opd = sum(1 for o in owners
+                     if isinstance(o, dict) and not o.get("opd_doc"))
+        no_egrn = sum(1 for o in owners
+                      if isinstance(o, dict) and not o.get("egrn_doc"))
+        no_mem = sum(1 for o in owners
+                     if isinstance(o, dict) and not o.get("member_doc"))
+        if no_opd:
+            missing.append(f"Нет заявления на ОПД: {no_opd}")
+        if no_egrn:
+            missing.append(f"Нет выписки ЕГРН: {no_egrn}")
+        if no_mem:
+            missing.append(f"Нет заявления на членство: {no_mem}")
+        self._active_missing_lbl.setText("\n".join(missing))
 
-        opd_doc = _OpdDocWidget(opd_path)
-        self._owner_opd_docs.append(opd_doc)
-        rlay.addWidget(opd_doc)
+        # Долг/Аванс
+        self._refresh_debt_card()
 
-        # Доля в праве (как в ЕГРН: 1/2, 21/100). Площадь доли — производная.
-        share_inp = QLineEdit(share or "")
-        share_inp.setPlaceholderText("1/2")
-        share_inp.setFixedWidth(64)
-        share_inp.setEnabled(is_owner)
-        share_inp.textChanged.connect(self._update_save_state)
-        share_inp.textChanged.connect(self._update_derived_m2)
-        chk.stateChanged.connect(lambda checked, s=share_inp: (
-            s.setEnabled(bool(checked)),
-            s.clear() if not checked else None,
-        ))
-        chk.stateChanged.connect(lambda _: self._update_derived_m2())
-        self._owner_share.append(share_inp)
-        rlay.addWidget(share_inp)
+    def _refresh_debt_card(self):
+        from core.utils import fmt_money
+        plot_num = str(self._plot_data.get("num", ""))
+        since = ownership.group_since(self._active_group)
 
-        m2_lbl = QLabel("—")
-        m2_lbl.setFixedWidth(72)
-        m2_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        m2_lbl.setStyleSheet("color:#9CA3AF; background:transparent; font-size:12px;")
-        self._owner_m2.append(m2_lbl)
-        rlay.addWidget(m2_lbl)
+        # ЧВ
+        try:
+            from core import vznosy as vzn
+            rates = vzn.load_rates()
+            adj = vzn.load_adjustments()
+            area = vzn.plot_area_map().get(plot_num)
+            gb = vzn.balance_for_active_group(
+                plot_num, area, date.today(), rates, adj, self._df, since=since)
+            debt_v = gb.debt
+            color_v = "#DC2626" if debt_v > 0.005 else ("#059669" if debt_v < -0.005 else "#6B7280")
+            prefix = "Аванс " if debt_v < -0.005 else "Долг "
+            self._debt_vzn_lbl.setText(f"{prefix}{fmt_money(abs(debt_v))}")
+            self._debt_vzn_lbl.setStyleSheet(
+                f"font-size:12px;font-weight:600;color:{color_v};background:transparent;")
+        except Exception:
+            self._debt_vzn_lbl.setText("—")
 
-        phone_inp = QLineEdit(phone)
-        phone_inp.setPlaceholderText("+7 (xxx) xxx-xx-xx")
-        phone_inp.setFixedWidth(120)
-        self._owner_phones.append(phone_inp)
-        rlay.addWidget(phone_inp)
+        # Электроэнергия
+        try:
+            from core import energy as en
+            meters = en.load_meters()
+            en_rates = en.load_rates()
+            replacements = en.load_replacements()
+            baseline = en.load_baseline()
+            egb = en.balance_for_active_group(
+                plot_num, date.today(), meters, en_rates, replacements,
+                baseline, self._df, since=since)
+            debt_e = egb.debt
+            color_e = "#DC2626" if debt_e > 0.005 else ("#059669" if debt_e < -0.005 else "#6B7280")
+            prefix_e = "Аванс " if debt_e < -0.005 else "Долг "
+            self._debt_en_lbl.setText(f"{prefix_e}{fmt_money(abs(debt_e))}")
+            self._debt_en_lbl.setStyleSheet(
+                f"font-size:12px;font-weight:600;color:{color_e};background:transparent;")
+        except Exception:
+            self._debt_en_lbl.setText("—")
 
-        email_inp = QLineEdit(email)
-        email_inp.setPlaceholderText("email@example.com")
-        email_inp.setFixedWidth(150)
-        self._owner_emails.append(email_inp)
-        rlay.addWidget(email_inp)
+    def _refresh_prev_section(self):
+        archived = ownership.archived_groups({"groups": self._groups})
+        self._prev_section.setVisible(bool(archived))
+        if not archived:
+            return
+        g = archived[0]
+        until = ownership.group_until(g)
+        self._prev_until_lbl.setText(
+            f"Закрыта с: {until.strftime('%d.%m.%Y')}" if until else "Закрыта")
+        # Очищаем и перестраиваем карточку
+        while self._prev_card_lyt.count():
+            item = self._prev_card_lyt.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._prev_card_lyt.addWidget(self._make_archived_preview(g))
 
-        since_text = since.strftime("%d.%m.%Y") if isinstance(since, date) else ""
-        since_inp = QLineEdit(since_text)
-        since_inp.setPlaceholderText("дд.мм.гггг")
-        since_inp.setFixedWidth(92)
-        since_inp.setValidator(QRegularExpressionValidator(
-            QRegularExpression(r"^\d{0,2}\.?\d{0,2}\.?\d{0,4}$"), since_inp
-        ))
-        self._owner_since.append(since_inp)
-        rlay.addWidget(since_inp)
-
-        # Кнопка «В архив» (фиксирует дату ухода и снимок долга) — только при
-        # редактировании существующего участка.
-        if self._is_edit:
-            btn_arch = QPushButton(chr(0xE149))   # archive
-            btn_arch.setFixedSize(28, 28)
-            btn_arch.setFont(QFont("Material Symbols Rounded", 16))
-            btn_arch.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_arch.setToolTip("В архив (зафиксировать дату ухода и долг)")
-            btn_arch.setStyleSheet(
-                "QPushButton{background:transparent;border:none;color:#6B7280;}"
-                "QPushButton:hover{color:#07414F;}"
-            )
-            btn_arch.clicked.connect(
-                lambda _, r=row, i=inp, c=chk, v=vis, m=mem_doc, o=opd_doc,
-                       sh=share_inp, ph=phone_inp, em=email_inp, sc=since_inp, ml=m2_lbl:
-                    self._archive_owner(r, i, c, v, m, o, sh, ph, em, sc, ml)
-            )
-            rlay.addWidget(btn_arch)
-
-        btn = QPushButton(chr(0xE92B))
-        btn.setFixedSize(28, 28)
-        btn.setFont(QFont("Material Symbols Rounded", 16))
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(
-            "QPushButton{background:transparent;border:none;color:#DC2626;}"
-            "QPushButton:hover{color:#B91C1C;}"
+    def _make_archived_preview(self, group: dict) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(
+            "QFrame{background:#F8F9FA;border:1px solid #E5E7EB;border-radius:8px;}"
         )
-        btn.clicked.connect(
-            lambda _, r=row, i=inp, c=chk, v=vis, m=mem_doc, o=opd_doc, sh=share_inp,
-                   ph=phone_inp, em=email_inp, sc=since_inp, ml=m2_lbl:
-                self._remove_owner_field(r, i, c, v, m, o, sh, ph, em, sc, ml)
-        )
-        rlay.addWidget(btn)
-        self._owners_vlay.addWidget(row)
-        self._apply_form_to_row(share_inp, m2_lbl, chk)
+        cl = QHBoxLayout(card)
+        cl.setContentsMargins(14, 10, 14, 10)
+        cl.setSpacing(12)
+
+        # Левая часть: имена + долг
+        info_w = QWidget()
+        info_w.setStyleSheet("background:transparent;")
+        info_lyt = QVBoxLayout(info_w)
+        info_lyt.setContentsMargins(0, 0, 0, 0)
+        info_lyt.setSpacing(3)
+
+        names = ownership.group_label(group, empty="(без ФИО)")
+        name_lbl = QLabel(names)
+        name_lbl.setStyleSheet(
+            "font-size:13px; font-weight:600; color:#374151; background:transparent;")
+        name_lbl.setWordWrap(True)
+        info_lyt.addWidget(name_lbl)
+
+        debt_v = (group.get("debt_at_close") or {}).get("vznosy")
+        debt_e = (group.get("debt_at_close") or {}).get("energy")
+        if debt_v is not None or debt_e is not None:
+            from core.utils import fmt_money
+            parts = []
+            if debt_v is not None:
+                parts.append(f"ЧВ: {fmt_money(debt_v)}")
+            if debt_e is not None:
+                parts.append(f"Электр.: {fmt_money(debt_e)}")
+            debt_lbl = QLabel("Долг: " + "  ·  ".join(parts))
+            debt_lbl.setStyleSheet(
+                "font-size:12px; color:#6B7280; background:transparent;")
+            info_lyt.addWidget(debt_lbl)
+        cl.addWidget(info_w, stretch=1)
+        return card
+
+    def _on_edit_active_group(self):
+        dlg = GroupEditDialog(self._active_group, is_new=False, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._active_group = dlg.get_result()
+            self._refresh_active_card()
+            self._update_save_state()
+
+    def _on_archive_active_group(self):
+        if not ownership.group_owners(self._active_group):
+            QMessageBox.warning(self, "Нет лиц",
+                                "В активной группе нет ни одного лица. "
+                                "Добавьте хотя бы одно перед архивированием.")
+            return
+        exit_date = self._ask_exit_date()
+        if exit_date is None:
+            return
+        debt_at_close = self._compute_group_debt(exit_date)
+        archived = dict(self._active_group)
+        archived["until"] = exit_date.isoformat()
+        archived["debt_at_close"] = debt_at_close
+        new_active = {"since": exit_date.isoformat(), "until": None, "owners": []}
+        dlg = GroupEditDialog(new_active, is_new=True, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_active = dlg.get_result()
+        updated = []
+        for g in self._groups:
+            if g.get("until") is None:
+                updated.append(archived)
+            else:
+                updated.append(g)
+        updated.append(new_active)
+        self._groups = updated
+        self._active_group = new_active
+        self._refresh_active_card()
+        self._refresh_prev_section()
         self._update_save_state()
-        self._update_derived_m2()
 
-    def _remove_owner_field(self, row: QWidget, inp: QLineEdit,
-                             chk: _IconCheckBox, vis: _IconRadioButton,
-                             mem_doc: "_MemberDocWidget", opd_doc: "_OpdDocWidget",
-                             share_inp: QLineEdit, phone_inp: QLineEdit,
-                             email_inp: QLineEdit, since_inp: QLineEdit | None = None,
-                             m2_lbl: "QLabel | None" = None):
-        for lst, item in ((self._owner_inputs,       inp),
-                          (self._owner_checks,        chk),
-                          (self._owner_visible,       vis),
-                          (self._owner_member_docs,   mem_doc),
-                          (self._owner_opd_docs,      opd_doc),
-                          (self._owner_share,         share_inp),
-                          (self._owner_m2,            m2_lbl),
-                          (self._owner_phones,        phone_inp),
-                          (self._owner_emails,        email_inp),
-                          (self._owner_since,         since_inp)):
-            if item is not None and item in lst:
-                lst.remove(item)
-        row.setParent(None)
-        row.deleteLater()
-        self._update_save_state()
-        self._update_derived_m2()
-        QTimer.singleShot(0, self.adjustSize)
+    def _on_view_archive(self):
+        dlg = GroupArchiveDialog(
+            {"groups": self._groups}, self._active_group, df=self._df, parent=self)
+        dlg.exec()
 
-    def _current_form(self) -> str:
-        return self.cb_form.currentData() if hasattr(self, "cb_form") else ownership.FORM_JOINT
-
-    def _owner_indices(self) -> list[int]:
-        """Индексы строк-собственников (галочка «собственник» включена)."""
-        return [i for i, c in enumerate(self._owner_checks) if c.isChecked()]
+    def _compute_group_debt(self, as_of) -> dict:
+        result = {"vznosy": 0.0, "energy": 0.0}
+        plot_num = str(self._plot_data.get("num", ""))
+        if not plot_num:
+            return result
+        since = ownership.group_since(self._active_group)
+        try:
+            from core import vznosy as vzn
+            rates = vzn.load_rates()
+            adj = vzn.load_adjustments()
+            area = vzn.plot_area_map().get(plot_num)
+            gb = vzn.balance_for_active_group(
+                plot_num, area, as_of, rates, adj, self._df, since=since)
+            result["vznosy"] = round(gb.debt, 2)
+        except Exception:
+            pass
+        try:
+            from core import energy as en
+            meters = en.load_meters()
+            en_rates = en.load_rates()
+            replacements = en.load_replacements()
+            baseline = en.load_baseline()
+            egb = en.balance_for_active_group(
+                plot_num, as_of, meters, en_rates, replacements,
+                baseline, self._df, since=since)
+            result["energy"] = round(egb.debt, 2)
+        except Exception:
+            pass
+        return result
 
     def _update_save_state(self):
         if self._btn_save is None:
             return
-        fio_ok = (
-            all(inp.text().strip() for inp in self._owner_inputs)
-            if self._owner_inputs else True
-        )
-        form = self._current_form()
-        owner_idxs = self._owner_indices()
-
-        shares_ok = True
-        warn = ""
-        if form == ownership.FORM_INDIVIDUAL:
-            if len(owner_idxs) > 1:
-                shares_ok = False
-                warn = "Индивидуальная собственность — должен быть один собственник (доля 1/1)."
-        elif form == ownership.FORM_SHARED:
-            # Сумма долей должна равняться 1
-            total = 0.0
-            all_filled = True
-            for i in owner_idxs:
-                v = ownership.parse_share(self._owner_share[i].text())
-                if v is None:
-                    all_filled = False
-                else:
-                    total += v
-            if not owner_idxs:
-                shares_ok = True
-            elif not all_filled:
-                shares_ok = False
-                warn = "Долевая собственность — укажите долю каждого собственника (напр. 1/2)."
-            elif abs(total - 1.0) > 1e-6:
-                shares_ok = False
-                warn = f"Сумма долей должна равняться 1 (сейчас {total:.4f}).".rstrip("0").rstrip(".")
-        # FORM_JOINT — доли не нужны, ограничений нет
-
-        ok = fio_ok and shares_ok
+        has_owners = bool(ownership.group_owners(self._active_group))
+        num_ok = bool(self.inp_num.text().strip())
+        ok = has_owners and num_ok
         self._btn_save.setEnabled(ok)
         self._btn_save.setCursor(
-            Qt.CursorShape.PointingHandCursor if ok else Qt.CursorShape.ArrowCursor
-        )
-        if warn:
-            self._area_warning.setStyleSheet(
-                "color:#B45309; background:transparent; font-size:12px; font-weight:600;")
-            self._area_warning.setText(f"ℹ  {warn}")
-        else:
-            note = {
-                ownership.FORM_INDIVIDUAL: "Индивидуальная собственность: вся сумма начисляется одному.",
-                ownership.FORM_SHARED: "Долевая собственность: начисление делится по доле каждого.",
-                ownership.FORM_JOINT: "Совместная собственность: делится поровну; ответственность солидарная.",
-            }.get(form, "")
-            self._area_warning.setStyleSheet(
-                "color:#9CA3AF; background:transparent; font-size:12px;")
-            self._area_warning.setText(f"ℹ  {note}")
-
-    def _distribute_shares(self):
-        """Поровну распределить доли между собственниками (для долевой)."""
-        idxs = self._owner_indices()
-        idxs = [i for i in idxs if self._owner_inputs[i].text().strip()]
-        n = len(idxs)
-        if n == 0:
-            return
-        for i in idxs:
-            self._owner_share[i].setText(f"1/{n}")
-        self._update_derived_m2()
-        self._update_save_state()
-
-    # ── вид права / доли / производная площадь ───────────────────────────
-
-    def _plot_area_value(self) -> float | None:
-        raw = self.inp_area.text().strip().replace(",", ".")
-        if not raw:
-            return None
-        try:
-            v = float(raw)
-            return v if v > 0 else None
-        except ValueError:
-            return None
-
-    def _weights_for_form(self, owner_rows: list, form: str) -> list[float]:
-        """Веса собственников по виду права (для производной площади/хранения)."""
-        n = len(owner_rows)
-        if n == 0:
-            return []
-        if form == ownership.FORM_SHARED:
-            shares = [ownership.parse_share(r.get("share", "")) for r in owner_rows]
-            if all(s is not None for s in shares) and sum(shares) > 0:  # type: ignore[arg-type]
-                tot = sum(shares)  # type: ignore[arg-type]
-                return [s / tot for s in shares]  # type: ignore[operator]
-            return [1.0 / n] * n
-        # individual / joint → поровну (для individual обычно один собственник)
-        return [1.0 / n] * n
-
-    def _derived_area_for_share(self, share: str) -> float | None:
-        area_val = self._plot_area_value()
-        s = ownership.parse_share(share)
-        if area_val is None or s is None:
-            return None
-        return round(s * area_val, 2)
-
-    def _on_form_changed(self):
-        self._apply_form_ui()
-        self._update_derived_m2()
-        self._update_save_state()
-
-    def _apply_form_to_row(self, share_inp, _m2_lbl=None, _chk=None):
-        """Поле «Доля» в строке видно только для долевой собственности."""
-        show_share = (self._current_form() == ownership.FORM_SHARED)
-        share_inp.setVisible(show_share)
-
-    def _apply_form_ui(self):
-        is_shared = (self._current_form() == ownership.FORM_SHARED)
-        for s in self._owner_share:
-            s.setVisible(is_shared)
-        if hasattr(self, "_lbl_share_hdr"):
-            self._lbl_share_hdr.setVisible(is_shared)
-        if hasattr(self, "_btn_distribute"):
-            self._btn_distribute.setVisible(is_shared)
-
-    def _update_derived_m2(self):
-        if not self._owner_m2:
-            return
-        area_val = self._plot_area_value()
-        form = self._current_form()
-        owner_positions = [i for i, c in enumerate(self._owner_checks) if c.isChecked()]
-        owner_rows = [{"share": self._owner_share[i].text()} for i in owner_positions]
-        weights = self._weights_for_form(owner_rows, form)
-        wmap = {pos: weights[k] for k, pos in enumerate(owner_positions)}
-        for i, lbl in enumerate(self._owner_m2):
-            w = wmap.get(i)
-            if area_val is None or w is None:
-                lbl.setText("—")
-            else:
-                lbl.setText(f"{round(w * area_val, 2):g}")
-
-    def _sync_visible_auto(self):
-        checked = [i for i, c in enumerate(self._owner_checks) if c.isChecked()]
-        if len(checked) == 1:
-            v = self._owner_visible[checked[0]]
-            if not v.isChecked():
-                v.setChecked(True)
-                self._on_visible_selected(v)
-
-    def _on_visible_selected(self, sender: "_IconRadioButton"):
-        """Снимает все остальные радиокнопки при выборе новой."""
-        for v in self._owner_visible:
-            if v is not sender:
-                v.setChecked(False)
+            Qt.CursorShape.PointingHandCursor if ok else Qt.CursorShape.ArrowCursor)
 
     def _on_accept(self):
         num = self.inp_num.text().strip()
         if not num:
             QMessageBox.warning(self, "Ошибка", "Укажите номер участка")
             return
-        form = self._current_form()
-
         area_raw = self.inp_area.text().strip().replace(",", ".")
-        area_val: float | None = None
+        area_val = None
         if area_raw:
             try:
                 area_val = float(area_raw)
@@ -2815,60 +3584,23 @@ class PlotEditDialog(QDialog):
                 QMessageBox.warning(self, "Ошибка",
                                     "Площадь должна быть положительным числом")
                 return
-
-        # Сырьё по строкам
-        raw_rows = []
-        for inp, chk, vis, mem_doc, opd_doc, share_inp, phone_inp, email_inp, since_inp in zip(
-                self._owner_inputs, self._owner_checks, self._owner_visible,
-                self._owner_member_docs, self._owner_opd_docs, self._owner_share,
-                self._owner_phones, self._owner_emails, self._owner_since):
-            name = inp.text().strip()
-            if not name:
-                continue
-            raw_rows.append({
-                "name": name, "is_owner": chk.isChecked(), "visible": vis.isChecked(),
-                "mem": mem_doc.get_path(), "opd": opd_doc.get_path(),
-                "phone": phone_inp.text().strip(), "email": email_inp.text().strip(),
-                "since": self._date_text_to_iso(since_inp.text()),
-                "share": share_inp.text().strip(),
-            })
-
-        # Веса собственников по виду права → производная площадь доли
-        owner_rows = [r for r in raw_rows if r["is_owner"]]
-        weights = self._weights_for_form(owner_rows, form)
-
-        owners = []
-        wi = 0
-        for r in raw_rows:
-            share_to_store = ""
-            area_to_store: float | None = None
-            if r["is_owner"]:
-                w = weights[wi] if wi < len(weights) else None
-                wi += 1
-                if area_val is not None and w is not None:
-                    area_to_store = round(w * area_val, 2)
-                if form == ownership.FORM_INDIVIDUAL:
-                    share_to_store = "1/1"
-                elif form == ownership.FORM_SHARED:
-                    share_to_store = r["share"]
-                # FORM_JOINT — доли не выделены, share не храним
-            owners.append(_make_owner(
-                r["name"], r["is_owner"], area_to_store, r["visible"],
-                r["mem"], r["opd"], r["phone"], r["email"],
-                since=r["since"], share=share_to_store))
-
-        # Текущие (из виджетов) + выбывшие (хранятся ради истории владения).
-        result = {"num": num, "owners": owners + self._departed,
-                  "ownership_form": form}
+        if not ownership.group_owners(self._active_group):
+            QMessageBox.warning(self, "Ошибка",
+                                "В активной группе должно быть хотя бы одно лицо")
+            return
+        final_groups = []
+        for g in self._groups:
+            if g.get("until") is None:
+                final_groups.append(self._active_group)
+            else:
+                final_groups.append(g)
+        result = {"num": num, "groups": final_groups}
         if area_val is not None:
             result["area"] = area_val
-        egrn_path = self._egrn_doc.get_path()
-        if egrn_path:
-            result["egrn_doc"] = egrn_path
         for k in ("billing_type", "meter_commission_date", "meter_act_number",
                   "meter_location", "norm_kw", "norm_start_date",
-                  "direct_contract_date", "direct_contract_number", "billing_history",
-                  "ownership_history"):
+                  "direct_contract_date", "direct_contract_number",
+                  "billing_history", "ownership_history"):
             if k in self._plot_data:
                 result[k] = self._plot_data[k]
         self._result = result
@@ -2877,157 +3609,14 @@ class PlotEditDialog(QDialog):
     def get_result(self) -> dict:
         return getattr(self, "_result", {})
 
-    @staticmethod
-    def _date_text_to_iso(text: str) -> str:
-        """'дд.мм.гггг' → 'гггг-мм-дд'. Пусто/ошибка → ''."""
-        text = (text or "").strip()
-        if not text:
-            return ""
-        try:
-            return datetime.strptime(text, "%d.%m.%Y").date().isoformat()
-        except ValueError:
-            return ""
-
-    # ── архив (бывшие собственники) ──────────────────────────────────────
-
-    def _render_archive(self):
-        """Перерисовывает секцию архива из self._departed."""
-        while self._archive_vlay.count():
-            item = self._archive_vlay.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
-
-        has = bool(self._departed)
-        self._archive_lbl.setVisible(has)
-        self._archive_container.setVisible(has)
-        if not has:
-            return
-
-        for idx, owner in enumerate(self._departed):
-            row = QWidget()
-            row.setStyleSheet("background:transparent;")
-            h = QHBoxLayout(row)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(6)
-
-            until = ownership.owner_until(owner)
-            until_txt = until.strftime("%d.%m.%Y") if until else "—"
-            debt = owner.get("debt_at_exit") if isinstance(owner, dict) else None
-            debt_txt = (f"  ·  долг на дату ухода: {fmt_money(debt)}"
-                        if debt is not None else "")
-            lbl = QLabel(f"{_owner_name(owner)}  ·  владел по {until_txt}{debt_txt}")
-            lbl.setStyleSheet("color:#6B7280; background:transparent; font-size:12px;")
-            h.addWidget(lbl, stretch=1)
-
-            btn_restore = QPushButton("↩ Вернуть")
-            btn_restore.setObjectName("btnSecondary")
-            btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_restore.clicked.connect(lambda _, i=idx: self._restore_owner(i))
-            h.addWidget(btn_restore)
-
-            btn_del = QPushButton(chr(0xE92B))
-            btn_del.setFixedSize(28, 28)
-            btn_del.setFont(QFont("Material Symbols Rounded", 16))
-            btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_del.setToolTip("Удалить из архива безвозвратно")
-            btn_del.setStyleSheet(
-                "QPushButton{background:transparent;border:none;color:#DC2626;}"
-                "QPushButton:hover{color:#B91C1C;}")
-            btn_del.clicked.connect(lambda _, i=idx: self._delete_archived(i))
-            h.addWidget(btn_del)
-
-            self._archive_vlay.addWidget(row)
-
-    def _archive_owner(self, row, inp, chk, vis, mem_doc, opd_doc,
-                       share_inp, phone_inp, email_inp, since_inp, m2_lbl=None):
-        """Переносит текущего собственника в архив: спрашивает дату ухода,
-        фиксирует снимок долга, проставляет until."""
-        name = inp.text().strip()
-        if not name:
-            QMessageBox.warning(self, "В архив", "Сначала укажите ФИО собственника.")
-            return
-        exit_date = self._ask_exit_date()
-        if exit_date is None:
-            return
-        exit_iso = exit_date.isoformat()
-
-        share = share_inp.text().strip()
-        # Площадь доли — производная (доля × площадь участка), хранится для совместимости.
-        area_v = self._derived_area_for_share(share)
-        owner = _make_owner(name, chk.isChecked(), area_v, vis.isChecked(),
-                            mem_doc.get_path(), opd_doc.get_path(),
-                            phone_inp.text().strip(), email_inp.text().strip(),
-                            since=self._date_text_to_iso(since_inp.text()),
-                            until=exit_iso, share=share)
-        owner["debt_at_exit"] = self._compute_debt_snapshot(name, exit_date)
-
-        self._departed.append(owner)
-        self._remove_owner_field(row, inp, chk, vis, mem_doc, opd_doc,
-                                 share_inp, phone_inp, email_inp, since_inp, m2_lbl)
-        self._render_archive()
-
-    def _restore_owner(self, idx: int):
-        """Возвращает собственника из архива в текущие (снимает until/снимок)."""
-        if not (0 <= idx < len(self._departed)):
-            return
-        owner = self._departed.pop(idx)
-        if isinstance(owner, dict):
-            owner.pop("until", None)
-            owner.pop("debt_at_exit", None)
-        self._add_owner_field(_owner_name(owner), _is_owner(owner),
-                              _owner_share_str(owner), _is_visible(owner),
-                              _owner_member_doc(owner), _owner_opd_doc(owner),
-                              _owner_phone(owner), _owner_email(owner),
-                              since=ownership.owner_since(owner))
-        self._sync_visible_auto()
-        self._render_archive()
-        QTimer.singleShot(0, self.adjustSize)
-
-    def _delete_archived(self, idx: int):
-        if not (0 <= idx < len(self._departed)):
-            return
-        name = _owner_name(self._departed[idx])
-        reply = QMessageBox.question(
-            self, "Удалить из архива",
-            f"Удалить «{name}» из архива безвозвратно?\n"
-            f"История владения этого собственника будет потеряна.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        self._departed.pop(idx)
-        self._render_archive()
-
-    def _compute_debt_snapshot(self, name: str, exit_date) -> float:
-        """Долг собственника по членским взносам на дату ухода (фиксируется)."""
-        try:
-            from core import vznosy
-            rates = vznosy.load_rates()
-            adj = vznosy.load_adjustments()
-            area = vznosy.plot_area_map().get(str(self._plot_data.get("num", "")))
-            plot_num = str(self._plot_data.get("num", ""))
-            current = [o for o in self._plot_data.get("owners", []) or []
-                       if not ownership.owner_until(o)]
-            rows = vznosy.balances_by_owner(
-                plot_num, area, exit_date, rates, adj, self._df, current,
-                ownership_form=self._plot_data.get("ownership_form"))
-            return round(next((r.debt for r in rows if r.name == name), 0.0), 2)
-        except Exception:
-            return 0.0
-
     def _ask_exit_date(self):
-        """Маленький диалог выбора даты ухода. Возвращает date или None."""
         dlg = QDialog(self)
-        dlg.setWindowTitle("Дата выбытия собственника")
+        dlg.setWindowTitle("Дата закрытия группы")
         dlg.setModal(True)
         v = QVBoxLayout(dlg)
         v.setContentsMargins(18, 16, 18, 14)
         v.setSpacing(10)
-        lbl = QLabel("Дата перехода права (с этой даты участок принадлежит\n"
-                     "уже новому собственнику):")
+        lbl = QLabel("Дата перехода права (с этой даты начинается новая группа):")
         lbl.setStyleSheet("color:#374151; background:transparent; font-size:13px;")
         v.addWidget(lbl)
         de = QDateEdit(calendarPopup=True)
@@ -3045,7 +3634,7 @@ class PlotEditDialog(QDialog):
             "QDialog{background:#FFFFFF;} QLabel{background:transparent;}"
             "QDateEdit{background:#F8F9FA;border:1px solid #D1D5DB;border-radius:5px;"
             "padding:6px 8px;font-size:13px;color:#374151;}"
-            "QDialogButtonBox QPushButton{background:#4F46E5;color:#fff;border:none;"
+            "QDialogButtonBox QPushButton{background:#07414F;color:#fff;border:none;"
             "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
             "QDialogButtonBox QPushButton[text='Отмена']{background:#E5E7EB;color:#6B7280;}")
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -3065,19 +3654,24 @@ class PlotEditDialog(QDialog):
                 background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
                 border-radius: 6px; padding: 7px 14px; font-size: 13px;
             }
-            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
-            QDialogButtonBox QPushButton {
+            QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
+            QPushButton#btnEditMode {
+                background: transparent; color: #07414F;
+                border: 1.5px solid #C9D8E2; border-radius: 6px;
+                padding: 5px 14px; font-size: 12px;
+            }
+            QPushButton#btnEditMode:hover { background: #EBF4F6; border-color: #07414F; }
+            QPushButton#btnFooterSave {
                 background: #07414F; color: white; border: none;
                 border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
             }
-            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
-            QDialogButtonBox QPushButton:disabled {
-                background: #E5E7EB; color: #9CA3AF; border: none;
+            QPushButton#btnFooterSave:hover { background: #0B5A6E; }
+            QPushButton#btnFooterSave:disabled { background: #E5E7EB; color: #9CA3AF; }
+            QPushButton#btnFooterClose, QPushButton#btnFooterCancel {
+                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
+                border-radius: 6px; padding: 8px 20px; font-size: 13px;
             }
-            QDialogButtonBox QPushButton[text='Отмена'] {
-                background: #E5E7EB; color: #6B7280;
-            }
-            QDialogButtonBox QPushButton[text='Отмена']:hover {
+            QPushButton#btnFooterClose:hover, QPushButton#btnFooterCancel:hover {
                 background: #D1D5DB; color: #374151;
             }
             QPushButton {
@@ -3087,4 +3681,3 @@ class PlotEditDialog(QDialog):
             QPushButton:hover { background: #E8F0F5; border: 1px solid #07414F; }
             QPushButton:pressed { background: #D5E5ED; }
         """)
-
