@@ -301,3 +301,94 @@ def owners_label(owners: list, *, only_owners: bool = True,
     names = [owner_name(o) for o in (owners or [])
              if (not only_owners or is_owner(o)) and owner_name(o)]
     return ", ".join(names) if names else empty
+
+
+# ── группы (новая модель владения) ───────────────────────────────────────────
+#
+# Группа = dict {"since": str|null, "until": str|null, "owners": [...],
+#                "debt_at_close": {"vznosy": float, "energy": float}}
+# Активная группа: "until" == None.  Архивная: "until" задан.
+# Участок содержит поле "groups": [group, ...].
+# Обратная совместимость: участки со старым полем "owners" мигрируются на лету.
+
+def plot_groups(plot: dict) -> list:
+    """Список групп участка (с ленивой миграцией из старого формата)."""
+    if not plot:
+        return []
+    if "groups" in plot:
+        return plot["groups"] or []
+    return _groups_from_legacy(plot)
+
+
+def _groups_from_legacy(plot: dict) -> list:
+    """Преобразует старый формат owners → groups (in-memory, без записи на диск)."""
+    owners = plot.get("owners", []) or []
+    current = [o for o in owners if not owner_until(o)]
+    departed = [o for o in owners if owner_until(o)]
+
+    egrn = plot.get("egrn_doc", "")
+    current_copy: list = []
+    for i, o in enumerate(current):
+        o_c = dict(o) if isinstance(o, dict) else {"name": str(o), "is_owner": True}
+        if egrn and i == 0 and not o_c.get("egrn_doc"):
+            o_c["egrn_doc"] = egrn
+        current_copy.append(o_c)
+
+    groups: list = []
+    for o in departed:
+        until_d = owner_until(o)
+        o_c = dict(o) if isinstance(o, dict) else {"name": str(o), "is_owner": True}
+        groups.append({
+            "since": None,
+            "until": until_d.isoformat() if until_d else None,
+            "owners": [o_c],
+            "debt_at_close": {"vznosy": 0.0, "energy": 0.0},
+        })
+    groups.sort(key=lambda g: g.get("until") or "")
+    groups.append({"since": None, "until": None, "owners": current_copy})
+    return groups
+
+
+def active_group(plot: dict) -> Optional[dict]:
+    """Активная группа участка (until=None), или None если не найдена."""
+    for g in plot_groups(plot):
+        if g.get("until") is None:
+            return g
+    return None
+
+
+def archived_groups(plot: dict) -> list:
+    """Архивные группы, отсортированные по until убыванию (свежие сначала)."""
+    out = [g for g in plot_groups(plot) if g.get("until") is not None]
+    return sorted(out, key=lambda g: g.get("until") or "", reverse=True)
+
+
+def group_since(group: dict) -> Optional[date]:
+    return _parse_iso(str(group.get("since") or ""))
+
+
+def group_until(group: dict) -> Optional[date]:
+    return _parse_iso(str(group.get("until") or ""))
+
+
+def group_owners(group: dict) -> list:
+    return group.get("owners", []) or []
+
+
+def group_label(group: dict, *, empty: str = "—") -> str:
+    return owners_label(group_owners(group), only_owners=True, empty=empty)
+
+
+def migrate_plot_to_groups(plot: dict) -> dict:
+    """Возвращает копию участка в формате groups (не меняет оригинал).
+
+    Если участок уже содержит поле 'groups' — возвращает без изменений.
+    Вызывать перед сохранением для персистирования миграции на диск.
+    """
+    if "groups" in plot:
+        return plot
+    groups = _groups_from_legacy(plot)
+    result = {k: v for k, v in plot.items()
+              if k not in ("owners", "ownership_form", "egrn_doc")}
+    result["groups"] = groups
+    return result

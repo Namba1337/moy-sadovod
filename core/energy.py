@@ -79,12 +79,19 @@ def save_plots(data: list) -> None:
 
 
 def owners_map() -> dict:
-    """Возвращает {num: [str, ...]} — всегда строки, независимо от формата хранения."""
+    """Возвращает {num: [str, ...]} — имена из активной группы (или old owners)."""
+    from core.ownership import active_group, group_owners, owner_name
     result = {}
     for p in load_plots():
         num = str(p.get("num", ""))
-        owners = p.get("owners", []) or []
-        result[num] = [o["name"] if isinstance(o, dict) else o for o in owners]
+        if not num:
+            continue
+        if "groups" in p:
+            ag = active_group(p)
+            owners = group_owners(ag) if ag else []
+        else:
+            owners = p.get("owners", []) or []
+        result[num] = [owner_name(o) for o in owners]
     return result
 
 
@@ -849,6 +856,53 @@ def reconcile(date_from: date, date_to: date, plots: list[str],
         private_kwh=private_kwh,
         loss_kwh=loss_kwh,
         loss_rub=loss_rub,
+    )
+
+
+# ── баланс активной группы ────────────────────────────────────────────
+
+from dataclasses import dataclass as _dc
+
+
+@_dc
+class EnergyGroupBalance:
+    charged: float
+    paid: float
+    baseline: float
+    debt: float
+
+
+def balance_for_active_group(plot: str, as_of: date, meters: dict, rates: list,
+                              replacements: dict, baseline: dict, df,
+                              since: Optional[date] = None,
+                              plots: Optional[list] = None) -> EnergyGroupBalance:
+    """Баланс активной группы по электроэнергии, ограниченный датой since.
+
+    Начальное сальдо (baseline) учитывается только если оно не предшествует
+    периоду группы (либо since=None).
+    """
+    base_start = _parse_iso(baseline.get("start_date", ""))
+    base = _to_float(baseline.get("balances", {}).get(str(plot))) or 0.0
+
+    # Baseline включаем только если начало baseline >= since (или since не задан)
+    include_base = (since is None) or (base_start is not None and base_start >= since)
+    effective_base = base if include_base else 0.0
+
+    charged = sum(
+        c["amount"] for c in charges_for_plot(plot, meters, rates, replacements,
+                                               up_to=as_of, plots=plots)
+        if c["amount"] is not None
+        and (since is None or reading_date(c["year"], c["month"]) >= since)
+    )
+
+    effective_since = since if since is not None else base_start
+    paid = payments_total(plot, df, date_from=effective_since, date_to=as_of)
+
+    return EnergyGroupBalance(
+        charged=charged,
+        paid=paid,
+        baseline=effective_base,
+        debt=effective_base + charged - paid,
     )
 
 

@@ -509,8 +509,8 @@ class PlotCardDialog(QDialog):
         hdr.setStretchLastSection(False)
         lay.addWidget(self.table, 1)
 
-        # ── Разбивка по собственникам (видна при истории/совладельцах) ──
-        self.owners_lbl = QLabel("Разбивка по собственникам")
+        # ── Разбивка по группам/собственникам (видна при истории) ──
+        self.owners_lbl = QLabel("По группам / собственникам")
         self.owners_lbl.setStyleSheet(
             "color:#6366F1;background:transparent;font-size:12px;margin-top:8px;")
         lay.addWidget(self.owners_lbl)
@@ -765,28 +765,73 @@ class PlotCardDialog(QDialog):
     def _rebuild_owners(self, meters, rates, repls, baseline):
         from core import ownership as own
         rec = energy.plot_record(self._plot)
-        recs = rec.get("owners", []) or []
-        owner_count = sum(1 for o in recs if own.is_owner(o))
-        show = owner_count > 1 or own.has_history(recs)
-        self.owners_lbl.setVisible(show)
-        self.owners_table.setVisible(show)
-        if not show:
-            return
-        rows = energy.balances_by_owner(
-            self._plot, self._as_of, meters, rates, repls, baseline, self._df,
-            recs, ownership_form=rec.get("ownership_form"))
-        self.owners_table.setRowCount(len(rows))
-        for r, ob in enumerate(rows):
-            status = "текущий" if ob.is_current else "прежний"
-            period = self._fmt_own_period(ob.since, ob.until)
-            debt_color = ("#DC2626" if ob.debt > 0.005
-                          else ("#059669" if ob.debt < -0.005 else "#6B7280"))
+
+        has_groups_model = "groups" in rec
+        if has_groups_model:
+            archived = own.archived_groups(rec)
+            active = own.active_group(rec)
+            show = bool(archived)
+            self.owners_lbl.setVisible(show)
+            self.owners_table.setVisible(show)
+            if not show:
+                return
+            all_rows = []
+            if active:
+                since = own.group_since(active)
+                try:
+                    egb = energy.balance_for_active_group(
+                        self._plot, self._as_of, meters, rates, repls,
+                        baseline, self._df, since=since)
+                    all_rows.append({
+                        "name": own.group_label(active, empty="(нет лиц)"),
+                        "period": self._fmt_own_period(since, None),
+                        "charged": egb.baseline + egb.charged,
+                        "paid": egb.paid,
+                        "debt": egb.debt,
+                        "is_current": True,
+                    })
+                except Exception:
+                    pass
+            for g in archived:
+                debt_e = (g.get("debt_at_close") or {}).get("energy", 0.0) or 0.0
+                all_rows.append({
+                    "name": own.group_label(g, empty="(без ФИО)"),
+                    "period": self._fmt_own_period(own.group_since(g), own.group_until(g)),
+                    "charged": None,
+                    "paid": None,
+                    "debt": debt_e,
+                    "is_current": False,
+                })
+        else:
+            recs = rec.get("owners", []) or []
+            owner_count = sum(1 for o in recs if own.is_owner(o))
+            show = owner_count > 1 or own.has_history(recs)
+            self.owners_lbl.setVisible(show)
+            self.owners_table.setVisible(show)
+            if not show:
+                return
+            ob_rows = energy.balances_by_owner(
+                self._plot, self._as_of, meters, rates, repls, baseline, self._df,
+                recs, ownership_form=rec.get("ownership_form"))
+            all_rows = [
+                {"name": f"{ob.name}  ({'текущий' if ob.is_current else 'прежний'})",
+                 "period": self._fmt_own_period(ob.since, ob.until),
+                 "charged": ob.baseline + ob.charged, "paid": ob.paid, "debt": ob.debt,
+                 "is_current": ob.is_current}
+                for ob in ob_rows
+            ]
+
+        self.owners_table.setRowCount(len(all_rows))
+        for r, row in enumerate(all_rows):
+            debt_color = ("#DC2626" if row["debt"] > 0.005
+                          else ("#059669" if row["debt"] < -0.005 else "#6B7280"))
             cells = [
-                (f"{ob.name}  ({status})", "#374151" if ob.is_current else "#9CA3AF"),
-                (period, "#6B7280"),
-                (fmt_money(ob.baseline + ob.charged), "#374151"),
-                (fmt_money(ob.paid), "#059669" if ob.paid else "#9CA3AF"),
-                (fmt_money(ob.debt), debt_color),
+                (row["name"], "#374151" if row["is_current"] else "#9CA3AF"),
+                (row["period"], "#6B7280"),
+                (fmt_money(row["charged"]) if row["charged"] is not None else "—", "#374151"),
+                (fmt_money(row["paid"]) if row["paid"] is not None else "—",
+                 "#059669" if row.get("paid") else "#9CA3AF"),
+                (fmt_money(row["debt"]), debt_color),
             ]
             for c, (text, color) in enumerate(cells):
                 it = QTableWidgetItem(text)
