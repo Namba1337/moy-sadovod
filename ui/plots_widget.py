@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
+    QMessageBox, QPushButton, QScrollArea, QScrollBar, QSizePolicy, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTreeView, QVBoxLayout, QWidget,
 )
 
@@ -100,29 +100,41 @@ _copy_toasts: list = []  # держим ссылку, чтобы GC не уда�
 _SS_COPY_TOAST = (
     "QLabel{background:#C9D8E2;color:#07414F;border-radius:6px;"
     "padding:2px 10px;font-size:11px;}")
+_SS_DIRTY_BADGE = (
+    "QLabel{background:#DCFCE7;color:#16A34A;border-radius:6px;"
+    "padding:2px 10px;font-size:11px;}")
 
 
 def _make_anchor_label(text: str, style: str):
-    """Returns (label, row_layout).
-    row_layout is QHBoxLayout with label + hidden toast side by side.
-    Toast is retrieved via label.property('_toast') in _show_copy_toast."""
+    """Returns (label, row_layout, dirty_badge).
+    row_layout — QHBoxLayout с меткой, тостом «Скопировано» и бейджем «Данные обновлены».
+    Toast: label.property('_toast'). Dirty badge: управляется извне по _refresh_dirty_badges."""
     lbl = QLabel(text)
     lbl.setStyleSheet(style)
-    toast = QLabel("Скопировано")
+
+    def _retained(w):
+        sp = w.sizePolicy()
+        sp.setRetainSizeWhenHidden(True)
+        w.setSizePolicy(sp)
+        return w
+
+    toast = _retained(QLabel("Скопировано"))
     toast.setStyleSheet(_SS_COPY_TOAST)
-    # Виджет резервирует место даже в скрытом состоянии — нет сдвига layout при показе
-    _sp = toast.sizePolicy()
-    _sp.setRetainSizeWhenHidden(True)
-    toast.setSizePolicy(_sp)
     toast.hide()
     lbl.setProperty("_toast", toast)
+
+    dirty = _retained(QLabel("Данные обновлены"))
+    dirty.setStyleSheet(_SS_DIRTY_BADGE)
+    dirty.hide()
+
     row = QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(6)
     row.addWidget(lbl)
     row.addWidget(toast)
+    row.addWidget(dirty)
     row.addStretch()
-    return lbl, row
+    return lbl, row, dirty
 
 
 def _show_copy_toast(anchor) -> None:
@@ -2306,6 +2318,9 @@ class _DocFieldWidget(QWidget):
     _SS_ABSENT = (
         "QLabel{background:#FEF3C7;color:#B45309;border-radius:6px;"
         "padding:2px 10px;font-size:11px;}")
+    _SS_NOT_REQUIRED = (
+        "QLabel{background:#F3F4F6;color:#9CA3AF;border-radius:6px;"
+        "padding:2px 10px;font-size:11px;}")
 
     def __init__(self, doc_path: str = "", *,
                  upload_tip: str = "Загрузить документ",
@@ -2320,7 +2335,7 @@ class _DocFieldWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 0, 4, 0)
+        lay.setContentsMargins(10, 0, 10, 0)
         lay.setSpacing(6)
 
         # Иконка загрузки (Material Symbols, отдельная QLabel — нет проблем с выравниванием)
@@ -2370,7 +2385,7 @@ class _DocFieldWidget(QWidget):
                 + ("QPushButton:hover{color:#B91C1C;}" if has else ""))
 
         self.path_changed.connect(_sync_del)
-        lay.addWidget(self.del_btn)
+        # del_btn не добавляем в lay — он размещается снаружи поля в docs_grid
 
         self._refresh()
 
@@ -2442,6 +2457,19 @@ class _DocFieldWidget(QWidget):
         self._path = ""
         self._refresh()
 
+    def set_path(self, path: str) -> None:
+        self._path = path
+        self._refresh()
+
+    def set_required(self, required: bool) -> None:
+        """True → «Отсутствует» (жёлтый), False → «Не требуется» (серый)."""
+        if required:
+            self._absent.setStyleSheet(self._SS_ABSENT)
+            self._absent.setText("Отсутствует")
+        else:
+            self._absent.setStyleSheet(self._SS_NOT_REQUIRED)
+            self._absent.setText("Не требуется")
+
 
 def _make_doc_delete_btn(doc_w: "_DocFieldWidget") -> "QPushButton":
     """Кнопка удаления документа: серая когда пусто, красная когда есть файл."""
@@ -2482,7 +2510,7 @@ class GroupEditDialog(QDialog):
         self._group = group
         self._is_new = is_new
         self.setWindowTitle("Новая группа" if is_new else "Состав группы")
-        self.setMinimumWidth(640)
+        self.setFixedWidth(720)
         self.setModal(True)
         self._cards: list[dict] = []
         self._primary_idx = 0
@@ -2526,12 +2554,35 @@ class GroupEditDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+        # Применяем стиль напрямую на виджет скроллбара, чтобы он не перекрывался
+        # stylesheet диалога. setFixedWidth гарантирует физический резерв в layout.
+        _vsb = scroll.verticalScrollBar()
+        _vsb.setFixedWidth(10)
+        _vsb.setStyleSheet("""
+            QScrollBar:vertical {
+                background: #E5E9ED;
+                width: 10px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #9CA3AF;
+                border-radius: 4px;
+                min-height: 30px;
+                margin: 1px;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical { background: none; }
+        """)
 
         self._cards_container = QWidget()
         self._cards_container.setStyleSheet("background:transparent;")
         self._cards_vlay = QVBoxLayout(self._cards_container)
         self._cards_vlay.setSpacing(6)
-        self._cards_vlay.setContentsMargins(0, 0, 4, 0)
+        self._cards_vlay.setContentsMargins(0, 0, 16, 0)
         self._cards_vlay.addStretch()
 
         scroll.setWidget(self._cards_container)
@@ -2601,6 +2652,10 @@ class GroupEditDialog(QDialog):
 
     def _set_card_edit_mode(self, cd: dict, mode: bool):
         cd["is_editing"] = mode
+        if mode:
+            cd["_snap"] = self._card_snapshot(cd)
+        else:
+            cd.pop("_snap", None)
         for key in ("name_inp", "phone", "email"):
             cd[key].setReadOnly(not mode)
         for role_key in ("rb_contact", "rb_owner", "rb_member"):
@@ -2728,7 +2783,7 @@ class GroupEditDialog(QDialog):
             "border:1px solid #D1D5DB;border-radius:6px;"
             "padding:3px 10px;font-size:12px;}"
             "QPushButton:hover{background:#F3F4F6;border-color:#9CA3AF;}")
-        btn_cancel.clicked.connect(lambda _, c=cd: self._set_card_edit_mode(c, False))
+        btn_cancel.clicked.connect(lambda _, c=cd: self._cancel_card_edit(c))
         cd["btn_cancel"] = btn_cancel
         hdr_lyt.addWidget(btn_cancel)
 
@@ -2812,9 +2867,10 @@ class GroupEditDialog(QDialog):
         raw_name = owner.get("name", "") if isinstance(owner, dict) else str(owner or "")
         name_col = QVBoxLayout()
         name_col.setSpacing(3)
-        lbl_fio, _fio_lbl_row = _make_anchor_label(
+        lbl_fio, _fio_lbl_row, _fio_dirty = _make_anchor_label(
             "ФИО", "font-size:12px; color:#6B7280; background:transparent;")
         name_col.addLayout(_fio_lbl_row)
+        cd["name_dirty"] = _fio_dirty
         name_row_h = QHBoxLayout()
         name_row_h.setContentsMargins(0, 0, 0, 0)
         name_row_h.setSpacing(4)
@@ -2840,9 +2896,10 @@ class GroupEditDialog(QDialog):
         ]:
             col = QVBoxLayout()
             col.setSpacing(3)
-            lbl_contact, _contact_lbl_row = _make_anchor_label(
+            lbl_contact, _contact_lbl_row, _contact_dirty = _make_anchor_label(
                 label_txt, "font-size:12px; color:#6B7280; background:transparent;")
             col.addLayout(_contact_lbl_row)
+            cd[f"{key}_dirty"] = _contact_dirty
             inp_row = QHBoxLayout()
             inp_row.setSpacing(4)
             inp_row.setContentsMargins(0, 0, 0, 0)
@@ -2854,6 +2911,8 @@ class GroupEditDialog(QDialog):
             col.addLayout(inp_row)
             contact_row.addLayout(col, stretch=1)
             cd[key] = inp
+        cd["phone"].textChanged.connect(self._update_save_state)
+        cd["email"].textChanged.connect(self._update_save_state)
         content_lyt.addLayout(contact_row)
 
         # Строка 3: Роль (взаимоисключающие radio)
@@ -2910,6 +2969,9 @@ class GroupEditDialog(QDialog):
         cd["member_doc"] = mem_w
 
         mem_w.path_changed.connect(lambda path, c=cd: self._update_tags(c))
+        for _dw in (opd_w, egrn_w, mem_w):
+            _dw.path_changed.connect(lambda _: self._update_save_state())
+        self._update_doc_badges(cd)
 
         # QGridLayout гарантирует одинаковую ширину столбцов для всех трёх полей
         docs_grid = QGridLayout()
@@ -2919,22 +2981,31 @@ class GroupEditDialog(QDialog):
         docs_grid.setColumnStretch(0, 1)
         docs_grid.setColumnStretch(1, 1)
 
+        def _doc_row(doc_w):
+            """Возвращает QHBoxLayout: [doc_w] [del_btn снаружи поля]."""
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            row.addWidget(doc_w)
+            row.addWidget(doc_w.del_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            return row
+
         _lbl_ss = "font-size:12px; color:#6B7280; background:transparent;"
         for col_idx, (lbl_txt, doc_w, del_key) in enumerate([
             ("Согласие на ОПД", opd_w, "opd_del"),
             ("Выписка ЕГРН",    egrn_w, "egrn_del"),
         ]):
-            lbl_d = QLabel(lbl_txt)
-            lbl_d.setStyleSheet(_lbl_ss)
-            docs_grid.addWidget(lbl_d,  0, col_idx)
-            docs_grid.addWidget(doc_w,  1, col_idx)
+            _, _lbl_d_row, _doc_dirty = _make_anchor_label(lbl_txt, _lbl_ss)
+            docs_grid.addLayout(_lbl_d_row,      0, col_idx)
+            docs_grid.addLayout(_doc_row(doc_w), 1, col_idx)
+            cd[del_key.replace("_del", "_dirty")] = _doc_dirty
             cd[del_key] = doc_w.del_btn
 
-        lbl_mem = QLabel("Заявление в СНТ")
-        lbl_mem.setStyleSheet(_lbl_ss)
-        docs_grid.addWidget(lbl_mem, 2, 0)
-        docs_grid.addWidget(mem_w,   3, 0)
-        cd["member_del"] = mem_w.del_btn
+        _, _lbl_mem_row, _mem_dirty = _make_anchor_label("Заявление в СНТ", _lbl_ss)
+        docs_grid.addLayout(_lbl_mem_row,    2, 0)
+        docs_grid.addLayout(_doc_row(mem_w), 3, 0)
+        cd["member_dirty"] = _mem_dirty
+        cd["member_del"]   = mem_w.del_btn
 
         content_lyt.addLayout(docs_grid)
 
@@ -3008,11 +3079,82 @@ class GroupEditDialog(QDialog):
         cd["tag_own"].setVisible(cd["rb_owner"].isChecked())
         cd["tag_mem"].setVisible(cd["rb_member"].isChecked())
 
+    # required=True → «Отсутствует», required=False → «Не требуется»
+    _DOC_REQUIRED = {
+        "contact": {"opd": True,  "egrn": False, "member": False},
+        "owner":   {"opd": True,  "egrn": True,  "member": False},
+        "member":  {"opd": True,  "egrn": True,  "member": True},
+    }
+
+    def _update_doc_badges(self, cd: dict) -> None:
+        role = ("member" if cd["rb_member"].isChecked()
+                else "owner" if cd["rb_owner"].isChecked()
+                else "contact")
+        req = self._DOC_REQUIRED[role]
+        cd["opd_doc"].set_required(req["opd"])
+        cd["egrn_doc"].set_required(req["egrn"])
+        cd["member_doc"].set_required(req["member"])
+
+    def _refresh_dirty_badges(self, cd: dict) -> None:
+        snap = cd.get("_snap")
+        editing = cd.get("is_editing", False)
+        if not editing or snap is None:
+            for key in ("name_dirty", "phone_dirty", "email_dirty",
+                        "opd_dirty", "egrn_dirty", "member_dirty"):
+                b = cd.get(key)
+                if b:
+                    b.setVisible(False)
+            return
+        cur = self._card_snapshot(cd)
+        for snap_key, badge_key in [
+            ("name",   "name_dirty"),
+            ("phone",  "phone_dirty"),
+            ("email",  "email_dirty"),
+            ("opd",    "opd_dirty"),
+            ("egrn",   "egrn_dirty"),
+            ("member", "member_dirty"),
+        ]:
+            b = cd.get(badge_key)
+            if b:
+                b.setVisible(cur[snap_key] != snap[snap_key])
+
+    def _cancel_card_edit(self, cd: dict) -> None:
+        snap = cd.get("_snap")
+        if snap is not None:
+            # Блокируем сигналы на время восстановления, чтобы избежать
+            # промежуточных срабатываний _update_save_state с частичным состоянием
+            widgets = [cd["name_inp"], cd["phone"], cd["email"],
+                       cd["rb_contact"], cd["rb_owner"], cd["rb_member"]]
+            for w in widgets:
+                w.blockSignals(True)
+
+            cd["name_inp"].setText(snap["name"])
+            cd["phone"].setText(snap["phone"])
+            cd["email"].setText(snap["email"])
+            cd["rb_contact"].setChecked(snap["role"] == "contact")
+            cd["rb_owner"].setChecked(snap["role"] == "owner")
+            cd["rb_member"].setChecked(snap["role"] == "member")
+
+            for w in widgets:
+                w.blockSignals(False)
+
+            cd["opd_doc"].set_path(snap["opd"])
+            cd["egrn_doc"].set_path(snap["egrn"])
+            cd["member_doc"].set_path(snap["member"])
+
+            self._update_name_summary(cd)
+            self._update_tags(cd)
+            self._update_doc_badges(cd)
+
+        self._set_card_edit_mode(cd, False)
+
     def _set_role(self, cd: dict, role: str):
         for key in ("rb_contact", "rb_owner", "rb_member"):
             if key != f"rb_{role}":
                 cd[key].setChecked(False)
         self._update_tags(cd)
+        self._update_doc_badges(cd)
+        self._update_save_state()
 
     # ── Сделать главным / удалить ─────────────────────────────────────
 
@@ -3066,6 +3208,27 @@ class GroupEditDialog(QDialog):
 
     # ── Сохранение ────────────────────────────────────────────────────
 
+    @staticmethod
+    def _card_snapshot(cd: dict) -> dict:
+        return {
+            "name":   cd["name_inp"].text(),
+            "phone":  cd["phone"].text(),
+            "email":  cd["email"].text(),
+            "role":   ("member" if cd["rb_member"].isChecked()
+                       else "owner" if cd["rb_owner"].isChecked()
+                       else "contact"),
+            "opd":    cd["opd_doc"]._path,
+            "egrn":   cd["egrn_doc"]._path,
+            "member": cd["member_doc"]._path,
+        }
+
+    @staticmethod
+    def _is_card_dirty(cd: dict) -> bool:
+        snap = cd.get("_snap")
+        if snap is None:
+            return True  # новая карточка — сохранять можно сразу
+        return GroupEditDialog._card_snapshot(cd) != snap
+
     def _update_save_state(self):
         if self._warning is None:
             return  # вызван до завершения _setup_ui
@@ -3075,9 +3238,10 @@ class GroupEditDialog(QDialog):
         for cd in self._cards:
             btn = cd.get("btn_save_card")
             if btn is not None:
-                btn.setEnabled(ok)
+                enabled = ok and self._is_card_dirty(cd)
+                btn.setEnabled(enabled)
                 btn.setCursor(
-                    Qt.CursorShape.PointingHandCursor if ok
+                    Qt.CursorShape.PointingHandCursor if enabled
                     else Qt.CursorShape.ArrowCursor)
         if not has_any:
             self._warning.setText("Добавьте хотя бы одно лицо")
@@ -3085,6 +3249,8 @@ class GroupEditDialog(QDialog):
             self._warning.setText("Заполните хотя бы фамилию или имя для каждого лица")
         else:
             self._warning.setText("")
+        for cd in self._cards:
+            self._refresh_dirty_badges(cd)
 
     def _on_accept(self):
         owners = []
