@@ -2105,7 +2105,8 @@ class PlotsWidget(QWidget):
             self.tree.expand(col0)
 
     def _edit_plot(self, plot: dict):
-        dlg = PlotEditDialog(plot_data=plot, parent=self, df=self._df)
+        existing = {str(p.get("num", "")) for p in self._plots if p is not plot}
+        dlg = PlotEditDialog(plot_data=plot, parent=self, df=self._df, existing_nums=existing)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             result = dlg.get_result()
             if result:
@@ -2228,7 +2229,8 @@ class PlotsWidget(QWidget):
         )
 
     def _add_plot(self):
-        dlg = PlotEditDialog(plot_data=None, parent=self, df=self._df)
+        existing = {str(p.get("num", "")) for p in self._plots}
+        dlg = PlotEditDialog(plot_data=None, parent=self, df=self._df, existing_nums=existing)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             result = dlg.get_result()
             if result:
@@ -2576,6 +2578,7 @@ class GroupEditDialog(QDialog):
         self._cards: list[dict] = []
         self._primary_idx = 0
         self._btn_save = None
+        self._btn_create: QPushButton | None = None  # «Создать» (только для новой группы)
         self._btn_switch_edit: QPushButton | None = None  # удалён, оставлен для совместимости
         self._footer_view: QWidget | None = None
         self._footer_edit: QWidget | None = None
@@ -2688,11 +2691,28 @@ class GroupEditDialog(QDialog):
         self._btn_add.clicked.connect(self._on_add_person)
         fv_lay.addWidget(self._btn_add, stretch=1)
 
-        btn_close = QPushButton("Закрыть")
-        btn_close.setObjectName("btnFooterClose")
-        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_close.clicked.connect(self.reject)
-        fv_lay.addWidget(btn_close)
+        if self._is_new:
+            # Новая группа: «Отмена» откатывает (reject), «Создать» доступна
+            # только когда есть хотя бы один контакт с ФИО — пустую не создать.
+            btn_cancel = QPushButton("Отмена")
+            btn_cancel.setObjectName("btnFooterCancel")
+            btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_cancel.clicked.connect(self.reject)
+            fv_lay.addWidget(btn_cancel)
+
+            self._btn_create = QPushButton("Создать")
+            self._btn_create.setObjectName("btnFooterSave")
+            self._btn_create.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_create.clicked.connect(self._on_accept)
+            fv_lay.addWidget(self._btn_create)
+        else:
+            btn_close = QPushButton("Закрыть")
+            btn_close.setObjectName("btnFooterClose")
+            btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+            # «Закрыть» коммитит текущее состояние карточек в результат и accept(),
+            # иначе сохранённые per-card правки не вернутся в PlotEditDialog.
+            btn_close.clicked.connect(self._on_accept)
+            fv_lay.addWidget(btn_close)
 
         lay.addWidget(self._footer_view)
         self._footer_edit = None  # убран; сохранение — per-card
@@ -2767,7 +2787,10 @@ class GroupEditDialog(QDialog):
 
     def _add_owner_card(self, owner: dict, *, is_primary: bool = False,
                         expanded: bool = False, start_editing: bool = False):
-        cd: dict = {"is_collapsed": not expanded, "is_editing": False}
+        # Сохраняем исходный словарь, чтобы при сохранении не потерять поля,
+        # которых нет в UI карточки (area, share, since, until).
+        cd: dict = {"is_collapsed": not expanded, "is_editing": False,
+                    "_src": owner if isinstance(owner, dict) else {}}
 
         card = QFrame()
         card.setObjectName("personCard")
@@ -3357,6 +3380,12 @@ class GroupEditDialog(QDialog):
                     else Qt.CursorShape.ArrowCursor)
         for cd in self._cards:
             self._refresh_dirty_badges(cd)
+        if self._btn_create is not None:
+            any_named = any(cd["name_inp"].text().strip() for cd in self._cards)
+            self._btn_create.setEnabled(any_named)
+            self._btn_create.setCursor(
+                Qt.CursorShape.PointingHandCursor if any_named
+                else Qt.CursorShape.ArrowCursor)
 
     def _on_accept(self):
         owners = []
@@ -3364,7 +3393,7 @@ class GroupEditDialog(QDialog):
             name = cd["name_inp"].text().strip()
             if not name:
                 continue
-            owners.append(_make_owner(
+            o = _make_owner(
                 name,
                 cd["rb_owner"].isChecked(),
                 None,
@@ -3375,7 +3404,13 @@ class GroupEditDialog(QDialog):
                 cd["email"].text().strip(),
                 egrn_doc=cd["egrn_doc"].get_path(),
                 is_member=cd["rb_member"].isChecked(),
-            ))
+            )
+            # Доносим поля, которых нет в UI карточки, из исходных данных.
+            src = cd.get("_src") or {}
+            for k in ("area", "share", "since", "until"):
+                if k in src and k not in o:
+                    o[k] = src[k]
+            owners.append(o)
 
         since_iso = None
         if self._has_since.isChecked():
@@ -3408,7 +3443,7 @@ class GroupEditDialog(QDialog):
             }
             QPushButton#btnSecondary {
                 background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-                border-radius: 6px; padding: 7px 14px; font-size: 13px;
+                border-radius: 6px; padding: 8px 14px; font-size: 13px;
             }
             QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
             QPushButton#btnDelCard {
@@ -3448,145 +3483,6 @@ class GroupEditDialog(QDialog):
             }
         """)
 
-# ============================================================================ #
-#  GroupArchiveDialog — список архивных групп                                 #
-# ============================================================================ #
-
-class GroupArchiveDialog(QDialog):
-    """Диалог со списком всех архивных групп участка.
-
-    Позволяет просмотреть историю и при необходимости сделать группу активной
-    (что архивирует текущую активную). Сигнал ``groups_changed`` испускается,
-    если пользователь изменил состав групп.
-    """
-
-    groups_changed = pyqtSignal(list)  # новый список groups
-
-    def __init__(self, plot_data: dict, active_group: dict, df=None, parent=None):
-        super().__init__(parent)
-        self._plot_data = plot_data
-        self._active_group = active_group
-        self._df = df
-        self._groups = list(ownership.plot_groups(plot_data))
-        self.setWindowTitle("Архив групп")
-        self.setMinimumWidth(680)
-        self.setModal(True)
-        self._setup_ui()
-        self._apply_styles()
-
-    def _setup_ui(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(12)
-
-        title = QLabel("Архивные группы участка")
-        title.setStyleSheet(
-            "font-size:15px; font-weight:600; color:#374151; background:transparent;")
-        lay.addWidget(title)
-
-        archived = ownership.archived_groups({"groups": self._groups})
-        if not archived:
-            lbl = QLabel("Архивных групп нет.")
-            lbl.setStyleSheet("color:#9CA3AF; background:transparent; font-size:13px;")
-            lay.addWidget(lbl)
-        else:
-            for group in archived:
-                lay.addWidget(self._make_group_row(group))
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
-        lay.addWidget(sep)
-
-        close_btn = QPushButton("Закрыть")
-        close_btn.setObjectName("btnSecondary")
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.clicked.connect(self.reject)
-        lay.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
-
-    def _make_group_row(self, group: dict) -> QWidget:
-        card = QFrame()
-        card.setStyleSheet(
-            "QFrame{background:#F8F9FA;border:1px solid #E5E7EB;border-radius:8px;}"
-        )
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(14, 12, 14, 12)
-        cl.setSpacing(6)
-
-        names = ownership.group_label(group, empty="(без ФИО)")
-        since = ownership.group_since(group)
-        until = ownership.group_until(group)
-        since_txt = since.strftime("%d.%m.%Y") if since else "начало"
-        until_txt = until.strftime("%d.%m.%Y") if until else "—"
-
-        top_row = QHBoxLayout()
-        top_row.setSpacing(8)
-        name_lbl = QLabel(names)
-        name_lbl.setStyleSheet(
-            "font-size:13px; font-weight:600; color:#374151; background:transparent;")
-        name_lbl.setWordWrap(True)
-        top_row.addWidget(name_lbl, stretch=1)
-        period_lbl = QLabel(f"{since_txt} — {until_txt}")
-        period_lbl.setStyleSheet(
-            "font-size:12px; color:#6B7280; background:transparent;")
-        top_row.addWidget(period_lbl)
-        cl.addLayout(top_row)
-
-        debt_v = (group.get("debt_at_close") or {}).get("vznosy")
-        debt_e = (group.get("debt_at_close") or {}).get("energy")
-        if debt_v is not None or debt_e is not None:
-            from core.utils import fmt_money
-            parts = []
-            if debt_v is not None:
-                parts.append(f"ЧВ: {fmt_money(debt_v)}")
-            if debt_e is not None:
-                parts.append(f"Электр.: {fmt_money(debt_e)}")
-            debt_lbl = QLabel("Долг на дату закрытия: " + "  ·  ".join(parts))
-            debt_lbl.setStyleSheet(
-                "font-size:12px; color:#6B7280; background:transparent;")
-            cl.addWidget(debt_lbl)
-
-        return card
-
-    def _apply_styles(self):
-        self.setStyleSheet("""
-            QDialog { background: #FFFFFF; color: #374151; }
-            QLabel  { background: transparent; color: #374151; font-size: 13px; }
-            QLineEdit {
-                background: #F8F9FA; border: 1px solid #D1D5DB;
-                border-radius: 5px; color: #374151; padding: 6px 10px; font-size: 13px;
-            }
-            QLineEdit:focus { border: 1px solid #07414F; }
-            QLineEdit[readOnly="true"] {
-                background: transparent; border: none;
-                color: #374151; padding: 6px 0;
-            }
-            QPushButton#btnSecondary {
-                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-                border-radius: 6px; padding: 7px 14px; font-size: 13px;
-            }
-            QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
-            QPushButton#btnEditMode {
-                background: transparent; color: #07414F;
-                border: 1.5px solid #C9D8E2; border-radius: 6px;
-                padding: 5px 14px; font-size: 12px;
-            }
-            QPushButton#btnEditMode:hover { background: #EBF4F6; border-color: #07414F; }
-            QPushButton#btnFooterSave {
-                background: #07414F; color: white; border: none;
-                border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
-            }
-            QPushButton#btnFooterSave:hover { background: #0B5A6E; }
-            QPushButton#btnFooterSave:disabled { background: #E5E7EB; color: #9CA3AF; }
-            QPushButton#btnFooterClose, QPushButton#btnFooterCancel {
-                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-                border-radius: 6px; padding: 8px 20px; font-size: 13px;
-            }
-            QPushButton#btnFooterClose:hover, QPushButton#btnFooterCancel:hover {
-                background: #D1D5DB; color: #374151;
-            }
-        """)
-
 
 # ============================================================================ #
 #  PlotEditDialog                                                              #
@@ -3597,11 +3493,13 @@ class PlotEditDialog(QDialog):
 
     _IC_FONT = "Material Symbols Rounded"
 
-    def __init__(self, plot_data: dict | None = None, parent=None, df=None):
+    def __init__(self, plot_data: dict | None = None, parent=None, df=None,
+                 existing_nums: set | None = None):
         super().__init__(parent)
         self._is_edit = plot_data is not None
         self._plot_data = dict(plot_data or {})
         self._df = df
+        self._existing_nums: set = existing_nums or set()
 
         # Инициализируем рабочую копию списка групп
         self._groups: list = list(ownership.plot_groups(self._plot_data))
@@ -3615,12 +3513,17 @@ class PlotEditDialog(QDialog):
         self._active_group["owners"] = list(
             self._groups[act_idx].get("owners", []) or [])
 
-        self.setWindowTitle("Редактировать участок" if self._is_edit else "Новый участок")
+        self.setWindowTitle("Информация об участке" if self._is_edit else "Новый участок")
         self.setMinimumWidth(680)
         self.setModal(True)
-        self._btn_save = None
-        self._btn_switch_edit: QPushButton | None = None
-        self._edit_mode: bool = not self._is_edit  # новый участок сразу в режиме редактирования
+        self._btn_save: QPushButton | None = None
+        self._btn_switch_edit = None    # не используется
+        self._btn_cancel_fields = None  # не используется
+        self._num_icon_btn: QPushButton | None = None
+        self._area_icon_btn: QPushButton | None = None
+        self._editing_fields: set = set()   # поля в режиме редактирования
+        self._dirty_fields: set = set()     # поля с принятыми изменениями
+        self._group_dirty: bool = False     # группа изменена через "Список контактов"
         self._setup_ui()
         self._apply_styles()
 
@@ -3629,35 +3532,51 @@ class PlotEditDialog(QDialog):
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(12)
 
-        # -- Кнопка перехода в режим редактирования (только для существующего участка) --
-        if self._is_edit:
-            mode_bar = QHBoxLayout()
-            mode_bar.setContentsMargins(0, 0, 0, 0)
-            mode_bar.addStretch()
-            self._btn_switch_edit = QPushButton("✎  Редактировать")
-            self._btn_switch_edit.setObjectName("btnEditMode")
-            self._btn_switch_edit.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._btn_switch_edit.clicked.connect(lambda: self._set_edit_mode(True))
-            mode_bar.addWidget(self._btn_switch_edit)
-            lay.addLayout(mode_bar)
-
         # -- Номер + Площадь в одну строку --
         fields_row = QHBoxLayout()
         fields_row.setSpacing(16)
 
+        def _make_field_icon_btn(field_name: str) -> QPushButton:
+            btn = QPushButton()
+            btn.setFixedSize(28, 28)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton{background:transparent;border:none;border-radius:4px;padding:2px;}"
+                "QPushButton:hover{background:#F3F4F6;}")
+            btn.clicked.connect(lambda: self._on_field_icon_click(field_name))
+            return btn
+
+        # Номер участка
         num_lyt = QVBoxLayout()
         num_lyt.setSpacing(4)
-        num_lyt.addWidget(QLabel("Номер участка:"))
-        self._lbl_num = QLabel(str(self._plot_data.get("num", "") or "—"))
-        self._lbl_num.setStyleSheet(
-            "font-size:14px; font-weight:600; color:#07414F; background:transparent;")
-        num_lyt.addWidget(self._lbl_num)
+        num_lbl_row = QHBoxLayout()
+        num_lbl_row.setContentsMargins(0, 0, 0, 0)
+        num_lbl_row.setSpacing(6)
+        num_lbl_row.addWidget(QLabel("Номер участка"))
+        self._lbl_num_taken = QLabel("Номер занят")
+        self._lbl_num_taken.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._lbl_num_taken.setStyleSheet(
+            "QLabel{background:#FEE2E2;color:#DC2626;border-radius:6px;"
+            "padding:1px 8px;font-size:11px;}")
+        self._lbl_num_taken.hide()
+        num_lbl_row.addWidget(self._lbl_num_taken)
+        num_lbl_row.addStretch()
+        num_lyt.addLayout(num_lbl_row)
+        num_inp_row = QHBoxLayout()
+        num_inp_row.setSpacing(4)
+        num_inp_row.setContentsMargins(0, 0, 0, 0)
         self.inp_num = QLineEdit(str(self._plot_data.get("num", "")))
         self.inp_num.setPlaceholderText("например: 15 или 15/207")
-        self.inp_num.textChanged.connect(self._update_save_state)
-        num_lyt.addWidget(self.inp_num)
+        self.inp_num.textChanged.connect(lambda: self._on_field_changed("num"))
+        num_inp_row.addWidget(self.inp_num)
+        if self._is_edit:
+            self._num_icon_btn = _make_field_icon_btn("num")
+            num_inp_row.addWidget(self._num_icon_btn)
+            self.inp_num.setReadOnly(True)
+        num_lyt.addLayout(num_inp_row)
         fields_row.addLayout(num_lyt, stretch=1)
 
+        # Площадь
         area_raw = self._plot_data.get("area")
         area_text = ""
         if area_raw not in (None, "", 0):
@@ -3667,11 +3586,10 @@ class PlotEditDialog(QDialog):
                 area_text = str(area_raw)
         area_lyt = QVBoxLayout()
         area_lyt.setSpacing(4)
-        area_lyt.addWidget(QLabel("Площадь, м²:"))
-        self._lbl_area = QLabel((area_text + " м²") if area_text else "—")
-        self._lbl_area.setStyleSheet(
-            "font-size:14px; font-weight:600; color:#07414F; background:transparent;")
-        area_lyt.addWidget(self._lbl_area)
+        area_lyt.addWidget(QLabel("Площадь, м²"))
+        area_inp_row = QHBoxLayout()
+        area_inp_row.setSpacing(4)
+        area_inp_row.setContentsMargins(0, 0, 0, 0)
         self.inp_area = QLineEdit(area_text)
         self.inp_area.setPlaceholderText("например: 612")
         self.inp_area.setValidator(QRegularExpressionValidator(
@@ -3681,16 +3599,37 @@ class PlotEditDialog(QDialog):
             self.inp_area.setText(t.replace(".", ",")),
             self.inp_area.setCursorPosition(self.inp_area.cursorPosition()),
         ) if "." in t else None)
-        area_lyt.addWidget(self.inp_area)
+        self.inp_area.textChanged.connect(lambda: self._on_field_changed("area"))
+        area_inp_row.addWidget(self.inp_area)
+        if self._is_edit:
+            self._area_icon_btn = _make_field_icon_btn("area")
+            area_inp_row.addWidget(self._area_icon_btn)
+            self.inp_area.setReadOnly(True)
+        area_lyt.addLayout(area_inp_row)
         fields_row.addLayout(area_lyt, stretch=1)
         lay.addLayout(fields_row)
+
+        # Для нового участка — кнопка «Сохранить» нужна (нет per-field иконок)
+        if not self._is_edit:
+            self._btn_save = QPushButton("Сохранить")
+            self._btn_save.setObjectName("btnFooterSave")
+            self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_save.clicked.connect(self._on_accept)
+
+        # Инициализация иконок для существующего участка
+        if self._is_edit:
+            self._orig_num = str(self._plot_data.get("num", ""))
+            self._orig_area = area_text
+            self._refresh_field_icon("num")
+            self._refresh_field_icon("area")
+            QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
         # -- Заголовок активной группы --
         act_hdr = QHBoxLayout()
         act_hdr.setContentsMargins(0, 4, 0, 0)
         lbl_act = QLabel("Активная группа")
         lbl_act.setStyleSheet(
-            "font-size:12px; font-weight:600; color:#6B7280; background:transparent;")
+            "font-size:12px; color:#6B7280; background:transparent;")
         act_hdr.addWidget(lbl_act, stretch=1)
         self._active_since_lbl = QLabel()
         self._active_since_lbl.setStyleSheet(
@@ -3777,7 +3716,7 @@ class PlotEditDialog(QDialog):
         debt_lay.addLayout(en_row)
         right_lyt.addWidget(self._debt_card)
 
-        btn_edit_group = QPushButton("Редактировать состав")
+        btn_edit_group = QPushButton("Список контактов")
         btn_edit_group.setObjectName("btnSecondary")
         btn_edit_group.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_edit_group.clicked.connect(self._on_edit_active_group)
@@ -3788,16 +3727,7 @@ class PlotEditDialog(QDialog):
         lay.addWidget(self._active_card)
         self._refresh_active_card()
 
-        # -- Кнопка архивирования (только для существующего участка) --
-        if self._is_edit:
-            btn_archive_group = QPushButton(
-                "Отправить активную группу в архив и добавить новую")
-            btn_archive_group.setObjectName("btnSecondary")
-            btn_archive_group.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_archive_group.clicked.connect(self._on_archive_active_group)
-            lay.addWidget(btn_archive_group)
-
-        # -- Предыдущая группа --
+        # -- Предыдущие группы --
         self._prev_section = QWidget()
         self._prev_section.setStyleSheet("background:transparent;")
         prev_lyt = QVBoxLayout(self._prev_section)
@@ -3809,28 +3739,42 @@ class PlotEditDialog(QDialog):
         sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
         prev_lyt.addWidget(sep)
 
-        prev_hdr = QHBoxLayout()
-        lbl_prev = QLabel("Предыдущая группа")
+        lbl_prev = QLabel("Предыдущие группы")
         lbl_prev.setStyleSheet(
             "font-size:12px; font-weight:600; color:#6B7280; background:transparent;")
-        prev_hdr.addWidget(lbl_prev, stretch=1)
-        self._prev_until_lbl = QLabel()
-        self._prev_until_lbl.setStyleSheet(
-            "font-size:12px; color:#6B7280; background:transparent;")
-        prev_hdr.addWidget(self._prev_until_lbl)
-        prev_lyt.addLayout(prev_hdr)
+        prev_lyt.addWidget(lbl_prev)
 
         self._prev_card_container = QWidget()
         self._prev_card_container.setStyleSheet("background:transparent;")
         self._prev_card_lyt = QVBoxLayout(self._prev_card_container)
         self._prev_card_lyt.setContentsMargins(0, 0, 0, 0)
-        prev_lyt.addWidget(self._prev_card_container)
+        self._prev_card_lyt.setSpacing(8)
 
-        btn_view_arch = QPushButton("Перейти в архив групп")
-        btn_view_arch.setObjectName("btnSecondary")
-        btn_view_arch.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_view_arch.clicked.connect(self._on_view_archive)
-        prev_lyt.addWidget(btn_view_arch)
+        # Скролл-область: видно ~одну предыдущую группу, остальные — под скролл,
+        # чтобы окно не росло по вертикали при множестве архивных групп.
+        self._prev_scroll = QScrollArea()
+        self._prev_scroll.setWidgetResizable(True)
+        self._prev_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._prev_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._prev_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # Win11 overlay-scrollbar фикс (как в GroupEditDialog): Fusion на области и
+        # на самом скроллбаре, иначе место под скроллбар не резервируется и QSS игнорируется.
+        self._prev_sb_style = QStyleFactory.create("Fusion")
+        _pvsb = self._prev_scroll.verticalScrollBar()
+        if self._prev_sb_style is not None:
+            self._prev_scroll.setStyle(self._prev_sb_style)
+            _pvsb.setStyle(self._prev_sb_style)
+        _pvsb.setFixedWidth(10)
+        _pvsb.setStyleSheet("""
+            QScrollBar:vertical { background: #E5E9ED; width: 10px; margin: 0; }
+            QScrollBar::handle:vertical {
+                background: #9CA3AF; border-radius: 4px; min-height: 30px; margin: 1px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+        """)
+        self._prev_scroll.setWidget(self._prev_card_container)
+        prev_lyt.addWidget(self._prev_scroll)
 
         lay.addWidget(self._prev_section)
         self._refresh_prev_section()
@@ -3841,55 +3785,164 @@ class PlotEditDialog(QDialog):
         sep2.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
         lay.addWidget(sep2)
 
-        # Режим просмотра: только "Закрыть"
-        self._footer_view = QWidget()
-        fv_lay = QHBoxLayout(self._footer_view)
-        fv_lay.setContentsMargins(0, 0, 0, 0)
-        fv_lay.addStretch()
-        btn_close = QPushButton("Закрыть")
-        btn_close.setObjectName("btnFooterClose")
-        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_close.clicked.connect(self.reject)
-        fv_lay.addWidget(btn_close)
-        lay.addWidget(self._footer_view)
+        footer = QWidget()
+        f_lay = QHBoxLayout(footer)
+        f_lay.setContentsMargins(0, 0, 0, 0)
+        f_lay.setSpacing(8)
+        if not self._is_edit:
+            f_lay.addStretch()
+            btn_cancel = QPushButton("Отмена")
+            btn_cancel.setObjectName("btnFooterCancel")
+            btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_cancel.clicked.connect(self.reject)
+            f_lay.addWidget(btn_cancel)
+            f_lay.addWidget(self._btn_save)
+        else:
+            btn_archive_group = QPushButton("Заменить активную группу")
+            btn_archive_group.setObjectName("btnSecondary")
+            btn_archive_group.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_archive_group.clicked.connect(self._on_archive_active_group)
+            f_lay.addWidget(btn_archive_group, stretch=1)
+            btn_close = QPushButton("Закрыть")
+            btn_close.setObjectName("btnFooterClose")
+            btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_close.clicked.connect(self._on_close)
+            f_lay.addWidget(btn_close)
+        lay.addWidget(footer)
+        self._footer_view = footer
+        self._footer_edit = None
 
-        # Режим редактирования: "Отмена" + "Сохранить"
-        self._footer_edit = QWidget()
-        fe_lay = QHBoxLayout(self._footer_edit)
-        fe_lay.setContentsMargins(0, 0, 0, 0)
-        fe_lay.addStretch()
-        btn_cancel = QPushButton("Отмена")
-        btn_cancel.setObjectName("btnFooterCancel")
-        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_cancel.clicked.connect(self.reject)
-        fe_lay.addWidget(btn_cancel)
-        self._btn_save = QPushButton("Сохранить")
-        self._btn_save.setObjectName("btnFooterSave")
-        self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_save.clicked.connect(self._on_accept)
-        fe_lay.addWidget(self._btn_save)
-        lay.addWidget(self._footer_edit)
+        if not self._is_edit:
+            self._update_save_state()
 
-        self._set_edit_mode(self._edit_mode)
+    def _on_field_icon_click(self, field_name: str):
+        """Переключает edit-режим поля. Коммитит если значение изменено."""
+        inp = self.inp_num if field_name == "num" else self.inp_area
+        orig = self._orig_num if field_name == "num" else self._orig_area
 
-    def _set_edit_mode(self, mode: bool):
-        self._edit_mode = mode
-        # Обновляем view-лейблы текущими значениями из полей
-        self._lbl_num.setText(self.inp_num.text() or "—")
-        area_raw = self.inp_area.text().strip()
-        self._lbl_area.setText((area_raw + " м²") if area_raw else "—")
-        # Переключаем лейблы vs поля
-        self._lbl_num.setVisible(not mode)
-        self.inp_num.setVisible(mode)
-        self._lbl_area.setVisible(not mode)
-        self.inp_area.setVisible(mode)
-        # Кнопка "Редактировать"
-        if self._btn_switch_edit is not None:
-            self._btn_switch_edit.setVisible(not mode)
-        # Футер
-        self._footer_view.setVisible(not mode)
-        self._footer_edit.setVisible(mode)
-        self._update_save_state()
+        if field_name not in self._editing_fields:
+            # Закрыть любое другое открытое поле (откат)
+            for other in list(self._editing_fields):
+                self._discard_field_edit(other)
+            # Войти в режим редактирования
+            self._editing_fields.add(field_name)
+            inp.setReadOnly(False)
+            inp.setFocus()
+        else:
+            # Выйти: коммитить если изменено и не дубль, иначе откатить
+            if inp.text().strip() != orig and not (field_name == "num" and self._is_num_taken()):
+                self._dirty_fields.add(field_name)
+            else:
+                inp.setText(orig)
+            self._editing_fields.discard(field_name)
+            inp.setReadOnly(True)
+            if field_name == "num":
+                self._check_num_duplicate()
+        self._refresh_field_icon(field_name)
+
+    def _discard_field_edit(self, field_name: str):
+        """Выходит из edit-режима поля, откатывая введённые данные."""
+        inp = self.inp_num if field_name == "num" else self.inp_area
+        orig = self._orig_num if field_name == "num" else self._orig_area
+        inp.setText(orig)
+        inp.setReadOnly(True)
+        self._editing_fields.discard(field_name)
+        self._refresh_field_icon(field_name)
+
+    def _on_focus_changed(self, old_widget, new_widget):
+        """Откатывает поле если фокус ушёл не на иконку этого же поля."""
+        for field in list(self._editing_fields):
+            inp = self.inp_num if field == "num" else self.inp_area
+            btn = self._num_icon_btn if field == "num" else self._area_icon_btn
+            if old_widget is inp and new_widget not in (inp, btn):
+                self._discard_field_edit(field)
+
+    def _on_field_changed(self, field_name: str):
+        """Обновляет иконку и статус дубля при изменении текста поля."""
+        if field_name in self._editing_fields:
+            self._refresh_field_icon(field_name)
+        if field_name == "num":
+            self._check_num_duplicate()
+        if not self._is_edit:
+            self._update_save_state()
+
+    def _check_num_duplicate(self):
+        """Показывает бейдж «Номер занят» и блокирует сохранение при дубле."""
+        current = self.inp_num.text().strip()
+        is_taken = bool(current and current in self._existing_nums)
+        self._lbl_num_taken.setVisible(is_taken)
+        # Для нового участка — _update_save_state учтёт is_taken через _is_num_taken()
+        # Для существующего — блокируем иконку через _refresh_field_icon
+
+    def _refresh_field_icon(self, field_name: str):
+        """Выставляет иконку поля по текущему состоянию."""
+        btn = self._num_icon_btn if field_name == "num" else self._area_icon_btn
+        if btn is None:
+            return
+        inp = self.inp_num if field_name == "num" else self.inp_area
+        orig = self._orig_num if field_name == "num" else self._orig_area
+        editing = field_name in self._editing_fields
+        changed = editing and (inp.text().strip() != orig)
+        blocked = changed and field_name == "num" and self._is_num_taken()
+
+        if not editing:
+            btn.setIcon(_mat_icon(0xF88D, 18, fill=0, color="#9CA3AF"))
+            btn.setEnabled(True)
+        elif changed and not blocked:
+            btn.setIcon(_mat_icon(0xE161, 18, fill=1, color="#07414F"))  # save filled
+            btn.setEnabled(True)
+        elif blocked:
+            btn.setIcon(_mat_icon(0xE161, 18, fill=1, color="#9CA3AF"))  # save серый (дубль)
+            btn.setEnabled(False)
+        else:
+            btn.setIcon(_mat_icon(0xF88D, 18, fill=1, color="#07414F"))  # edit filled
+            btn.setEnabled(True)
+
+    def _on_close(self):
+        """Закрывает диалог: если есть закоммиченные изменения — accept, иначе reject."""
+        # Откатить любые открытые поля (без предупреждения)
+        for field in list(self._editing_fields):
+            self._discard_field_edit(field)
+        if self._dirty_fields or self._group_dirty:
+            self._build_result()
+            self.accept()
+        else:
+            self.reject()
+
+    def closeEvent(self, event):
+        if self._is_edit:
+            try:
+                QApplication.instance().focusChanged.disconnect(self._on_focus_changed)
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+    def _build_result(self):
+        """Собирает итоговый словарь и сохраняет в self._result."""
+        num = self.inp_num.text().strip()
+        area_raw = self.inp_area.text().strip().replace(",", ".")
+        area_val = None
+        if area_raw:
+            try:
+                area_val = float(area_raw)
+                if area_val <= 0:
+                    area_val = None
+            except ValueError:
+                pass
+        final_groups = [
+            self._active_group if g.get("until") is None else g
+            for g in self._groups
+        ]
+        result = {"num": num, "groups": final_groups}
+        if area_val is not None:
+            result["area"] = area_val
+        for k in ("billing_type", "meter_commission_date", "meter_act_number",
+                  "meter_location", "norm_kw", "norm_start_date",
+                  "direct_contract_date", "direct_contract_number",
+                  "billing_history", "ownership_history"):
+            if k in self._plot_data:
+                result[k] = self._plot_data[k]
+        self._result = result
 
     def _refresh_active_card(self):
         owners = ownership.group_owners(self._active_group)
@@ -3906,36 +3959,52 @@ class PlotEditDialog(QDialog):
             f"Активна с: {since.strftime('%d.%m.%Y')}" if since else "Активна с: —")
 
         # Счётчики
-        n_owners = sum(1 for o in owners if ownership.is_owner(o))
-        n_contacts = sum(1 for o in owners if not ownership.is_owner(o))
-        n_members = sum(1 for o in owners if isinstance(o, dict) and o.get("member_doc"))
+        n_members = sum(1 for o in owners if isinstance(o, dict) and o.get("is_member"))
         count_lines = []
-        if n_owners:
-            count_lines.append(f"Собственники: {n_owners}")
         if n_members:
             count_lines.append(f"Члены СНТ: {n_members}")
-        if n_contacts:
-            count_lines.append(f"Прочие контактные лица: {n_contacts}")
         self._active_counts_lbl.setText("  ·  ".join(count_lines) if count_lines else "")
 
         # Отсутствующие документы
-        missing = []
-        no_opd = sum(1 for o in owners
-                     if isinstance(o, dict) and not o.get("opd_doc"))
-        no_egrn = sum(1 for o in owners
-                      if isinstance(o, dict) and not o.get("egrn_doc"))
-        no_mem = sum(1 for o in owners
-                     if isinstance(o, dict) and not o.get("member_doc"))
-        if no_opd:
-            missing.append(f"Нет заявления на ОПД: {no_opd}")
-        if no_egrn:
-            missing.append(f"Нет выписки ЕГРН: {no_egrn}")
-        if no_mem:
-            missing.append(f"Нет заявления на членство: {no_mem}")
-        self._active_missing_lbl.setText("\n".join(missing))
+        self._active_missing_lbl.setText("\n".join(self._missing_docs_lines(owners)))
 
         # Долг/Аванс
         self._refresh_debt_card()
+
+    @staticmethod
+    def _missing_docs_lines(owners) -> list[str]:
+        """Список строк об отсутствующих документах по ролям.
+
+        Роль определяется 1-в-1 как в карточке GroupEditDialog (_add_owner_card):
+        is_visible → контакт (нужна ОПД), is_owner → собственник (ОПД+ЕГРН),
+        is_member → член СНТ (ОПД+ЕГРН+заявление), иначе контакт.
+        """
+        no_opd = no_egrn = no_mem = 0
+        for o in owners:
+            if not isinstance(o, dict):
+                continue
+            if o.get("is_visible"):
+                req_opd, req_egrn, req_mem = True, False, False
+            elif o.get("is_owner"):
+                req_opd, req_egrn, req_mem = True, True, False
+            elif o.get("is_member"):
+                req_opd, req_egrn, req_mem = True, True, True
+            else:
+                req_opd, req_egrn, req_mem = True, False, False
+            if req_opd and not o.get("opd_doc"):
+                no_opd += 1
+            if req_egrn and not o.get("egrn_doc"):
+                no_egrn += 1
+            if req_mem and not o.get("member_doc"):
+                no_mem += 1
+        lines = []
+        if no_opd:
+            lines.append(f"Отсутствует заявление на ОПД: {no_opd}")
+        if no_egrn:
+            lines.append(f"Отсутствует выписка ЕГРН: {no_egrn}")
+        if no_mem:
+            lines.append(f"Отсутствует заявление в СНТ: {no_mem}")
+        return lines
 
     def _refresh_debt_card(self):
         from core.utils import fmt_money
@@ -3981,62 +4050,161 @@ class PlotEditDialog(QDialog):
     def _refresh_prev_section(self):
         archived = ownership.archived_groups({"groups": self._groups})
         self._prev_section.setVisible(bool(archived))
-        if not archived:
-            return
-        g = archived[0]
-        until = ownership.group_until(g)
-        self._prev_until_lbl.setText(
-            f"Закрыта с: {until.strftime('%d.%m.%Y')}" if until else "Закрыта")
-        # Очищаем и перестраиваем карточку
+        # Очищаем и перестраиваем все карточки предыдущих групп
         while self._prev_card_lyt.count():
             item = self._prev_card_lyt.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self._prev_card_lyt.addWidget(self._make_archived_preview(g))
+        if not archived:
+            self._prev_scroll.setMinimumHeight(0)
+            self._prev_scroll.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX — без лимита
+            return
+        first_card = None
+        for i, g in enumerate(archived):
+            c = self._make_archived_preview(g)
+            self._prev_card_lyt.addWidget(c)
+            if i == 0:
+                first_card = c
+        # Фиксируем высоту области под одну карточку (+ «peek», если групп несколько),
+        # чтобы минимальный размер окна резервировал место на полную предыдущую группу,
+        # а лишние группы уходили под скролл. Сначала синхронно по sizeHint (чтобы окно
+        # открылось нужной высоты), затем уточняем по фактической высоте после раскладки.
+        self._apply_prev_height(first_card.sizeHint().height(), len(archived))
+        QTimer.singleShot(
+            0, lambda c=first_card, n=len(archived): self._refine_prev_height(c, n))
+
+    def _apply_prev_height(self, one_h: int, count: int):
+        target = max(int(one_h), 130)  # «пол» на случай заниженного sizeHint до показа
+        if count > 1:
+            target += self._prev_card_lyt.spacing() + 20  # видно немного следующей карточки
+        self._prev_scroll.setMinimumHeight(target)
+        self._prev_scroll.setMaximumHeight(target)
+
+    def _refine_prev_height(self, first_card, count: int):
+        try:
+            one_h = max(first_card.sizeHint().height(), first_card.height())
+        except RuntimeError:
+            return  # карточка уже удалена (повторный refresh)
+        self._apply_prev_height(one_h, count)
+        # При добавлении группы в открытом окне — подрастить высоту под новый минимум.
+        need = self.minimumSizeHint().height()
+        if self.height() < need:
+            self.resize(self.width(), need)
 
     def _make_archived_preview(self, group: dict) -> QFrame:
+        """Полная карточка предыдущей группы — как активная, с «Списком контактов»."""
+        owners = ownership.group_owners(group)
+
         card = QFrame()
+        card.setObjectName("prevCard")
         card.setStyleSheet(
-            "QFrame{background:#F8F9FA;border:1px solid #E5E7EB;border-radius:8px;}"
-        )
-        cl = QHBoxLayout(card)
-        cl.setContentsMargins(14, 10, 14, 10)
-        cl.setSpacing(12)
+            "QFrame#prevCard{background:#F8F9FA;border:1px solid #E5E7EB;border-radius:8px;}")
+        card_lay = QHBoxLayout(card)
+        card_lay.setContentsMargins(14, 12, 14, 12)
+        card_lay.setSpacing(14)
 
-        # Левая часть: имена + долг
-        info_w = QWidget()
-        info_w.setStyleSheet("background:transparent;")
-        info_lyt = QVBoxLayout(info_w)
-        info_lyt.setContentsMargins(0, 0, 0, 0)
-        info_lyt.setSpacing(3)
+        # ── Левая часть: период + ФИО + счётчики + отсутствующие документы ──
+        left_w = QWidget()
+        left_w.setStyleSheet("background:transparent;")
+        left_lyt = QVBoxLayout(left_w)
+        left_lyt.setContentsMargins(0, 0, 0, 0)
+        left_lyt.setSpacing(4)
 
-        names = ownership.group_label(group, empty="(без ФИО)")
-        name_lbl = QLabel(names)
+        since = ownership.group_since(group)
+        until = ownership.group_until(group)
+        since_txt = since.strftime("%d.%m.%Y") if since else "начало"
+        until_txt = until.strftime("%d.%m.%Y") if until else "—"
+        period_lbl = QLabel(f"Активна с {since_txt} по {until_txt}")
+        period_lbl.setStyleSheet("font-size:11px; color:#9CA3AF; background:transparent;")
+        left_lyt.addWidget(period_lbl)
+
+        main = next((o for o in owners if isinstance(o, dict) and o.get("is_visible")),
+                    owners[0] if owners else None)
+        name = ownership.owner_name(main) if main else "(нет лиц)"
+        name_lbl = QLabel(name)
         name_lbl.setStyleSheet(
-            "font-size:13px; font-weight:600; color:#374151; background:transparent;")
+            "font-size:14px; font-weight:700; color:#07414F; background:transparent;")
         name_lbl.setWordWrap(True)
-        info_lyt.addWidget(name_lbl)
+        left_lyt.addWidget(name_lbl)
 
+        n_members = sum(1 for o in owners if isinstance(o, dict) and o.get("is_member"))
+        if n_members:
+            counts_lbl = QLabel(f"Члены СНТ: {n_members}")
+            counts_lbl.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
+            left_lyt.addWidget(counts_lbl)
+
+        missing = self._missing_docs_lines(owners)
+        if missing:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color:#E5E7EB; background:#E5E7EB; max-height:1px;")
+            left_lyt.addWidget(sep)
+            missing_lbl = QLabel("\n".join(missing))
+            missing_lbl.setStyleSheet("font-size:12px; color:#9CA3AF; background:transparent;")
+            left_lyt.addWidget(missing_lbl)
+        left_lyt.addStretch()
+        card_lay.addWidget(left_w, stretch=1)
+
+        # ── Правая часть: долг на дату закрытия + «Список контактов» ──
+        right_w = QWidget()
+        right_w.setStyleSheet("background:transparent;")
+        right_w.setFixedWidth(220)
+        right_lyt = QVBoxLayout(right_w)
+        right_lyt.setContentsMargins(0, 0, 0, 0)
+        right_lyt.setSpacing(8)
+
+        from core.utils import fmt_money
         debt_v = (group.get("debt_at_close") or {}).get("vznosy")
         debt_e = (group.get("debt_at_close") or {}).get("energy")
-        if debt_v is not None or debt_e is not None:
-            from core.utils import fmt_money
-            parts = []
-            if debt_v is not None:
-                parts.append(f"ЧВ: {fmt_money(debt_v)}")
-            if debt_e is not None:
-                parts.append(f"Электр.: {fmt_money(debt_e)}")
-            debt_lbl = QLabel("Долг: " + "  ·  ".join(parts))
-            debt_lbl.setStyleSheet(
-                "font-size:12px; color:#6B7280; background:transparent;")
-            info_lyt.addWidget(debt_lbl)
-        cl.addWidget(info_w, stretch=1)
+        debt_card = QFrame()
+        debt_card.setStyleSheet(
+            "QFrame{background:#FFFFFF;border:1px solid #E5E7EB;border-radius:6px;}")
+        debt_lay = QVBoxLayout(debt_card)
+        debt_lay.setContentsMargins(10, 8, 10, 8)
+        debt_lay.setSpacing(4)
+        debt_title = QLabel("Долг на дату закрытия")
+        debt_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        debt_title.setStyleSheet(
+            "font-size:11px; font-weight:600; color:#6B7280; background:transparent;")
+        debt_lay.addWidget(debt_title)
+        for cap, val in (("ЧВ:", debt_v), ("Электр.:", debt_e)):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(cap))
+            vlbl = QLabel(fmt_money(val) if val is not None else "—")
+            vlbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            vlbl.setStyleSheet("font-size:12px; font-weight:600; background:transparent;")
+            row.addWidget(vlbl, stretch=1)
+            debt_lay.addLayout(row)
+        right_lyt.addWidget(debt_card)
+
+        btn_contacts = QPushButton("Список контактов")
+        btn_contacts.setObjectName("btnSecondary")
+        btn_contacts.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_contacts.clicked.connect(lambda _, g=group: self._on_edit_prev_group(g))
+        right_lyt.addWidget(btn_contacts)
+        right_lyt.addStretch()
+        card_lay.addWidget(right_w)
+
         return card
+
+    def _on_edit_prev_group(self, group: dict):
+        """Редактирование состава предыдущей (архивной) группы."""
+        dlg = GroupEditDialog(group, is_new=False, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        result = dlg.get_result()  # сохраняет until + debt_at_close (dict(self._group))
+        for i, g in enumerate(self._groups):
+            if g is group:
+                self._groups[i] = result
+                break
+        self._group_dirty = True
+        self._refresh_prev_section()
 
     def _on_edit_active_group(self):
         dlg = GroupEditDialog(self._active_group, is_new=False, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._active_group = dlg.get_result()
+            self._group_dirty = True
             self._refresh_active_card()
             self._update_save_state()
 
@@ -4046,18 +4214,24 @@ class PlotEditDialog(QDialog):
                                 "В активной группе нет ни одного лица. "
                                 "Добавьте хотя бы одно перед архивированием.")
             return
-        exit_date = self._ask_exit_date()
-        if exit_date is None:
-            return
+        # Дата закрытия текущей группы = дата начала новой («Дата начала группы»).
+        # Отдельный диалог даты не нужен — пользователь укажет её в окне новой группы.
+        new_active = {"since": date.today().isoformat(), "until": None, "owners": []}
+        dlg = GroupEditDialog(new_active, is_new=True, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return  # «Отмена» — откат, пустая группа не создаётся
+        new_active = dlg.get_result()
+
+        since_new = ownership.group_since(new_active)
+        exit_date = since_new or date.today()
+        if since_new is None:
+            new_active["since"] = exit_date.isoformat()
+
         debt_at_close = self._compute_group_debt(exit_date)
         archived = dict(self._active_group)
         archived["until"] = exit_date.isoformat()
         archived["debt_at_close"] = debt_at_close
-        new_active = {"since": exit_date.isoformat(), "until": None, "owners": []}
-        dlg = GroupEditDialog(new_active, is_new=True, parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        new_active = dlg.get_result()
+
         updated = []
         for g in self._groups:
             if g.get("until") is None:
@@ -4067,14 +4241,10 @@ class PlotEditDialog(QDialog):
         updated.append(new_active)
         self._groups = updated
         self._active_group = new_active
+        self._group_dirty = True
         self._refresh_active_card()
         self._refresh_prev_section()
         self._update_save_state()
-
-    def _on_view_archive(self):
-        dlg = GroupArchiveDialog(
-            {"groups": self._groups}, self._active_group, df=self._df, parent=self)
-        dlg.exec()
 
     def _compute_group_debt(self, as_of) -> dict:
         result = {"vznosy": 0.0, "energy": 0.0}
@@ -4106,28 +4276,32 @@ class PlotEditDialog(QDialog):
             pass
         return result
 
+    def _is_num_taken(self) -> bool:
+        current = self.inp_num.text().strip()
+        return bool(current and current in self._existing_nums)
+
     def _update_save_state(self):
-        if self._btn_save is None:
+        if self._btn_save is None or self._is_edit:
             return
         has_owners = bool(ownership.group_owners(self._active_group))
-        num_ok = bool(self.inp_num.text().strip())
+        num_ok = bool(self.inp_num.text().strip()) and not self._is_num_taken()
         ok = has_owners and num_ok
         self._btn_save.setEnabled(ok)
         self._btn_save.setCursor(
             Qt.CursorShape.PointingHandCursor if ok else Qt.CursorShape.ArrowCursor)
 
     def _on_accept(self):
+        """Сохранение нового участка (кнопка «Сохранить» в футере)."""
         num = self.inp_num.text().strip()
         if not num:
             QMessageBox.warning(self, "Ошибка", "Укажите номер участка")
             return
         area_raw = self.inp_area.text().strip().replace(",", ".")
-        area_val = None
         if area_raw:
             try:
-                area_val = float(area_raw)
-                if area_val <= 0:
-                    raise ValueError("non-positive")
+                v = float(area_raw)
+                if v <= 0:
+                    raise ValueError
             except ValueError:
                 QMessageBox.warning(self, "Ошибка",
                                     "Площадь должна быть положительным числом")
@@ -4136,58 +4310,11 @@ class PlotEditDialog(QDialog):
             QMessageBox.warning(self, "Ошибка",
                                 "В активной группе должно быть хотя бы одно лицо")
             return
-        final_groups = []
-        for g in self._groups:
-            if g.get("until") is None:
-                final_groups.append(self._active_group)
-            else:
-                final_groups.append(g)
-        result = {"num": num, "groups": final_groups}
-        if area_val is not None:
-            result["area"] = area_val
-        for k in ("billing_type", "meter_commission_date", "meter_act_number",
-                  "meter_location", "norm_kw", "norm_start_date",
-                  "direct_contract_date", "direct_contract_number",
-                  "billing_history", "ownership_history"):
-            if k in self._plot_data:
-                result[k] = self._plot_data[k]
-        self._result = result
+        self._build_result()
         self.accept()
 
     def get_result(self) -> dict:
         return getattr(self, "_result", {})
-
-    def _ask_exit_date(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Дата закрытия группы")
-        dlg.setModal(True)
-        v = QVBoxLayout(dlg)
-        v.setContentsMargins(18, 16, 18, 14)
-        v.setSpacing(10)
-        lbl = QLabel("Дата перехода права (с этой даты начинается новая группа):")
-        lbl.setStyleSheet("color:#374151; background:transparent; font-size:13px;")
-        v.addWidget(lbl)
-        de = QDateEdit(calendarPopup=True)
-        de.setDisplayFormat("dd.MM.yyyy")
-        de.setDate(QDate.currentDate())
-        v.addWidget(de)
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("В архив")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        v.addWidget(btns)
-        dlg.setStyleSheet(
-            "QDialog{background:#FFFFFF;} QLabel{background:transparent;}"
-            "QDateEdit{background:#F8F9FA;border:1px solid #D1D5DB;border-radius:5px;"
-            "padding:6px 8px;font-size:13px;color:#374151;}"
-            "QDialogButtonBox QPushButton{background:#07414F;color:#fff;border:none;"
-            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
-            "QDialogButtonBox QPushButton[text='Отмена']{background:#E5E7EB;color:#6B7280;}")
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return None
-        return de.date().toPyDate()
 
     def _apply_styles(self):
         self.setStyleSheet("""
@@ -4198,9 +4325,13 @@ class PlotEditDialog(QDialog):
                 border-radius: 5px; color: #374151; padding: 7px 10px; font-size: 13px;
             }
             QLineEdit:focus { border: 1px solid #07414F; }
+            QLineEdit:read-only {
+                background: transparent; border: 1px solid transparent;
+                color: #374151; font-weight: 600;
+            }
             QPushButton#btnSecondary {
                 background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-                border-radius: 6px; padding: 7px 14px; font-size: 13px;
+                border-radius: 6px; padding: 8px 14px; font-size: 13px;
             }
             QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
             QPushButton#btnEditMode {
