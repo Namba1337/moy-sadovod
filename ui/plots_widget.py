@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import re
 from datetime import date, datetime
 
 import pandas as pd
@@ -16,7 +17,8 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMessageBox, QPushButton, QScrollArea, QScrollBar, QSizePolicy, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTreeView, QVBoxLayout, QWidget,
+    QStyleFactory, QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTreeView,
+    QVBoxLayout, QWidget,
 )
 
 from core import ownership
@@ -101,40 +103,99 @@ _SS_COPY_TOAST = (
     "QLabel{background:#C9D8E2;color:#07414F;border-radius:6px;"
     "padding:2px 10px;font-size:11px;}")
 _SS_DIRTY_BADGE = (
-    "QLabel{background:#DCFCE7;color:#16A34A;border-radius:6px;"
-    "padding:2px 10px;font-size:11px;}")
+    "QLabel{background:#DCFCE7;color:#16A34A;border-radius:4px;"
+    "padding:0 8px;font-size:11px;}")
+
+
+def _normalize_phone(raw: str) -> str:
+    """Нормализует произвольную строку в '+7 (XXX) XXX-XX-XX'.
+
+    Возвращает пустую строку если цифр меньше 10 (неполный номер).
+    """
+    digits = re.sub(r"\D", "", raw)
+    if digits and digits[0] in "78":
+        digits = digits[1:]
+    if len(digits) != 10:
+        return ""
+    return f"+7 ({digits[:3]}) {digits[3:6]}-{digits[6:8]}-{digits[8:10]}"
+
+
+def _phone_fmt(d: str) -> str:
+    """Форматирует строку из цифр (до 10) в +7 (XXX) XXX-XX-XX."""
+    if not d:
+        return ""
+    r = "+7 (" + d[:3]
+    if len(d) > 3:
+        r += ") " + d[3:6]
+    if len(d) > 6:
+        r += "-" + d[6:8]
+    if len(d) > 8:
+        r += "-" + d[8:10]
+    return r
+
+
+def _setup_phone_input(inp: "QLineEdit") -> None:
+    """Маскирует поле телефона без setInputMask (тонкий курсор, нет шаблона вне edit-режима).
+
+    Отслеживает предыдущее число цифр: если цифр столько же, но текст стал
+    короче — пользователь удалил разделитель; убираем последнюю цифру, чтобы
+    backspace работал интуитивно.
+    """
+    _st = {"digits": ""}
+
+    def _on_edited(text: str) -> None:
+        raw = re.sub(r"\D", "", text)
+        # Убираем ведущий код страны если за ним есть ещё цифры
+        if len(raw) >= 2 and raw[0] in "78":
+            raw = raw[1:]
+        raw = raw[:10]
+        prev = _st["digits"]
+        # Цифр столько же, но текст стал короче → удалён разделитель
+        if raw == prev and len(text) < len(_phone_fmt(prev)):
+            raw = raw[:-1]
+        _st["digits"] = raw
+        result = _phone_fmt(raw)
+        if result != text:
+            inp.setText(result)
+            inp.setCursorPosition(len(result))
+
+    inp.textEdited.connect(_on_edited)
 
 
 def _make_anchor_label(text: str, style: str):
-    """Returns (label, row_layout, dirty_badge).
-    row_layout — QHBoxLayout с меткой, тостом «Скопировано» и бейджем «Данные обновлены».
+    """Returns (label, row_widget, dirty_badge).
+    row_widget — QWidget фиксированной высоты с меткой, тостом и бейджем «Данные обновлены».
+    Фиксированная высота предотвращает вертикальный сдвиг элементов при появлении бейджей,
+    а отсутствие retainSizeWhenHidden предотвращает горизонтальное переполнение viewport.
     Toast: label.property('_toast'). Dirty badge: управляется извне по _refresh_dirty_badges."""
     lbl = QLabel(text)
     lbl.setStyleSheet(style)
 
-    def _retained(w):
-        sp = w.sizePolicy()
-        sp.setRetainSizeWhenHidden(True)
-        w.setSizePolicy(sp)
-        return w
-
-    toast = _retained(QLabel("Скопировано"))
+    toast = QLabel("Скопировано")
     toast.setStyleSheet(_SS_COPY_TOAST)
     toast.hide()
     lbl.setProperty("_toast", toast)
 
-    dirty = _retained(QLabel("Данные обновлены"))
+    dirty = QLabel("Данные обновлены")
     dirty.setStyleSheet(_SS_DIRTY_BADGE)
     dirty.hide()
 
-    row = QHBoxLayout()
-    row.setContentsMargins(0, 0, 0, 0)
-    row.setSpacing(6)
-    row.addWidget(lbl)
-    row.addWidget(toast)
-    row.addWidget(dirty)
-    row.addStretch()
-    return lbl, row, dirty
+    # Контейнер фиксированной высоты: бейджи могут появляться/исчезать,
+    # не меняя высоту строки и не сдвигая элементы ниже.
+    row_w = QWidget()
+    row_w.setStyleSheet("background:transparent;")
+    row_lay = QHBoxLayout(row_w)
+    row_lay.setContentsMargins(0, 0, 0, 0)
+    row_lay.setSpacing(6)
+    row_lay.addWidget(lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+    row_lay.addWidget(toast, 0, Qt.AlignmentFlag.AlignVCenter)
+    row_lay.addWidget(dirty, 0, Qt.AlignmentFlag.AlignVCenter)
+    row_lay.addStretch()
+    # Высота = бейдж с паддингом; задаётся после adjustSize чтобы учесть DPI
+    toast.adjustSize()
+    dirty.adjustSize()
+    row_w.setFixedHeight(max(toast.sizeHint().height(), dirty.sizeHint().height()) + 2)
+    return lbl, row_w, dirty
 
 
 def _show_copy_toast(anchor) -> None:
@@ -2509,7 +2570,7 @@ class GroupEditDialog(QDialog):
         super().__init__(parent)
         self._group = group
         self._is_new = is_new
-        self.setWindowTitle("Новая группа" if is_new else "Состав группы")
+        self.setWindowTitle("Новая группа" if is_new else "Список контактов")
         self.setFixedWidth(720)
         self.setModal(True)
         self._cards: list[dict] = []
@@ -2518,7 +2579,6 @@ class GroupEditDialog(QDialog):
         self._btn_switch_edit: QPushButton | None = None  # удалён, оставлен для совместимости
         self._footer_view: QWidget | None = None
         self._footer_edit: QWidget | None = None
-        self._warning: QLabel | None = None
         self._setup_ui()
         self._apply_styles()
 
@@ -2550,15 +2610,25 @@ class GroupEditDialog(QDialog):
         lay.addLayout(date_row)
 
         # -- Scroll area for person cards --
-        scroll = QScrollArea()
+        self._scroll = QScrollArea()
+        scroll = self._scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
-        # Применяем стиль напрямую на виджет скроллбара, чтобы он не перекрывался
-        # stylesheet диалога. setFixedWidth гарантирует физический резерв в layout.
+        # На Windows 11 нативный стиль рисует overlay-скроллбар поверх содержимого,
+        # игнорирует QSS и не резервирует место в layout (style hint
+        # SH_ScrollBar_Transient = true). Переводим И scroll-area, И сам скроллбар
+        # на стиль Fusion: scroll-area определяет, резервировать ли место под
+        # скроллбар (Fusion → да, viewport ужимается), скроллбар — как он рисуется
+        # и применяется ли QSS. Стиль храним на self, иначе его соберёт GC и
+        # виджеты вернутся к нативному overlay-виду.
+        self._sb_style = QStyleFactory.create("Fusion")
         _vsb = scroll.verticalScrollBar()
+        if self._sb_style is not None:
+            scroll.setStyle(self._sb_style)
+            _vsb.setStyle(self._sb_style)
         _vsb.setFixedWidth(10)
         _vsb.setStyleSheet("""
             QScrollBar:vertical {
@@ -2582,7 +2652,7 @@ class GroupEditDialog(QDialog):
         self._cards_container.setStyleSheet("background:transparent;")
         self._cards_vlay = QVBoxLayout(self._cards_container)
         self._cards_vlay.setSpacing(6)
-        self._cards_vlay.setContentsMargins(0, 0, 16, 0)
+        self._cards_vlay.setContentsMargins(0, 0, 12, 0)
         self._cards_vlay.addStretch()
 
         scroll.setWidget(self._cards_container)
@@ -2601,34 +2671,29 @@ class GroupEditDialog(QDialog):
                                  expanded=(i == primary_idx))
         self._primary_idx = primary_idx
 
-        # -- Кнопка добавить --
-        self._btn_add = QPushButton("＋  Добавить лицо")
-        self._btn_add.setObjectName("btnSecondary")
-        self._btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_add.clicked.connect(self._on_add_person)
-        lay.addWidget(self._btn_add)
-
-        # -- Предупреждение --
-        self._warning = QLabel()
-        self._warning.setStyleSheet("color:#DC2626; background:transparent; font-size:12px;")
-        self._warning.setWordWrap(True)
-        lay.addWidget(self._warning)
-
+        # -- Нижняя строка: "+ Добавить контакт" слева, "Закрыть" справа --
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
         lay.addWidget(sep)
 
-        # Футер: только "Закрыть" (сохранение — через per-card кнопки)
         self._footer_view = QWidget()
         fv_lay = QHBoxLayout(self._footer_view)
         fv_lay.setContentsMargins(0, 0, 0, 0)
-        fv_lay.addStretch()
+        fv_lay.setSpacing(8)
+
+        self._btn_add = QPushButton("＋  Добавить контакт")
+        self._btn_add.setObjectName("btnSecondary")
+        self._btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_add.clicked.connect(self._on_add_person)
+        fv_lay.addWidget(self._btn_add, stretch=1)
+
         btn_close = QPushButton("Закрыть")
         btn_close.setObjectName("btnFooterClose")
         btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_close.clicked.connect(self.reject)
         fv_lay.addWidget(btn_close)
+
         lay.addWidget(self._footer_view)
         self._footer_edit = None  # убран; сохранение — per-card
 
@@ -2652,6 +2717,8 @@ class GroupEditDialog(QDialog):
 
     def _set_card_edit_mode(self, cd: dict, mode: bool):
         cd["is_editing"] = mode
+        if not mode:
+            cd.pop("_is_new", None)  # после первого сохранения карточка уже не «новая»
         if mode:
             cd["_snap"] = self._card_snapshot(cd)
         else:
@@ -2687,12 +2754,16 @@ class GroupEditDialog(QDialog):
         self._set_card_edit_mode(cd, True)
 
     def _on_add_person(self):
+        if self._any_editing():
+            return
         cd = self._add_owner_card({}, is_primary=not self._cards, expanded=True,
                                    start_editing=True)
+        cd["_is_new"] = True
         # Collapse все остальные
         for other in self._cards:
             if other is not cd and not other["is_collapsed"]:
                 self._apply_collapse(other, collapsed=True)
+        QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(cd["widget"]))
 
     def _add_owner_card(self, owner: dict, *, is_primary: bool = False,
                         expanded: bool = False, start_editing: bool = False):
@@ -2807,21 +2878,31 @@ class GroupEditDialog(QDialog):
         hdr_lyt.addStretch(1)
 
         # ── Теги статуса (только в свёрнутом состоянии) ──────────────────
+        def _make_tag(text: str, bg: str, fg: str) -> QLabel:
+            t = QLabel(text)
+            t.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            t.setStyleSheet(
+                f"font-size:10px; padding:2px 8px; border-radius:6px;"
+                f"background:{bg}; color:{fg};")
+            return t
+
+        tag_docs = _make_tag("Отсутствуют документы", "#FEF3C7", "#B45309")
+        tag_docs.hide()
+        cd["tag_docs"] = tag_docs
+        hdr_lyt.addWidget(tag_docs)
+
         tags_w = QWidget()
         tags_w.setStyleSheet("background:transparent;")
         tags_lyt = QHBoxLayout(tags_w)
         tags_lyt.setContentsMargins(0, 0, 0, 0)
         tags_lyt.setSpacing(4)
-        tag_own = QLabel("Собственник")
-        tag_own.setStyleSheet(
-            "font-size:10px; padding:1px 7px; border-radius:99px;"
-            "background:#C9D8E2; color:#07414F;")
-        tag_mem = QLabel("Член СНТ")
-        tag_mem.setStyleSheet(
-            "font-size:10px; padding:1px 7px; border-radius:99px;"
-            "background:#D6EBD5; color:#2E7D32;")
+        tag_con = _make_tag("Контакт",    "#E5E7EB", "#6B7280")
+        tag_own = _make_tag("Собственник","#C9D8E2", "#07414F")
+        tag_mem = _make_tag("Член СНТ",  "#D6EBD5", "#2E7D32")
+        tags_lyt.addWidget(tag_con)
         tags_lyt.addWidget(tag_own)
         tags_lyt.addWidget(tag_mem)
+        cd["tag_con"] = tag_con
         cd["tag_own"] = tag_own
         cd["tag_mem"] = tag_mem
         cd["tags_w"] = tags_w
@@ -2869,7 +2950,7 @@ class GroupEditDialog(QDialog):
         name_col.setSpacing(3)
         lbl_fio, _fio_lbl_row, _fio_dirty = _make_anchor_label(
             "ФИО", "font-size:12px; color:#6B7280; background:transparent;")
-        name_col.addLayout(_fio_lbl_row)
+        name_col.addWidget(_fio_lbl_row)
         cd["name_dirty"] = _fio_dirty
         name_row_h = QHBoxLayout()
         name_row_h.setContentsMargins(0, 0, 0, 0)
@@ -2888,7 +2969,8 @@ class GroupEditDialog(QDialog):
         # Строка 2: Телефон / E-mail
         contact_row = QHBoxLayout()
         contact_row.setSpacing(8)
-        phone_val = owner.get("phone", "") if isinstance(owner, dict) else ""
+        phone_raw = owner.get("phone", "") if isinstance(owner, dict) else ""
+        phone_val = _normalize_phone(phone_raw)  # приводим к формату маски
         email_val = owner.get("email", "") if isinstance(owner, dict) else ""
         for label_txt, placeholder, val, key in [
             ("Телефон", "+7 (xxx) xxx-xx-xx", phone_val, "phone"),
@@ -2898,7 +2980,7 @@ class GroupEditDialog(QDialog):
             col.setSpacing(3)
             lbl_contact, _contact_lbl_row, _contact_dirty = _make_anchor_label(
                 label_txt, "font-size:12px; color:#6B7280; background:transparent;")
-            col.addLayout(_contact_lbl_row)
+            col.addWidget(_contact_lbl_row)
             cd[f"{key}_dirty"] = _contact_dirty
             inp_row = QHBoxLayout()
             inp_row.setSpacing(4)
@@ -2911,6 +2993,7 @@ class GroupEditDialog(QDialog):
             col.addLayout(inp_row)
             contact_row.addLayout(col, stretch=1)
             cd[key] = inp
+        _setup_phone_input(cd["phone"])
         cd["phone"].textChanged.connect(self._update_save_state)
         cd["email"].textChanged.connect(self._update_save_state)
         content_lyt.addLayout(contact_row)
@@ -2970,7 +3053,8 @@ class GroupEditDialog(QDialog):
 
         mem_w.path_changed.connect(lambda path, c=cd: self._update_tags(c))
         for _dw in (opd_w, egrn_w, mem_w):
-            _dw.path_changed.connect(lambda _: self._update_save_state())
+            _dw.path_changed.connect(lambda _, c=cd: self._update_save_state())
+            _dw.path_changed.connect(lambda _, c=cd: self._update_doc_tag(c))
         self._update_doc_badges(cd)
 
         # QGridLayout гарантирует одинаковую ширину столбцов для всех трёх полей
@@ -2996,13 +3080,13 @@ class GroupEditDialog(QDialog):
             ("Выписка ЕГРН",    egrn_w, "egrn_del"),
         ]):
             _, _lbl_d_row, _doc_dirty = _make_anchor_label(lbl_txt, _lbl_ss)
-            docs_grid.addLayout(_lbl_d_row,      0, col_idx)
+            docs_grid.addWidget(_lbl_d_row,      0, col_idx)
             docs_grid.addLayout(_doc_row(doc_w), 1, col_idx)
             cd[del_key.replace("_del", "_dirty")] = _doc_dirty
             cd[del_key] = doc_w.del_btn
 
         _, _lbl_mem_row, _mem_dirty = _make_anchor_label("Заявление в СНТ", _lbl_ss)
-        docs_grid.addLayout(_lbl_mem_row,    2, 0)
+        docs_grid.addWidget(_lbl_mem_row,    2, 0)
         docs_grid.addLayout(_doc_row(mem_w), 3, 0)
         cd["member_dirty"] = _mem_dirty
         cd["member_del"]   = mem_w.del_btn
@@ -3027,15 +3111,24 @@ class GroupEditDialog(QDialog):
     # ── Collapse / expand ─────────────────────────────────────────────
 
     def _toggle_card(self, cd: dict):
-        if cd.get("is_editing", False):
-            return  # нельзя свернуть в режиме редактирования
+        if self._any_editing():
+            return  # блокируем любые переключения пока активен режим редактирования
+        expanding = cd["is_collapsed"]
         self._apply_collapse(cd, collapsed=not cd["is_collapsed"])
+        if expanding:
+            for other in self._cards:
+                if other is not cd and not other["is_collapsed"]:
+                    self._apply_collapse(other, collapsed=True)
 
     def _apply_collapse(self, cd: dict, *, collapsed: bool):
         cd["is_collapsed"] = collapsed
         cd["content"].setVisible(not collapsed)
         cd["name_summary"].setVisible(collapsed)
         cd["tags_w"].setVisible(collapsed)
+        if collapsed:
+            self._update_doc_tag(cd)
+        else:
+            cd["tag_docs"].setVisible(False)
         cd["chevron"].setText(chr(0xE313) if collapsed else chr(0xE316))
         self._refresh_btn_edit(cd)
 
@@ -3076,8 +3169,25 @@ class GroupEditDialog(QDialog):
         cd["name_summary"].setText(name)
 
     def _update_tags(self, cd: dict):
+        cd["tag_con"].setVisible(cd["rb_contact"].isChecked())
         cd["tag_own"].setVisible(cd["rb_owner"].isChecked())
         cd["tag_mem"].setVisible(cd["rb_member"].isChecked())
+
+    def _update_doc_tag(self, cd: dict) -> None:
+        """Показывает бейдж «Отсутствуют документы» только в свёрнутой карточке,
+        если хотя бы один обязательный для роли документ не загружен."""
+        if not cd.get("is_collapsed", True):
+            return
+        role = ("member" if cd["rb_member"].isChecked()
+                else "owner" if cd["rb_owner"].isChecked()
+                else "contact")
+        req = self._DOC_REQUIRED[role]
+        missing = (
+            (req["opd"]    and not cd["opd_doc"].get_path())
+            or (req["egrn"]   and not cd["egrn_doc"].get_path())
+            or (req["member"] and not cd["member_doc"].get_path())
+        )
+        cd["tag_docs"].setVisible(missing)
 
     # required=True → «Отсутствует», required=False → «Не требуется»
     _DOC_REQUIRED = {
@@ -3119,6 +3229,9 @@ class GroupEditDialog(QDialog):
                 b.setVisible(cur[snap_key] != snap[snap_key])
 
     def _cancel_card_edit(self, cd: dict) -> None:
+        if cd.get("_is_new"):
+            self._remove_card(cd)
+            return
         snap = cd.get("_snap")
         if snap is not None:
             # Блокируем сигналы на время восстановления, чтобы избежать
@@ -3154,12 +3267,15 @@ class GroupEditDialog(QDialog):
                 cd[key].setChecked(False)
         self._update_tags(cd)
         self._update_doc_badges(cd)
+        self._update_doc_tag(cd)
         self._update_save_state()
 
     # ── Сделать главным / удалить ─────────────────────────────────────
 
     def _set_primary(self, card_data: dict):
         if card_data not in self._cards:
+            return
+        if self._any_editing():
             return
         idx = self._cards.index(card_data)
         if idx != 0:
@@ -3230,25 +3346,15 @@ class GroupEditDialog(QDialog):
         return GroupEditDialog._card_snapshot(cd) != snap
 
     def _update_save_state(self):
-        if self._warning is None:
-            return  # вызван до завершения _setup_ui
-        has_any = bool(self._cards)
-        all_named = all(cd["name_inp"].text().strip() for cd in self._cards)
-        ok = has_any and all_named
         for cd in self._cards:
             btn = cd.get("btn_save_card")
             if btn is not None:
-                enabled = ok and self._is_card_dirty(cd)
+                named = bool(cd["name_inp"].text().strip())
+                enabled = named and self._is_card_dirty(cd)
                 btn.setEnabled(enabled)
                 btn.setCursor(
                     Qt.CursorShape.PointingHandCursor if enabled
                     else Qt.CursorShape.ArrowCursor)
-        if not has_any:
-            self._warning.setText("Добавьте хотя бы одно лицо")
-        elif not all_named:
-            self._warning.setText("Заполните хотя бы фамилию или имя для каждого лица")
-        else:
-            self._warning.setText("")
         for cd in self._cards:
             self._refresh_dirty_badges(cd)
 
