@@ -14,7 +14,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout,
-    QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTreeView, QVBoxLayout, QWidget,
 )
@@ -97,18 +97,47 @@ _F_COPY_OUTLINE  = _mat_font(18, fill=0)
 _copy_toasts: list = []  # держим ссылку, чтобы GC не удалил до показа
 
 
-def _show_copy_toast(anchor) -> None:
-    dialog = anchor.window()
-    toast = QLabel("Скопировано", dialog)
-    toast.setStyleSheet(
-        "QLabel{background:#C9D8E2; color:#07414F; border-radius:6px;"
-        " padding:2px 10px; font-size:11px;}")
-    toast.adjustSize()
+_SS_COPY_TOAST = (
+    "QLabel{background:#C9D8E2;color:#07414F;border-radius:6px;"
+    "padding:2px 10px;font-size:11px;}")
 
-    # Позиция — сразу после текста label (не всей ширины виджета)
+
+def _make_anchor_label(text: str, style: str):
+    """Returns (label, row_layout).
+    row_layout is QHBoxLayout with label + hidden toast side by side.
+    Toast is retrieved via label.property('_toast') in _show_copy_toast."""
+    lbl = QLabel(text)
+    lbl.setStyleSheet(style)
+    toast = QLabel("Скопировано")
+    toast.setStyleSheet(_SS_COPY_TOAST)
+    # Виджет резервирует место даже в скрытом состоянии — нет сдвига layout при показе
+    _sp = toast.sizePolicy()
+    _sp.setRetainSizeWhenHidden(True)
+    toast.setSizePolicy(_sp)
+    toast.hide()
+    lbl.setProperty("_toast", toast)
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(6)
+    row.addWidget(lbl)
+    row.addWidget(toast)
+    row.addStretch()
+    return lbl, row
+
+
+def _show_copy_toast(anchor) -> None:
+    toast = anchor.property("_toast")
+    if toast is not None:
+        toast.show()
+        QTimer.singleShot(1000, toast.hide)
+        return
+    # Фолбэк для якорей без layout-тоста (не используется для полей карточки)
+    parent = anchor.parentWidget() or anchor.window()
+    toast = QLabel("Скопировано", parent)
+    toast.setStyleSheet(_SS_COPY_TOAST)
+    toast.adjustSize()
     text_w = anchor.fontMetrics().horizontalAdvance(anchor.text())
-    g = anchor.mapToGlobal(QPoint(text_w + 6, 0))
-    p = dialog.mapFromGlobal(g)
+    p = anchor.mapTo(parent, QPoint(text_w + 6, 0))
     toast.move(p.x(), p.y() + (anchor.height() - toast.height()) // 2)
     toast.raise_()
     toast.show()
@@ -297,7 +326,7 @@ class _PlotNode:
 # ============================================================================ #
 
 class PlotsTreeModel(QAbstractItemModel):
-    COLUMNS = ["№", "Площадь, м²", "Контактное лицо",
+    COLUMNS = ["№", "Площадь, м²", "Контакт",
                "Контактный номер", "E-mail", "_edit", "_check"]
 
     # Эмитится только из setData (inline-редактирование), чтобы автосохранять.
@@ -365,7 +394,7 @@ class PlotsTreeModel(QAbstractItemModel):
             if node.kind == "plot":
                 if col == "№":
                     return str(node.plot_ref.get('num', '?'))
-                if col == "Контактное лицо":
+                if col == "Контакт":
                     owners = node.plot_ref.get("owners", []) or []
                     if not owners:
                         return "—"
@@ -392,7 +421,7 @@ class PlotsTreeModel(QAbstractItemModel):
             elif node.kind == "owner":
                 owners = node.plot_ref.get("owners", [])
                 owner = owners[node.owner_idx] if 0 <= node.owner_idx < len(owners) else None
-                if col == "Контактное лицо":
+                if col == "Контакт":
                     return _owner_name(owner) if owner is not None else ""
                 if col == "Площадь, м²":
                     if owner is None:
@@ -447,7 +476,7 @@ class PlotsTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         col = self.COLUMNS[index.column()]
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if node.kind == "owner" and col in ("Контактное лицо", "Площадь, м²"):
+        if node.kind == "owner" and col in ("Контакт", "Площадь, м²"):
             f |= Qt.ItemFlag.ItemIsEditable
         return f
 
@@ -456,7 +485,7 @@ class PlotsTreeModel(QAbstractItemModel):
             return False
         node = index.internalPointer()
         col = self.COLUMNS[index.column()]
-        if node.kind == "owner" and col in ("Контактное лицо", "Площадь, м²"):
+        if node.kind == "owner" and col in ("Контакт", "Площадь, м²"):
             text = str(value).strip()
             owners = node.plot_ref.get("owners", [])
             if not (0 <= node.owner_idx < len(owners)):
@@ -465,14 +494,14 @@ class PlotsTreeModel(QAbstractItemModel):
             # Сохраняем ВСЕ поля владельца (телефон, e-mail, документы,
             # since/until/share), меняя только редактируемую ячейку.
             new = dict(old) if isinstance(old, dict) else {"name": str(old), "is_owner": True}
-            if col == "Контактное лицо":
+            if col == "Контакт":
                 if not text:
                     return False
                 new["name"] = text
                 owners[node.owner_idx] = new
                 pn = node.parent
                 if pn is not None:
-                    fio_col = self.COLUMNS.index("Контактное лицо")
+                    fio_col = self.COLUMNS.index("Контакт")
                     self.dataChanged.emit(self.createIndex(pn.row(), fio_col, pn),
                                          self.createIndex(pn.row(), fio_col, pn))
             else:  # Площадь, м²
@@ -505,7 +534,7 @@ class PlotsTreeModel(QAbstractItemModel):
                 key=lambda n: _plot_num_key(str(n.plot_ref.get("num", ""))),
                 reverse=reverse,
             )
-        elif col == "Контактное лицо":
+        elif col == "Контакт":
             def _fio_key(n):
                 owners = n.plot_ref.get("owners") or []
                 main = next((o for o in owners if _is_owner(o)), owners[0] if owners else {})
@@ -524,7 +553,7 @@ class PlotsTreeModel(QAbstractItemModel):
         self.endResetModel()
 
 # ============================================================================ #
-#  Делегат столбца «Контактное лицо»                                          #
+#  Делегат столбца «Контакт»                                          #
 # ============================================================================ #
 
 class _FioDelegate(QStyledItemDelegate):
@@ -544,7 +573,7 @@ class _FioDelegate(QStyledItemDelegate):
     _BTN_FG     = QColor("#07414F")
     _BTN_BORDER = QColor("#B5C8D5")
     _BTN_H      = 22
-    _FIO_COL    = PlotsTreeModel.COLUMNS.index("Контактное лицо")
+    _FIO_COL    = PlotsTreeModel.COLUMNS.index("Контакт")
 
     def __init__(self, view):
         super().__init__(view)
@@ -1810,7 +1839,7 @@ class PlotsWidget(QWidget):
         self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.tree.setStyleSheet(_TREE_STYLE)
 
-        fio_col_idx = PlotsTreeModel.COLUMNS.index("Контактное лицо")
+        fio_col_idx = PlotsTreeModel.COLUMNS.index("Контакт")
         self._fio_delegate = _FioDelegate(self.tree)
         self._fio_delegate.toggleRequested.connect(self._on_toggle)
         self.tree.setItemDelegateForColumn(fio_col_idx, self._fio_delegate)
@@ -1837,9 +1866,9 @@ class PlotsWidget(QWidget):
         self.hdr_view.sectionResized.connect(self._on_hdr_view_resized)
         self._col_syncing = False
 
-        # Поиск в шапке для столбцов № и Контактное лицо
+        # Поиск в шапке для столбцов № и Контакт
         self.hdr_view.add_search_col(PlotsTreeModel.COLUMNS.index("№"))
-        self.hdr_view.add_search_col(PlotsTreeModel.COLUMNS.index("Контактное лицо"))
+        self.hdr_view.add_search_col(PlotsTreeModel.COLUMNS.index("Контакт"))
         self.hdr_view.searchChanged.connect(self._on_search_changed)
 
         # ── Единый внешний контейнер: клипирует шапку + тело вместе ─────────
@@ -1872,7 +1901,7 @@ class PlotsWidget(QWidget):
                 continue
             if col == PlotsTreeModel.COLUMNS.index("№"):
                 plots = [p for p in plots if text in str(p.get("num", "")).lower()]
-            elif col == PlotsTreeModel.COLUMNS.index("Контактное лицо"):
+            elif col == PlotsTreeModel.COLUMNS.index("Контакт"):
                 plots = [p for p in plots
                          if any(text in _owner_name(o).lower()
                                 for o in p.get("owners", []))]
@@ -1886,7 +1915,7 @@ class PlotsWidget(QWidget):
         self.hdr_view.setSortIndicator(sort_col, sort_order)
 
         col_участок  = PlotsTreeModel.COLUMNS.index("№")
-        col_fio      = PlotsTreeModel.COLUMNS.index("Контактное лицо")
+        col_fio      = PlotsTreeModel.COLUMNS.index("Контакт")
         col_area     = PlotsTreeModel.COLUMNS.index("Площадь, м²")
         col_phone    = PlotsTreeModel.COLUMNS.index("Контактный номер")
         col_email    = PlotsTreeModel.COLUMNS.index("E-mail")
@@ -1923,7 +1952,7 @@ class PlotsWidget(QWidget):
             (chr(0xE73A), n_no_egrn, f"Нет выписки ЕГРН: {n_no_egrn}"),
         ])
 
-        # Индикаторы в шапке «Контактное лицо»
+        # Индикаторы в шапке «Контакт»
         all_owners = [o for p in plots for o in p.get("owners", []) if _is_owner(o)]
         miss_m = sum(1 for o in all_owners if not _owner_member_doc(o))
         miss_o = sum(1 for o in all_owners if not _owner_opd_doc(o))
@@ -2286,6 +2315,7 @@ class _DocFieldWidget(QWidget):
         self._upload_tip = upload_tip
         self._interactive = True
         self.setObjectName("_docFW")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setFixedHeight(34)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
@@ -2302,7 +2332,7 @@ class _DocFieldWidget(QWidget):
         self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._icon.setStyleSheet(
             "QLabel{background:transparent;border:none;padding:0;color:#9CA3AF;}")
-        lay.addWidget(self._icon)
+        lay.addWidget(self._icon, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Текстовое поле
         self._field = QLabel()
@@ -2312,12 +2342,13 @@ class _DocFieldWidget(QWidget):
         self._field.mousePressEvent = self._on_click
         lay.addWidget(self._field)
 
-        # Бейдж «Отсутствует» (view-режим без файла)
+        # Бейдж «Отсутствует» (view-режим без файла) — AlignVCenter предотвращает
+        # растяжение по высоте в QHBoxLayout (иначе заполняет все 34px контейнера)
         self._absent = QLabel("Отсутствует")
         self._absent.setStyleSheet(self._SS_ABSENT)
-        self._absent.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self._absent.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._absent.setVisible(False)
-        lay.addWidget(self._absent)
+        lay.addWidget(self._absent, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         # Кнопка удаления — встроена сразу за полем, видна только в edit-режиме
         _df = QFont("Material Symbols Rounded")
@@ -2367,7 +2398,6 @@ class _DocFieldWidget(QWidget):
 
         if absent_mode:
             self.setStyleSheet(self._SS_BOX_VIEW)
-            self._absent.adjustSize()
         elif has:
             name = self._display_name()
             self.setStyleSheet(self._SS_BOX_EDIT)
@@ -2710,7 +2740,7 @@ class GroupEditDialog(QDialog):
             "border-radius:6px;padding:3px 10px;font-size:12px;}"
             "QPushButton:hover{background:#0B5A6E;}"
             "QPushButton:disabled{background:#E5E7EB;color:#9CA3AF;}")
-        btn_save_card.clicked.connect(self._on_accept)
+        btn_save_card.clicked.connect(lambda _, c=cd: self._set_card_edit_mode(c, False))
         cd["btn_save_card"] = btn_save_card
         hdr_lyt.addWidget(btn_save_card)
 
@@ -2782,9 +2812,9 @@ class GroupEditDialog(QDialog):
         raw_name = owner.get("name", "") if isinstance(owner, dict) else str(owner or "")
         name_col = QVBoxLayout()
         name_col.setSpacing(3)
-        lbl_fio = QLabel("ФИО")
-        lbl_fio.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
-        name_col.addWidget(lbl_fio)
+        lbl_fio, _fio_lbl_row = _make_anchor_label(
+            "ФИО", "font-size:12px; color:#6B7280; background:transparent;")
+        name_col.addLayout(_fio_lbl_row)
         name_row_h = QHBoxLayout()
         name_row_h.setContentsMargins(0, 0, 0, 0)
         name_row_h.setSpacing(4)
@@ -2810,10 +2840,9 @@ class GroupEditDialog(QDialog):
         ]:
             col = QVBoxLayout()
             col.setSpacing(3)
-            lbl_contact = QLabel(label_txt)
-            lbl_contact.setStyleSheet(
-                "font-size:12px; color:#6B7280; background:transparent;")
-            col.addWidget(lbl_contact)
+            lbl_contact, _contact_lbl_row = _make_anchor_label(
+                label_txt, "font-size:12px; color:#6B7280; background:transparent;")
+            col.addLayout(_contact_lbl_row)
             inp_row = QHBoxLayout()
             inp_row.setSpacing(4)
             inp_row.setContentsMargins(0, 0, 0, 0)
@@ -2840,7 +2869,7 @@ class GroupEditDialog(QDialog):
         role_row.setSpacing(16)
         role_row.setContentsMargins(0, 0, 0, 0)
         for role_key, role_lbl in [
-            ("contact", "Контактное лицо"),
+            ("contact", "Контакт"),
             ("owner",   "Собственник"),
             ("member",  "Член СНТ"),
         ]:
@@ -2882,46 +2911,32 @@ class GroupEditDialog(QDialog):
 
         mem_w.path_changed.connect(lambda path, c=cd: self._update_tags(c))
 
-        docs_lyt = QVBoxLayout()
-        docs_lyt.setSpacing(8)
-        docs_lyt.setContentsMargins(0, 0, 0, 0)
+        # QGridLayout гарантирует одинаковую ширину столбцов для всех трёх полей
+        docs_grid = QGridLayout()
+        docs_grid.setHorizontalSpacing(8)
+        docs_grid.setVerticalSpacing(8)
+        docs_grid.setContentsMargins(0, 0, 0, 0)
+        docs_grid.setColumnStretch(0, 1)
+        docs_grid.setColumnStretch(1, 1)
 
-        # Строка 1: Согласие на ОПД + Выписка ЕГРН (как Телефон/E-mail)
-        docs_row1 = QHBoxLayout()
-        docs_row1.setSpacing(8)
-        docs_row1.setContentsMargins(0, 0, 0, 0)
-        for lbl_txt, doc_w, del_key in [
+        _lbl_ss = "font-size:12px; color:#6B7280; background:transparent;"
+        for col_idx, (lbl_txt, doc_w, del_key) in enumerate([
             ("Согласие на ОПД", opd_w, "opd_del"),
             ("Выписка ЕГРН",    egrn_w, "egrn_del"),
-        ]:
-            col = QVBoxLayout()
-            col.setSpacing(3)
-            col.setContentsMargins(0, 0, 0, 0)
+        ]):
             lbl_d = QLabel(lbl_txt)
-            lbl_d.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
-            col.addWidget(lbl_d)
-            col.addWidget(doc_w)
-            docs_row1.addLayout(col, stretch=1)
+            lbl_d.setStyleSheet(_lbl_ss)
+            docs_grid.addWidget(lbl_d,  0, col_idx)
+            docs_grid.addWidget(doc_w,  1, col_idx)
             cd[del_key] = doc_w.del_btn
-        docs_lyt.addLayout(docs_row1)
 
-        # Строка 2: Заявление в СНТ
-        mem_col = QVBoxLayout()
-        mem_col.setSpacing(3)
-        mem_col.setContentsMargins(0, 0, 0, 0)
         lbl_mem = QLabel("Заявление в СНТ")
-        lbl_mem.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
-        mem_col.addWidget(lbl_mem)
-        mem_col.addWidget(mem_w)
-        docs_row2 = QHBoxLayout()
-        docs_row2.setSpacing(8)
-        docs_row2.setContentsMargins(0, 0, 0, 0)
-        docs_row2.addLayout(mem_col, stretch=1)
-        docs_row2.addStretch(1)
-        docs_lyt.addLayout(docs_row2)
+        lbl_mem.setStyleSheet(_lbl_ss)
+        docs_grid.addWidget(lbl_mem, 2, 0)
+        docs_grid.addWidget(mem_w,   3, 0)
         cd["member_del"] = mem_w.del_btn
 
-        content_lyt.addLayout(docs_lyt)
+        content_lyt.addLayout(docs_grid)
 
         card_outer.addWidget(content)
 
