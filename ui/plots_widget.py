@@ -4012,47 +4012,39 @@ class PlotEditDialog(QWidget):
         self._active_debt_line.setWordWrap(True)
         card_lay.addWidget(self._active_debt_line)
 
-        # Кнопка «Список контактов» — внутри карточки активной группы
-        btn_edit_group = QPushButton()
-        btn_edit_group.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_edit_group.setStyleSheet(
-            "QPushButton{background:#F8FAFB;border:1px solid #D1D5DB;border-radius:8px;}"
-            "QPushButton:hover{background:#EBF4F6;border-color:#07414F;}")
-        btn_edit_group.clicked.connect(self._on_edit_active_group)
-        btn_edit_group.setMinimumHeight(40)
-        _bg_lyt = QHBoxLayout(btn_edit_group)
-        _bg_lyt.setContentsMargins(14, 0, 12, 0)
-        _bg_lyt.setSpacing(8)
-        _bg_ic = QLabel(chr(0xE7EF))
-        _bg_ic.setFont(_mat_font(18))
-        _bg_ic.setStyleSheet("color:#07414F; background:transparent;")
-        _bg_tx = QLabel("Список контактов")
-        _bg_tx.setStyleSheet("color:#1F2937; background:transparent; font-size:13px;")
-        self._active_chevron = QLabel(chr(0xE5CF))   # expand_more (▼) — аккордеон
-        self._active_chevron.setFont(_mat_font(18))
-        self._active_chevron.setStyleSheet("color:#9CA3AF; background:transparent;")
-        for _lbl in (_bg_ic, _bg_tx, self._active_chevron):
-            _lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        _bg_lyt.addWidget(_bg_ic)
-        _bg_lyt.addWidget(_bg_tx)
-        _bg_lyt.addStretch()
-        _bg_lyt.addWidget(self._active_chevron)
-        card_lay.addWidget(btn_edit_group)
+        # ── Список контактов (превью + аккордеон) ──────────────────────
+        _sep2 = QFrame()
+        _sep2.setFrameShape(QFrame.Shape.HLine)
+        _sep2.setStyleSheet("color:#C9D8E2; background:#C9D8E2; max-height:1px;")
+        card_lay.addWidget(_sep2)
 
-        # Инлайн-аккордеон активной группы: разворачивается под кнопкой
-        self._active_contacts_box = QWidget()
-        self._active_contacts_box.setStyleSheet("background:transparent;")
-        self._active_contacts_box.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        acb = QVBoxLayout(self._active_contacts_box)
-        acb.setContentsMargins(0, 8, 0, 0)
-        acb.setSpacing(0)
-        self._active_contacts_slot = QVBoxLayout()
-        self._active_contacts_slot.setContentsMargins(0, 0, 0, 0)
-        acb.addLayout(self._active_contacts_slot)
-        self._active_contacts_box.setVisible(False)
-        self._active_contacts_panel = None
-        card_lay.addWidget(self._active_contacts_box)
+        _contacts_hdr = QLabel("Список контактов")
+        _contacts_hdr.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        card_lay.addWidget(_contacts_hdr)
+
+        # Превью: до 3 контактов, показываются сразу
+        self._active_preview_box = QWidget()
+        self._active_preview_box.setStyleSheet("background:transparent;")
+        self._active_preview_lay = QVBoxLayout(self._active_preview_box)
+        self._active_preview_lay.setContentsMargins(0, 0, 0, 0)
+        self._active_preview_lay.setSpacing(2)
+        card_lay.addWidget(self._active_preview_box)
+
+        # Кнопка «Показать все» / «Свернуть»
+        self._btn_show_all = QPushButton("Показать все")
+        self._btn_show_all.setObjectName("btnSecondary")
+        self._btn_show_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_show_all.setStyleSheet(
+            "QPushButton{background:transparent;color:#07414F;"
+            "border:1px solid #D1D5DB;border-radius:6px;"
+            "padding:4px 12px;font-size:12px;}"
+            "QPushButton:hover{background:#EBF4F6;border-color:#07414F;}")
+        self._btn_show_all.clicked.connect(self._on_toggle_contacts_full)
+        self._btn_show_all.setVisible(False)
+        card_lay.addWidget(self._btn_show_all)
+        self._contacts_expanded = False
+        self._expanded_contacts: set[int] = set()
 
         lay.addWidget(self._active_card)
 
@@ -4229,9 +4221,6 @@ class PlotEditDialog(QWidget):
 
     def _on_close(self):
         """Закрывает панель: если есть закоммиченные изменения — saved=True."""
-        # Открытый аккордеон контактов — закоммитить (иначе правки состава потеряются)
-        if getattr(self, "_active_contacts_panel", None) is not None:
-            self._active_contacts_panel.back()
         # Незакоммиченную правку номера/площади откатываем (без предупреждения)
         if self._is_edit and self._header_editing:
             self._set_header_edit(False, revert=True)
@@ -4323,6 +4312,9 @@ class PlotEditDialog(QWidget):
         # Долг/Аванс
         self._refresh_debt_card()
 
+        # Превью контактов (до 3)
+        self._refresh_contacts_preview(owners)
+
     @staticmethod
     def _missing_docs_lines(owners) -> list[str]:
         """Список строк об отсутствующих документах по ролям.
@@ -4391,6 +4383,204 @@ class PlotEditDialog(QWidget):
         except Exception:
             pass
         self._active_debt_line.setText("   ·   ".join(parts))
+
+    def _refresh_contacts_preview(self, owners: list):
+        """Обновляет превью контактов под карточкой активной группы."""
+        # Очистка
+        while self._active_preview_lay.count():
+            item = self._active_preview_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        PREVIEW_LIMIT = 3
+        if self._contacts_expanded:
+            shown = list(enumerate(owners))
+        else:
+            shown = list(enumerate(owners[:PREVIEW_LIMIT]))
+        has_more = len(owners) > PREVIEW_LIMIT
+
+        for idx, o in shown:
+            is_open = idx in self._expanded_contacts
+
+            # Строковый контейнер (vert): заголовок + (опционально) детали
+            card = QWidget()
+            card.setStyleSheet(
+                "QWidget{background:transparent;}"
+                "QWidget:hover{background:#E8F0F5;border-radius:4px;}")
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card_vl = QVBoxLayout(card)
+            card_vl.setContentsMargins(0, 0, 0, 0)
+            card_vl.setSpacing(0)
+
+            # ── Заголовок строки (иконка + ФИО + телефон + шеврон) ──────
+            hdr = QWidget()
+            hdr.setStyleSheet("background:transparent;")
+            hdr.setCursor(Qt.CursorShape.PointingHandCursor)
+            rl = QHBoxLayout(hdr)
+            rl.setContentsMargins(0, 2, 0, 2)
+            rl.setSpacing(6)
+
+            # Иконка роли
+            role_icon = QLabel()
+            role_icon.setFixedSize(18, 18)
+            role_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if isinstance(o, dict) and o.get("is_member"):
+                role_icon.setText(chr(0xE873))
+                role_icon.setStyleSheet(
+                    "background:#D6EBD5; color:#2E7D32; border-radius:9px;"
+                    "font-size:10px;")
+            elif isinstance(o, dict) and o.get("is_owner"):
+                role_icon.setText(chr(0xE25C))
+                role_icon.setStyleSheet(
+                    "background:#C9D8E2; color:#07414F; border-radius:9px;"
+                    "font-size:10px;")
+            else:
+                role_icon.setText(chr(0xE0B9))
+                role_icon.setStyleSheet(
+                    "background:#E5E7EB; color:#6B7280; border-radius:9px;"
+                    "font-size:10px;")
+            role_icon.setFont(_mat_font(12))
+            rl.addWidget(role_icon)
+
+            # Имя
+            full_name = ownership.owner_name(o) if isinstance(o, dict) else str(o)
+            lbl = QLabel(_short_name(full_name) if full_name else "—")
+            lbl.setStyleSheet(
+                "font-size:12px; color:#1F2937; background:transparent;")
+            lbl.setSizePolicy(
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+            lbl.setMinimumWidth(0)
+            rl.addWidget(lbl, stretch=1)
+
+            # Телефон (свернуто)
+            phone = (o.get("phone", "") if isinstance(o, dict) else "").strip()
+            if phone and not is_open:
+                ph_lbl = QLabel(phone)
+                ph_lbl.setStyleSheet(
+                    "font-size:11px; color:#6B7280; background:transparent;")
+                rl.addWidget(ph_lbl)
+
+            # Шеврон
+            chevron_lbl = QLabel(chr(0xE5CE) if is_open else chr(0xE5CF))
+            chevron_lbl.setFont(_mat_font(16))
+            chevron_lbl.setStyleSheet("color:#9CA3AF; background:transparent;")
+            rl.addWidget(chevron_lbl)
+
+            card_vl.addWidget(hdr)
+
+            # ── Детали (только если раскрыто) ─────────────────────────
+            if is_open:
+                det = QWidget()
+                det.setStyleSheet(
+                    "QWidget{background:transparent;}")
+                det_lay = QVBoxLayout(det)
+                det_lay.setContentsMargins(24, 4, 8, 6)
+                det_lay.setSpacing(4)
+
+                # Телефон (поле ввода)
+                _lbl_ph = QLabel("Телефон")
+                _lbl_ph.setStyleSheet(
+                    "font-size:10px; color:#9CA3AF; background:transparent;")
+                det_lay.addWidget(_lbl_ph)
+                inp_phone = QLineEdit(phone)
+                inp_phone.setPlaceholderText("нет телефона")
+                inp_phone.setStyleSheet(
+                    "QLineEdit{background:#F8F9FA; border:1px solid #D1D5DB;"
+                    "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
+                    "QLineEdit:focus{border:1px solid #07414F;}")
+                det_lay.addWidget(inp_phone)
+
+                # Email
+                email = (o.get("email", "") if isinstance(o, dict) else "").strip()
+                _lbl_em = QLabel("Email")
+                _lbl_em.setStyleSheet(
+                    "font-size:10px; color:#9CA3AF; background:transparent;")
+                det_lay.addWidget(_lbl_em)
+                inp_email = QLineEdit(email)
+                inp_email.setPlaceholderText("нет email")
+                inp_email.setStyleSheet(
+                    "QLineEdit{background:#F8F9FA; border:1px solid #D1D5DB;"
+                    "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
+                    "QLineEdit:focus{border:1px solid #07414F;}")
+                det_lay.addWidget(inp_email)
+
+                # Роль (метки)
+                role_row = QHBoxLayout()
+                role_row.setSpacing(6)
+                for text, active in [("Контакт", not (o.get("is_owner") or o.get("is_member"))),
+                                     ("Собственник", bool(o.get("is_owner"))),
+                                     ("Член СНТ", bool(o.get("is_member")))]:
+                    tag = QLabel(text)
+                    if active:
+                        tag.setStyleSheet(
+                            "font-size:10px; padding:2px 8px; border-radius:6px;"
+                            "background:#07414F; color:white;")
+                    else:
+                        tag.setStyleSheet(
+                            "font-size:10px; padding:2px 8px; border-radius:6px;"
+                            "background:#E5E7EB; color:#6B7280;")
+                    role_row.addWidget(tag)
+                role_row.addStretch()
+                det_lay.addLayout(role_row)
+
+                # Кнопка «Сохранить»
+                btn_save = QPushButton("Сохранить")
+                btn_save.setObjectName("btnCardSave")
+                btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_save.setFixedHeight(26)
+                btn_save.setStyleSheet(
+                    "QPushButton{background:#07414F; color:white; border:none;"
+                    "border-radius:6px; padding:4px 14px; font-size:12px;}"
+                    "QPushButton:hover{background:#0B5A6E;}")
+                btn_save.clicked.connect(
+                    lambda _, i=idx, ph=inp_phone, em=inp_email:
+                        self._save_inline_contact(i, ph.text(), em.text()))
+                det_lay.addWidget(btn_save, alignment=Qt.AlignmentFlag.AlignRight)
+
+                card_vl.addWidget(det)
+
+            # Клик по заголовку — тоггл раскрытия
+            _idx = idx
+            hdr.mousePressEvent = lambda _, i=_idx: self._toggle_contact_detail(i)
+
+            self._active_preview_lay.addWidget(card)
+
+        if not shown:
+            empty_lbl = QLabel("(нет лиц)")
+            empty_lbl.setStyleSheet(
+                "font-size:12px; color:#9CA3AF; background:transparent;")
+            self._active_preview_lay.addWidget(empty_lbl)
+
+        if has_more:
+            self._btn_show_all.setVisible(True)
+            self._btn_show_all.setText(
+                "Свернуть" if self._contacts_expanded else "Показать все")
+        else:
+            self._btn_show_all.setVisible(False)
+            self._contacts_expanded = False
+
+    def _toggle_contact_detail(self, idx: int):
+        """Тоггл раскрытия деталей контакта по индексу."""
+        if idx in self._expanded_contacts:
+            self._expanded_contacts.discard(idx)
+        else:
+            self._expanded_contacts.add(idx)
+        self._refresh_contacts_preview(
+            ownership.group_owners(self._active_group))
+
+    def _save_inline_contact(self, idx: int, phone: str, email: str):
+        """Сохраняет отредактированные телефон/email контакта по индексу."""
+        owners = self._active_group.get("owners", []) or []
+        if idx < 0 or idx >= len(owners):
+            return
+        o = owners[idx]
+        if not isinstance(o, dict):
+            return
+        o["phone"] = phone.strip()
+        o["email"] = email.strip()
+        self._group_dirty = True
+        self._refresh_contacts_preview(owners)
+        self._update_save_state()
 
     def _refresh_prev_section(self):
         archived = ownership.archived_groups({"groups": self._groups})
@@ -4537,31 +4727,14 @@ class PlotEditDialog(QWidget):
         self._open_contacts(("prev", group), group, is_new=False)
 
     def _on_edit_active_group(self):
-        """Тоггл инлайн-аккордеона контактов активной группы."""
-        if self._active_contacts_panel is not None:
-            self._active_contacts_panel.back()   # свернуть с сохранением
-            return
-        panel = GroupEditDialog(self._active_group, is_new=False, parent=self, inline=True)
-        panel.closed.connect(self._on_active_contacts_closed)
-        self._active_contacts_panel = panel
-        self._active_contacts_slot.addWidget(panel)
-        self._active_contacts_box.setVisible(True)
-        self._active_chevron.setText(chr(0xE5CE))  # expand_less (▲)
+        """Открывает редактор контактов (под-панель)."""
+        self._open_contacts(("active", None), self._active_group, is_new=False)
 
-    def _on_active_contacts_closed(self, saved: bool):
-        panel = self._active_contacts_panel
-        if saved and panel is not None:
-            self._active_group = panel.get_result()
-            self._group_dirty = True
-            self._refresh_active_card()
-            self._update_save_state()
-        self._active_contacts_box.setVisible(False)
-        self._active_chevron.setText(chr(0xE5CF))  # expand_more (▼)
-        while self._active_contacts_slot.count():
-            it = self._active_contacts_slot.takeAt(0)
-            if it.widget():
-                it.widget().deleteLater()
-        self._active_contacts_panel = None
+    def _on_toggle_contacts_full(self):
+        """Переключает превью (3) ↔ полный список."""
+        self._contacts_expanded = not self._contacts_expanded
+        self._refresh_contacts_preview(
+            ownership.group_owners(self._active_group))
 
     def _on_archive_active_group(self):
         if not ownership.group_owners(self._active_group):
