@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import re
 import shutil
@@ -2810,6 +2810,8 @@ class GroupEditDialog(QWidget):
         self._group = group
         self._is_new = is_new
         self._inline = inline   # инлайн-аккордеон (без внутр. скролла и кнопок-закрытия)
+        if inline:
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._title = "Новая группа" if is_new else "Список контактов"
         self._cards: list[dict] = []
         self._primary_idx = 0
@@ -2840,41 +2842,29 @@ class GroupEditDialog(QWidget):
             lay.setContentsMargins(20, 20, 20, 16)
         lay.setSpacing(10)
 
-        # -- Дата начала группы --
-        date_row = QHBoxLayout()
-        date_row.setSpacing(10)
-        lbl_since = QLabel("Дата начала группы:")
-        lbl_since.setStyleSheet("color:#374151; font-size:13px;")
-        date_row.addWidget(lbl_since)
-        self._has_since = QCheckBox("Указать дату")
-        since_val = ownership.group_since(self._group)
-        self._has_since.setChecked(since_val is not None)
-        date_row.addWidget(self._has_since)
-        self._since_edit = QDateEdit(calendarPopup=True)
-        self._since_edit.setDisplayFormat("dd.MM.yyyy")
-        if since_val:
-            self._since_edit.setDate(QDate(since_val.year, since_val.month, since_val.day))
-        else:
-            self._since_edit.setDate(QDate.currentDate())
-        self._since_edit.setEnabled(since_val is not None)
-        self._has_since.toggled.connect(self._since_edit.setEnabled)
-        date_row.addWidget(self._since_edit)
-        date_row.addStretch()
-        lay.addLayout(date_row)
-
         # -- Контейнер карточек --
         self._cards_container = QWidget()
         self._cards_container.setStyleSheet("background:transparent;")
+        self._cards_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._cards_vlay = QVBoxLayout(self._cards_container)
         self._cards_vlay.setSpacing(6)
         self._cards_vlay.setContentsMargins(0, 0, 0 if self._inline else 12, 0)
         self._cards_vlay.addStretch()
 
         if self._inline:
-            # Аккордеон: без внутреннего скролла — растёт по содержимому,
-            # переполнение обрабатывает внешний drawer_scroll детали.
-            self._scroll = None
-            lay.addWidget(self._cards_container)
+            # Аккордеон: оборачиваем в QScrollArea с выкл. горизонт. скроллом,
+            # чтобы контент не уезжал вправо за границы карточки.
+            self._scroll = QScrollArea()
+            scroll = self._scroll
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setWidget(self._cards_container)
+            scroll.setStyleSheet("QScrollArea{background:transparent; border:none;}"
+                                 "QScrollArea > QWidget > QWidget{background:transparent;}")
+            lay.addWidget(scroll)
         else:
             # Скролл карточек (модалка/под-панель). Win11 overlay-фикс: Fusion на
             # области И на скроллбаре (стиль храним на self, иначе соберёт GC).
@@ -2971,12 +2961,9 @@ class GroupEditDialog(QWidget):
         return any(cd.get("is_editing", False) for cd in self._cards)
 
     def _update_edit_footer(self):
-        """Обновляет доступность поля даты по текущему состоянию карточек."""
+        """Обновляет состояние карточек."""
         if self._footer_view is None:
             return  # вызван до завершения _setup_ui
-        editing = self._any_editing()
-        self._has_since.setEnabled(editing)
-        self._since_edit.setEnabled(editing and self._has_since.isChecked())
         self._update_save_state()
 
     def _set_card_edit_mode(self, cd: dict, mode: bool):
@@ -3038,6 +3025,7 @@ class GroupEditDialog(QWidget):
 
         card = QFrame()
         card.setObjectName("personCard")
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         card_outer = QVBoxLayout(card)
         card_outer.setContentsMargins(0, 0, 0, 0)
         card_outer.setSpacing(0)
@@ -3119,7 +3107,7 @@ class GroupEditDialog(QWidget):
         btn_cancel.setStyleSheet(
             "QPushButton{background:transparent;color:#6B7280;"
             "border:1px solid #D1D5DB;border-radius:6px;"
-            "padding:3px 10px;font-size:12px;}"
+            "padding:3px 8px;font-size:12px;}"
             "QPushButton:hover{background:#F3F4F6;border-color:#9CA3AF;}")
         btn_cancel.clicked.connect(lambda _, c=cd: self._cancel_card_edit(c))
         cd["btn_cancel"] = btn_cancel
@@ -3130,7 +3118,7 @@ class GroupEditDialog(QWidget):
         btn_save_card.setFixedHeight(26)
         btn_save_card.setStyleSheet(
             "QPushButton{background:#07414F;color:white;border:none;"
-            "border-radius:6px;padding:3px 10px;font-size:12px;}"
+            "border-radius:6px;padding:3px 8px;font-size:12px;}"
             "QPushButton:hover{background:#0B5A6E;}"
             "QPushButton:disabled{background:#E5E7EB;color:#9CA3AF;}")
         btn_save_card.clicked.connect(lambda _, c=cd: self._set_card_edit_mode(c, False))
@@ -3140,6 +3128,8 @@ class GroupEditDialog(QWidget):
         # ── Краткое имя (только в свёрнутом состоянии) ───────────────────
         name_summary = QLabel()
         name_summary.setStyleSheet("font-size:12px; color:#374151; background:transparent;")
+        name_summary.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+        name_summary.setMinimumWidth(0)
         cd["name_summary"] = name_summary
         hdr_lyt.addWidget(name_summary)
         hdr_lyt.addStretch(1)
@@ -3149,7 +3139,7 @@ class GroupEditDialog(QWidget):
             t = QLabel(text)
             t.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             t.setStyleSheet(
-                f"font-size:10px; padding:2px 8px; border-radius:6px;"
+                f"font-size:10px; padding:2px 6px; border-radius:6px;"
                 f"background:{bg}; color:{fg};")
             return t
 
@@ -3160,6 +3150,7 @@ class GroupEditDialog(QWidget):
 
         tags_w = QWidget()
         tags_w.setStyleSheet("background:transparent;")
+        tags_w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         tags_lyt = QHBoxLayout(tags_w)
         tags_lyt.setContentsMargins(0, 0, 0, 0)
         tags_lyt.setSpacing(4)
@@ -3703,13 +3694,8 @@ class GroupEditDialog(QWidget):
             except Exception:
                 pass
 
-        since_iso = None
-        if self._has_since.isChecked():
-            since_iso = self._since_edit.date().toPyDate().isoformat()
-
         result = dict(self._group)
         result["owners"] = owners
-        result["since"] = since_iso
         self._result = result
         self._finish(True)
 
@@ -4024,10 +4010,7 @@ class PlotEditDialog(QWidget):
         self._active_debt_line.setWordWrap(True)
         card_lay.addWidget(self._active_debt_line)
 
-        lay.addWidget(self._active_card)
-
-        # Кнопка «Список контактов» — отдельной строкой под карточкой
-        # Кнопка-навигация: иконка группы + текст слева, шеврон справа.
+        # Кнопка «Список контактов» — внутри карточки активной группы
         btn_edit_group = QPushButton()
         btn_edit_group.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_edit_group.setStyleSheet(
@@ -4052,11 +4035,13 @@ class PlotEditDialog(QWidget):
         _bg_lyt.addWidget(_bg_tx)
         _bg_lyt.addStretch()
         _bg_lyt.addWidget(self._active_chevron)
-        lay.addWidget(btn_edit_group)
+        card_lay.addWidget(btn_edit_group)
 
         # Инлайн-аккордеон активной группы: разворачивается под кнопкой
         self._active_contacts_box = QWidget()
         self._active_contacts_box.setStyleSheet("background:transparent;")
+        self._active_contacts_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         acb = QVBoxLayout(self._active_contacts_box)
         acb.setContentsMargins(0, 8, 0, 0)
         acb.setSpacing(0)
@@ -4065,7 +4050,9 @@ class PlotEditDialog(QWidget):
         acb.addLayout(self._active_contacts_slot)
         self._active_contacts_box.setVisible(False)
         self._active_contacts_panel = None
-        lay.addWidget(self._active_contacts_box)
+        card_lay.addWidget(self._active_contacts_box)
+
+        lay.addWidget(self._active_card)
 
         self._refresh_active_card()
 
