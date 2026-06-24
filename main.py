@@ -306,25 +306,15 @@ class _BrandText(QWidget):
 
 
 class _RoundedFrame(QFrame):
-    """QFrame, который обрезает все дочерние виджеты по скруглённому прямоугольнику.
+    """Контейнер со скруглением через QSS (border-radius), как dashCard.
 
-    Использует QBitmap-маску (setMask), которая физически ограничивает рендеринг
-    всего дерева виджетов внутри скруглённой области — в отличие от QSS border-radius,
-    влияющего только на собственный фон виджета.
+    Раньше использовал 1-битную `setMask`-маску для клиппинга детей, но она НЕ
+    давала чистого антиалиасинга и перебивала QSS-скругление (углы оставались
+    квадратными). Контент вкладок — внутри отступов и за скруглённые углы не
+    вылезает, поэтому клиппинг детей не нужен: скругление рисует QSS у самого
+    фрейма (нужен `WA_StyledBackground`).
     """
     _RADIUS = 14
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        bm = QBitmap(self.size())
-        bm.fill(Qt.GlobalColor.color0)          # всё «прозрачно»
-        bp = QPainter(bm)
-        bp.setRenderHint(QPainter.RenderHint.Antialiasing)
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
-        bp.fillPath(path, Qt.GlobalColor.color1)  # скруглённая область «видна»
-        bp.end()
-        self.setMask(bm)
 
 
 class MainWindow(QMainWindow):
@@ -566,8 +556,9 @@ class MainWindow(QMainWindow):
         self.vznosy_debt = VznosyDebtWidget()
         self.plots       = PlotsWidget()
         self.energy_debt = EnergyDebtWidget()
-        for tab in (self.home, self.detail, self.vznosy_debt, self.plots,
-                    self.energy_debt):
+        # plots — намеренно НЕ autoFill: страница прозрачная, чтобы проступал
+        # белый contentFrame («окно вкладки»). Остальные вкладки красят свой фон.
+        for tab in (self.home, self.detail, self.vznosy_debt, self.energy_debt):
             tab.setAutoFillBackground(True)
         self.stack.addWidget(self.home)         # 0
         self.stack.addWidget(self.detail)       # 1
@@ -575,7 +566,11 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.plots)        # 3
         self.stack.addWidget(self.energy_debt)  # 4
         content_frame = _RoundedFrame(objectName="contentFrame")
-        content_frame.setAutoFillBackground(True)
+        # НЕ autoFill: иначе палитра заливает КВАДРАТНЫЙ фон под QSS-скруглением.
+        content_frame.setAutoFillBackground(False)
+        # БЕЗ этого QSS border-radius не скругляет фон (рисуется прямоугольным) —
+        # известная ловушка проекта (та же, что с бейджами на QLabel).
+        content_frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         cf_lyt = QVBoxLayout(content_frame)
         cf_lyt.setContentsMargins(0, 0, 0, 0)
         cf_lyt.setSpacing(0)
@@ -916,7 +911,8 @@ class MainWindow(QMainWindow):
             /* ── Content area ─────────────────────────────────── */
             QWidget#bodyArea { background: #E9EDF3; }
             QFrame#contentFrame {
-                background: #F4F6FA;
+                background: #FFFFFF;
+                border: 1px solid #D5DCE4;
                 border-radius: 14px;
             }
             QStackedWidget#contentArea { background: transparent; }
