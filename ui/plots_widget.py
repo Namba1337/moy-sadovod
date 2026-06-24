@@ -2795,16 +2795,22 @@ def _make_doc_delete_btn(doc_w: "_DocFieldWidget") -> "QPushButton":
 #  GroupEditDialog — редактор состава одной группы                            #
 # ============================================================================ #
 
-class GroupEditDialog(QDialog):
-    """Редактор состава группы — сворачиваемые карточки."""
+class GroupEditDialog(QWidget):
+    """Редактор состава группы — сворачиваемые карточки.
 
-    def __init__(self, group: dict, is_new: bool = False, parent=None):
+    Встраиваемая под-панель (Фаза 2): живёт внутри `PlotEditDialog._contacts_view`,
+    раньше была модальным `QDialog`. О завершении сообщает сигналом `closed(saved)`
+    (вместо accept/reject), результат отдаёт через `get_result()`."""
+
+    closed = pyqtSignal(bool)  # saved? — True если состав группы сохранён
+
+    def __init__(self, group: dict, is_new: bool = False, parent=None,
+                 inline: bool = False):
         super().__init__(parent)
         self._group = group
         self._is_new = is_new
-        self.setWindowTitle("Новая группа" if is_new else "Список контактов")
-        self.setFixedWidth(720)
-        self.setModal(True)
+        self._inline = inline   # инлайн-аккордеон (без внутр. скролла и кнопок-закрытия)
+        self._title = "Новая группа" if is_new else "Список контактов"
         self._cards: list[dict] = []
         self._primary_idx = 0
         self._btn_save = None
@@ -2829,7 +2835,9 @@ class GroupEditDialog(QDialog):
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 20, 20, 16)
+        # Инлайн-аккордеон: внешние поля даёт контейнер-хост, внутри без отступов.
+        lay.setContentsMargins(0, 0, 0, 0) if self._inline else \
+            lay.setContentsMargins(20, 20, 20, 16)
         lay.setSpacing(10)
 
         # -- Дата начала группы --
@@ -2854,55 +2862,45 @@ class GroupEditDialog(QDialog):
         date_row.addStretch()
         lay.addLayout(date_row)
 
-        # -- Scroll area for person cards --
-        self._scroll = QScrollArea()
-        scroll = self._scroll
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-
-        # На Windows 11 нативный стиль рисует overlay-скроллбар поверх содержимого,
-        # игнорирует QSS и не резервирует место в layout (style hint
-        # SH_ScrollBar_Transient = true). Переводим И scroll-area, И сам скроллбар
-        # на стиль Fusion: scroll-area определяет, резервировать ли место под
-        # скроллбар (Fusion → да, viewport ужимается), скроллбар — как он рисуется
-        # и применяется ли QSS. Стиль храним на self, иначе его соберёт GC и
-        # виджеты вернутся к нативному overlay-виду.
-        self._sb_style = QStyleFactory.create("Fusion")
-        _vsb = scroll.verticalScrollBar()
-        if self._sb_style is not None:
-            scroll.setStyle(self._sb_style)
-            _vsb.setStyle(self._sb_style)
-        _vsb.setFixedWidth(10)
-        _vsb.setStyleSheet("""
-            QScrollBar:vertical {
-                background: #E5E9ED;
-                width: 10px;
-                margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background: #9CA3AF;
-                border-radius: 4px;
-                min-height: 30px;
-                margin: 1px;
-            }
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical { height: 0; }
-            QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical { background: none; }
-        """)
-
+        # -- Контейнер карточек --
         self._cards_container = QWidget()
         self._cards_container.setStyleSheet("background:transparent;")
         self._cards_vlay = QVBoxLayout(self._cards_container)
         self._cards_vlay.setSpacing(6)
-        self._cards_vlay.setContentsMargins(0, 0, 12, 0)
+        self._cards_vlay.setContentsMargins(0, 0, 0 if self._inline else 12, 0)
         self._cards_vlay.addStretch()
 
-        scroll.setWidget(self._cards_container)
-        scroll.setMinimumHeight(280)
-        lay.addWidget(scroll, stretch=1)
+        if self._inline:
+            # Аккордеон: без внутреннего скролла — растёт по содержимому,
+            # переполнение обрабатывает внешний drawer_scroll детали.
+            self._scroll = None
+            lay.addWidget(self._cards_container)
+        else:
+            # Скролл карточек (модалка/под-панель). Win11 overlay-фикс: Fusion на
+            # области И на скроллбаре (стиль храним на self, иначе соберёт GC).
+            self._scroll = QScrollArea()
+            scroll = self._scroll
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+            self._sb_style = QStyleFactory.create("Fusion")
+            _vsb = scroll.verticalScrollBar()
+            if self._sb_style is not None:
+                scroll.setStyle(self._sb_style)
+                _vsb.setStyle(self._sb_style)
+            _vsb.setFixedWidth(10)
+            _vsb.setStyleSheet("""
+                QScrollBar:vertical { background:#E5E9ED; width:10px; margin:0; }
+                QScrollBar::handle:vertical {
+                    background:#9CA3AF; border-radius:4px; min-height:30px; margin:1px;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:none; }
+            """)
+            scroll.setWidget(self._cards_container)
+            scroll.setMinimumHeight(280)
+            lay.addWidget(scroll, stretch=1)
 
         # Загружаем существующих участников
         owners = ownership.group_owners(self._group)
@@ -2933,13 +2931,17 @@ class GroupEditDialog(QDialog):
         self._btn_add.clicked.connect(self._on_add_person)
         fv_lay.addWidget(self._btn_add, stretch=1)
 
-        if self._is_new:
+        if self._inline:
+            # Аккордеон: только «+ Добавить контакт». Свернуть/сохранить — повторным
+            # кликом по заголовку «Список контактов» (хост зовёт back() → коммит).
+            pass
+        elif self._is_new:
             # Новая группа: «Отмена» откатывает (reject), «Создать» доступна
             # только когда есть хотя бы один контакт с ФИО — пустую не создать.
             btn_cancel = QPushButton("Отмена")
             btn_cancel.setObjectName("btnFooterCancel")
             btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_cancel.clicked.connect(self.reject)
+            btn_cancel.clicked.connect(lambda: self._finish(False))
             fv_lay.addWidget(btn_cancel)
 
             self._btn_create = QPushButton("Создать")
@@ -3709,7 +3711,18 @@ class GroupEditDialog(QDialog):
         result["owners"] = owners
         result["since"] = since_iso
         self._result = result
-        self.accept()
+        self._finish(True)
+
+    def _finish(self, saved: bool):
+        """Завершает под-панель: сообщает хосту через closed(saved)."""
+        self.closed.emit(saved)
+
+    def back(self):
+        """Кнопка «Назад» в шапке: коммит для правки, отмена для новой группы."""
+        if self._is_new:
+            self._finish(False)
+        else:
+            self._on_accept()
 
     def get_result(self) -> dict:
         return getattr(self, "_result", dict(self._group))
@@ -3819,9 +3832,40 @@ class PlotEditDialog(QWidget):
         self._apply_styles()
 
     def _setup_ui(self):
-        lay = QVBoxLayout(self)
-        # Поля страницы = 0, поэтому паддинги панели задаём здесь: верх 26 —
-        # чтобы «Участок № X» встал вровень с заголовком списка (у колонки списка верх 24).
+        # Панель = два экрана: деталь участка ⇄ список контактов (Фаза 2).
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._detail_view = QWidget()
+        outer.addWidget(self._detail_view)
+
+        # Под-панель контактов: шапка «← Назад» + слот под GroupEditDialog
+        self._contacts_panel = None
+        self._contacts_ctx = None
+        self._contacts_view = QWidget()
+        self._contacts_view.setVisible(False)
+        cv = QVBoxLayout(self._contacts_view)
+        cv.setContentsMargins(20, 16, 20, 0)
+        cv.setSpacing(6)
+        self._contacts_back = QPushButton("←  Назад")
+        self._contacts_back.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._contacts_back.setStyleSheet(
+            "QPushButton{background:transparent;border:none;color:#07414F;"
+            "font-size:13px;font-weight:600;text-align:left;padding:2px 0;}"
+            "QPushButton:hover{color:#0B5A6E;}")
+        self._contacts_back.clicked.connect(self._on_contacts_back)
+        _bh = QHBoxLayout(); _bh.setContentsMargins(0, 0, 0, 0)
+        _bh.addWidget(self._contacts_back); _bh.addStretch()
+        cv.addLayout(_bh)
+        self._contacts_slot = QVBoxLayout()
+        self._contacts_slot.setContentsMargins(0, 0, 0, 0)
+        cv.addLayout(self._contacts_slot, stretch=1)
+        outer.addWidget(self._contacts_view)
+
+        # -- Содержимое детали строится в _detail_view --
+        lay = QVBoxLayout(self._detail_view)
+        # Верх 26 — чтобы «Участок № X» встал вровень с заголовком списка (у колонки верх 24).
         lay.setContentsMargins(24, 26, 24, 24)
         lay.setSpacing(12)
 
@@ -3999,16 +4043,29 @@ class PlotEditDialog(QWidget):
         _bg_ic.setStyleSheet("color:#07414F; background:transparent;")
         _bg_tx = QLabel("Список контактов")
         _bg_tx.setStyleSheet("color:#1F2937; background:transparent; font-size:13px;")
-        _bg_ch = QLabel(chr(0xE5CC))           # chevron_right
-        _bg_ch.setFont(_mat_font(18))
-        _bg_ch.setStyleSheet("color:#9CA3AF; background:transparent;")
-        for _lbl in (_bg_ic, _bg_tx, _bg_ch):
+        self._active_chevron = QLabel(chr(0xE5CF))   # expand_more (▼) — аккордеон
+        self._active_chevron.setFont(_mat_font(18))
+        self._active_chevron.setStyleSheet("color:#9CA3AF; background:transparent;")
+        for _lbl in (_bg_ic, _bg_tx, self._active_chevron):
             _lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         _bg_lyt.addWidget(_bg_ic)
         _bg_lyt.addWidget(_bg_tx)
         _bg_lyt.addStretch()
-        _bg_lyt.addWidget(_bg_ch)
+        _bg_lyt.addWidget(self._active_chevron)
         lay.addWidget(btn_edit_group)
+
+        # Инлайн-аккордеон активной группы: разворачивается под кнопкой
+        self._active_contacts_box = QWidget()
+        self._active_contacts_box.setStyleSheet("background:transparent;")
+        acb = QVBoxLayout(self._active_contacts_box)
+        acb.setContentsMargins(0, 8, 0, 0)
+        acb.setSpacing(0)
+        self._active_contacts_slot = QVBoxLayout()
+        self._active_contacts_slot.setContentsMargins(0, 0, 0, 0)
+        acb.addLayout(self._active_contacts_slot)
+        self._active_contacts_box.setVisible(False)
+        self._active_contacts_panel = None
+        lay.addWidget(self._active_contacts_box)
 
         self._refresh_active_card()
 
@@ -4183,6 +4240,9 @@ class PlotEditDialog(QWidget):
 
     def _on_close(self):
         """Закрывает панель: если есть закоммиченные изменения — saved=True."""
+        # Открытый аккордеон контактов — закоммитить (иначе правки состава потеряются)
+        if getattr(self, "_active_contacts_panel", None) is not None:
+            self._active_contacts_panel.back()
         # Незакоммиченную правку номера/площади откатываем (без предупреждения)
         if self._is_edit and self._header_editing:
             self._set_header_edit(False, revert=True)
@@ -4484,25 +4544,35 @@ class PlotEditDialog(QWidget):
         return card
 
     def _on_edit_prev_group(self, group: dict):
-        """Редактирование состава предыдущей (архивной) группы."""
-        dlg = GroupEditDialog(group, is_new=False, parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        result = dlg.get_result()  # сохраняет until + debt_at_close (dict(self._group))
-        for i, g in enumerate(self._groups):
-            if g is group:
-                self._groups[i] = result
-                break
-        self._group_dirty = True
-        self._refresh_prev_section()
+        """Редактирование состава предыдущей (архивной) группы — под-панель."""
+        self._open_contacts(("prev", group), group, is_new=False)
 
     def _on_edit_active_group(self):
-        dlg = GroupEditDialog(self._active_group, is_new=False, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._active_group = dlg.get_result()
+        """Тоггл инлайн-аккордеона контактов активной группы."""
+        if self._active_contacts_panel is not None:
+            self._active_contacts_panel.back()   # свернуть с сохранением
+            return
+        panel = GroupEditDialog(self._active_group, is_new=False, parent=self, inline=True)
+        panel.closed.connect(self._on_active_contacts_closed)
+        self._active_contacts_panel = panel
+        self._active_contacts_slot.addWidget(panel)
+        self._active_contacts_box.setVisible(True)
+        self._active_chevron.setText(chr(0xE5CE))  # expand_less (▲)
+
+    def _on_active_contacts_closed(self, saved: bool):
+        panel = self._active_contacts_panel
+        if saved and panel is not None:
+            self._active_group = panel.get_result()
             self._group_dirty = True
             self._refresh_active_card()
             self._update_save_state()
+        self._active_contacts_box.setVisible(False)
+        self._active_chevron.setText(chr(0xE5CF))  # expand_more (▼)
+        while self._active_contacts_slot.count():
+            it = self._active_contacts_slot.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self._active_contacts_panel = None
 
     def _on_archive_active_group(self):
         if not ownership.group_owners(self._active_group):
@@ -4510,24 +4580,70 @@ class PlotEditDialog(QWidget):
                                 "В активной группе нет ни одного лица. "
                                 "Добавьте хотя бы одно перед архивированием.")
             return
-        # Дата закрытия текущей группы = дата начала новой («Дата начала группы»).
-        # Отдельный диалог даты не нужен — пользователь укажет её в окне новой группы.
+        # Дата закрытия текущей = «Дата начала группы» новой (укажет в под-панели).
         new_active = {"since": date.today().isoformat(), "until": None, "owners": []}
-        dlg = GroupEditDialog(new_active, is_new=True, parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return  # «Отмена» — откат, пустая группа не создаётся
-        new_active = dlg.get_result()
+        self._open_contacts(("replace", None), new_active, is_new=True)
 
+    # ── Под-панель «Список контактов» (Фаза 2) ───────────────────────────
+    def _open_contacts(self, ctx, group: dict, is_new: bool):
+        """Показывает редактор состава группы как под-панель (вместо модалки)."""
+        self._contacts_ctx = ctx
+        panel = GroupEditDialog(group, is_new=is_new, parent=self)
+        panel.closed.connect(self._on_contacts_closed)
+        self._contacts_panel = panel
+        while self._contacts_slot.count():
+            it = self._contacts_slot.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self._contacts_slot.addWidget(panel)
+        self._detail_view.setVisible(False)
+        self._contacts_view.setVisible(True)
+
+    def _on_contacts_back(self):
+        if self._contacts_panel is not None:
+            self._contacts_panel.back()
+
+    def _on_contacts_closed(self, saved: bool):
+        panel = self._contacts_panel
+        ctx = self._contacts_ctx or ("active", None)
+        if saved and panel is not None:
+            result = panel.get_result()
+            kind = ctx[0]
+            if kind == "active":
+                self._active_group = result
+                self._group_dirty = True
+                self._refresh_active_card()
+                self._update_save_state()
+            elif kind == "prev":
+                group = ctx[1]
+                for i, g in enumerate(self._groups):
+                    if g is group:
+                        self._groups[i] = result
+                        break
+                self._group_dirty = True
+                self._refresh_prev_section()
+            elif kind == "replace":
+                self._apply_replace(result)
+        # Вернуться к детали, убрать панель контактов
+        self._contacts_view.setVisible(False)
+        self._detail_view.setVisible(True)
+        while self._contacts_slot.count():
+            it = self._contacts_slot.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self._contacts_panel = None
+        self._contacts_ctx = None
+
+    def _apply_replace(self, new_active: dict):
+        """Архивирует текущую активную группу и ставит новую (из под-панели)."""
         since_new = ownership.group_since(new_active)
         exit_date = since_new or date.today()
         if since_new is None:
             new_active["since"] = exit_date.isoformat()
-
         debt_at_close = self._compute_group_debt(exit_date)
         archived = dict(self._active_group)
         archived["until"] = exit_date.isoformat()
         archived["debt_at_close"] = debt_at_close
-
         updated = []
         for g in self._groups:
             if g.get("until") is None:
