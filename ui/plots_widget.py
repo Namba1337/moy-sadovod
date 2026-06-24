@@ -2853,18 +2853,13 @@ class GroupEditDialog(QWidget):
         self._cards_vlay.addStretch()
 
         if self._inline:
-            # Аккордеон: оборачиваем в QScrollArea с выкл. горизонт. скроллом,
-            # чтобы контент не уезжал вправо за границы карточки.
-            self._scroll = QScrollArea()
-            scroll = self._scroll
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QFrame.Shape.NoFrame)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            scroll.setWidget(self._cards_container)
-            scroll.setStyleSheet("QScrollArea{background:transparent; border:none;}"
-                                 "QScrollArea > QWidget > QWidget{background:transparent;}")
-            lay.addWidget(scroll)
+            # Аккордеон: контейнер напрямую (без своего скролла) — растёт по
+            # содержимому, вертикальное переполнение ловит внешний drawer_scroll
+            # детали (без вложенных полос). Горизонтальное переполнение лечится
+            # сжатием содержимого карточки (короткое ФИО + иконка статуса), а не
+            # скроллом — минимальную ширину строки скролл не ужимает.
+            self._scroll = None
+            lay.addWidget(self._cards_container)
         else:
             # Скролл карточек (модалка/под-панель). Win11 overlay-фикс: Fusion на
             # области И на скроллбаре (стиль храним на self, иначе соберёт GC).
@@ -3014,7 +3009,9 @@ class GroupEditDialog(QWidget):
         for other in self._cards:
             if other is not cd and not other["is_collapsed"]:
                 self._apply_collapse(other, collapsed=True)
-        QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(cd["widget"]))
+        # Прокрутка к новой карточке (в inline скролла нет — его роль у drawer_scroll)
+        if self._scroll is not None:
+            QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(cd["widget"]))
 
     def _add_owner_card(self, owner: dict, *, is_primary: bool = False,
                         expanded: bool = False, start_editing: bool = False):
@@ -3143,7 +3140,12 @@ class GroupEditDialog(QWidget):
                 f"background:{bg}; color:{fg};")
             return t
 
-        tag_docs = _make_tag("Отсутствуют документы", "#FEF3C7", "#B45309")
+        # Компактная иконка-предупреждение (текст «Отсутствуют документы» занимал
+        # слишком много ширины в узкой карточке) — смысл в тултипе.
+        tag_docs = QLabel(chr(0xF0DC))   # assignment_late — «нет документа» (уже в проекте)
+        tag_docs.setFont(_mat_font(16))
+        tag_docs.setStyleSheet("color:#F59E0B; background:transparent;")
+        tag_docs.setToolTip("Отсутствуют документы")
         tag_docs.hide()
         cd["tag_docs"] = tag_docs
         hdr_lyt.addWidget(tag_docs)
@@ -3432,8 +3434,8 @@ class GroupEditDialog(QWidget):
     # ── Обновление Summary / тегов ────────────────────────────────────
 
     def _update_name_summary(self, cd: dict):
-        name = cd["name_inp"].text().strip() or "(без имени)"
-        cd["name_summary"].setText(name)
+        full = cd["name_inp"].text().strip()
+        cd["name_summary"].setText(_short_name(full) if full else "(без имени)")
 
     def _on_name_committed(self, cd: dict):
         """ФИО введено/выбрано → привязать человека из реестра и подставить контакты.
