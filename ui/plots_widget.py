@@ -1833,13 +1833,33 @@ class _SortHeaderView(QHeaderView):
 #  Чистый список участов (вариант А): модель + делегат строки                  #
 # ============================================================================ #
 
-def _plot_primary_name(plot: dict) -> str:
-    """ФИО главного контакта активной группы (как в карточке детали)."""
+def _plot_primary_owner(plot: dict):
+    """Главный контакт активной группы (is_visible, иначе первый)."""
     g = ownership.active_group(plot) or {}
     owners = ownership.group_owners(g)
-    main = next((o for o in owners if isinstance(o, dict) and o.get("is_visible")),
+    return next((o for o in owners if isinstance(o, dict) and o.get("is_visible")),
                 owners[0] if owners else None)
+
+
+def _plot_primary_name(plot: dict) -> str:
+    """ФИО главного контакта активной группы (как в карточке детали)."""
+    main = _plot_primary_owner(plot)
     return ownership.owner_name(main) if main else ""
+
+
+def _plot_primary_phone(plot: dict) -> str:
+    """Телефон главного контакта активной группы, либо пусто."""
+    main = _plot_primary_owner(plot)
+    return str(main.get("phone", "")) if isinstance(main, dict) else ""
+
+
+def _short_name(full: str) -> str:
+    """«Фамилия Имя Отчество» → «Фамилия И.О.» (для списка)."""
+    parts = str(full or "").split()
+    if not parts:
+        return ""
+    initials = "".join(f"{p[0]}." for p in parts[1:3] if p)
+    return f"{parts[0]} {initials}".strip()
 
 
 def _plot_search_names(plot: dict) -> list[str]:
@@ -1905,10 +1925,12 @@ class _PlotRowDelegate(QStyledItemDelegate):
 
     _ROW_H   = 36
     _NUM_W   = 44
+    _PHONE_W = 140
     _DEBT_W  = 110
     _PAD     = 14
     _FG_NUM  = QColor("#1F2937")
     _FG_NAME = QColor("#1F2937")
+    _FG_PHONE = QColor("#374151")
     _FG_DEBT = QColor("#374151")
     _SEL_BG  = QColor("#C9D8E2")
     _HOV_BG  = QColor("#EBF4F6")
@@ -1948,10 +1970,17 @@ class _PlotRowDelegate(QStyledItemDelegate):
         painter.setPen(self._FG_DEBT)
         painter.drawText(debt_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                          model.debt_text(plot))
-        # ФИО (между)
+        # Телефон (перед долгом; зазор 8 — как spacing капшена)
+        phone_rect = QRect(debt_rect.left() - 8 - self._PHONE_W, vtop,
+                           self._PHONE_W, rect.height())
+        phone = _plot_primary_phone(plot)
+        painter.setPen(self._FG_PHONE)
+        painter.drawText(phone_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         phone or "—")
+        # ФИО (между № и телефоном)
         name_left = rect.left() + self._PAD + self._NUM_W + 8
-        name_rect = QRect(name_left, vtop, debt_rect.left() - name_left - 10, rect.height())
-        name = _plot_primary_name(plot) or "—"
+        name_rect = QRect(name_left, vtop, phone_rect.left() - name_left - 8, rect.height())
+        name = _short_name(_plot_primary_name(plot)) or "—"
         elided = QFontMetrics(f).elidedText(name, Qt.TextElideMode.ElideRight, name_rect.width())
         painter.setPen(self._FG_NAME)
         painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -1980,6 +2009,8 @@ class PlotsWidget(QWidget):
         self._debt_cache: dict = {}           # num -> float | None (долг ЧВ+электро)
         self._setup_ui()
         self._rebuild_table()
+        # Выровнять заглушку капшена под желоб скроллбара после раскладки
+        QTimer.singleShot(0, self._sync_caption_stub)
 
     def refresh(self, df):
         """Принимает загруженную выписку: пересчёт долга и обновление списка."""
@@ -2093,13 +2124,21 @@ class PlotsWidget(QWidget):
         cap_l.setSpacing(8)
         cap_num = QLabel("№"); cap_num.setFixedWidth(_PlotRowDelegate._NUM_W)
         cap_name = QLabel("Контакт")
+        cap_phone = QLabel("Телефон"); cap_phone.setFixedWidth(_PlotRowDelegate._PHONE_W)
         cap_debt = QLabel("Долг"); cap_debt.setFixedWidth(_PlotRowDelegate._DEBT_W)
         cap_debt.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        for c in (cap_num, cap_name, cap_debt):
+        for c in (cap_num, cap_name, cap_phone, cap_debt):
             c.setStyleSheet("font-size:11px; color:#9CA3AF; background:transparent;")
         cap_l.addWidget(cap_num)
         cap_l.addWidget(cap_name, stretch=1)
+        cap_l.addWidget(cap_phone)
         cap_l.addWidget(cap_debt)
+        # Заглушка под скроллбар — чтобы колонки капшена совпали с данными
+        # (делегат рисует в вьюпорте, уже на ширину желоба). Ширина выставляется
+        # в _sync_caption_stub по фактической ширине желоба списка.
+        self._cap_stub = QWidget()
+        self._cap_stub.setStyleSheet("background:transparent;")
+        cap_l.addWidget(self._cap_stub)
 
         self.list_model = PlotsListModel(self)
         self.list_view = QListView()
@@ -2110,7 +2149,9 @@ class PlotsWidget(QWidget):
         self.list_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.list_view.setMouseTracking(True)
         self.list_view.setUniformItemSizes(True)
-        self.list_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # Скроллбар всегда зарезервирован — постоянная ширина вьюпорта, чтобы
+        # колонки данных стабильно совпадали с капшеном (см. _sync_caption_stub).
+        self.list_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_view.setFrameShape(QFrame.Shape.NoFrame)
         self.list_view.setStyleSheet(
@@ -2122,6 +2163,7 @@ class PlotsWidget(QWidget):
             self.list_view.setStyle(self._list_sb_style)
             self.list_view.verticalScrollBar().setStyle(self._list_sb_style)
         self.list_view.clicked.connect(self._on_list_clicked)
+        self._sync_caption_stub()  # выровнять заглушку капшена под желоб скроллбара
 
         table_vbox = QVBoxLayout()
         table_vbox.setSpacing(8)
@@ -2201,6 +2243,20 @@ class PlotsWidget(QWidget):
         self._btn_add.setIcon(_mat_icon(
             0xE146, 22, fill=1 if active else 0,
             color="#07414F" if active else "#9CA3AF"))
+
+    def _sync_caption_stub(self):
+        """Ширина заглушки капшена = ширина желоба скроллбара списка.
+
+        Делегат рисует строки в вьюпорте (уже на ширину желоба), а капшен —
+        во всю ширину; заглушка компенсирует разницу, чтобы колонки совпали.
+        Берём ширину из стиля (PM_ScrollBarExtent) — не зависит от тайминга
+        раскладки (живой замер width−viewport бывает нулевым до первого показа)."""
+        if not hasattr(self, "_cap_stub") or not hasattr(self, "list_view"):
+            return
+        ext = self.list_view.style().pixelMetric(
+            QStyle.PixelMetric.PM_ScrollBarExtent, None,
+            self.list_view.verticalScrollBar())
+        self._cap_stub.setFixedWidth(ext)
 
     def _on_detail_closed(self, saved: bool):
         panel = self._detail_panel
