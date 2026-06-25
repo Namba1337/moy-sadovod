@@ -2281,6 +2281,7 @@ class PlotsWidget(QWidget):
         self.list_view.clearSelection()
         if self._detail_panel is not None:
             self._detail_panel.detach()  # снять focusChanged до удаления
+            self._detail_panel.setVisible(False)  # скрыть ДО отвязки от scroll area
             self._drawer_scroll.takeWidget()
             self._detail_panel.deleteLater()
             self._detail_panel = None
@@ -3496,6 +3497,7 @@ class GroupEditDialog(QWidget):
 
     def _remove_card(self, card_data: dict):
         idx = self._cards.index(card_data)
+        card_data["widget"].hide()
         card_data["widget"].setParent(None)
         card_data["widget"].deleteLater()
         self._cards.pop(idx)
@@ -3728,8 +3730,7 @@ class PlotEditDialog(QWidget):
         self._header_editing = False
         self._dirty_fields: set = set()     # поля (num/area) с принятыми изменениями
         self._group_dirty: bool = False     # группа изменена через "Список контактов"
-        self._contact_snaps: dict = {}      # idx → snapshot {"name","phone","email"} при раскрытии
-        self._contact_input_refs: dict = {} # idx → (inp_name, inp_phone, inp_email, btn_revert)
+        self._contact_input_refs: dict = {} # idx → (inp_name, inp_phone, inp_email)
         self._setup_ui()
         self._apply_styles()
 
@@ -4314,11 +4315,16 @@ class PlotEditDialog(QWidget):
 
     def _refresh_contacts_preview(self, owners: list):
         """Обновляет превью контактов под карточкой активной группы."""
-        # Очистка
+        _AppTooltip.hide()
+        # Очистка: скрываем перед удалением, чтобы не всплывали как top-level окна
         while self._active_preview_lay.count():
             item = self._active_preview_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                w.hide()
+                w.deleteLater()
+
+        QApplication.processEvents()
 
         PREVIEW_LIMIT = 3
         if self._contacts_expanded:
@@ -4354,31 +4360,60 @@ class PlotEditDialog(QWidget):
             rl.setContentsMargins(0, 2, 0, 2)
             rl.setSpacing(6)
 
-            # Иконка роли
+            # Имя (нужно для цвета иконки)
+            full_name = ownership.owner_name(o) if isinstance(o, dict) else str(o)
+
+            # Иконка роли (единая person, цвет по роли)
             role_icon = QLabel()
             role_icon.setFixedSize(18, 18)
             role_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            role_icon.setText(chr(0xe7fd))
             if isinstance(o, dict) and o.get("is_member"):
-                role_icon.setText(chr(0xE873))
                 role_icon.setStyleSheet(
                     "background:#D6EBD5; color:#2E7D32; border-radius:9px;"
                     "font-size:10px;")
             elif isinstance(o, dict) and o.get("is_owner"):
-                role_icon.setText(chr(0xE25C))
                 role_icon.setStyleSheet(
                     "background:#C9D8E2; color:#07414F; border-radius:9px;"
                     "font-size:10px;")
             else:
-                role_icon.setText(chr(0xE0B9))
                 role_icon.setStyleSheet(
                     "background:#E5E7EB; color:#6B7280; border-radius:9px;"
                     "font-size:10px;")
             role_icon.setFont(_mat_font(12))
             rl.addWidget(role_icon)
 
-            # Имя
-            full_name = ownership.owner_name(o) if isinstance(o, dict) else str(o)
-            lbl = QLabel(_short_name(full_name) if full_name else "—")
+            # Звёздочка — пометка «избранный» (главный контакт)
+            is_primary = isinstance(o, dict) and bool(o.get("is_visible"))
+            star_btn = QPushButton(chr(0xE838))
+            star_btn.setFont(_F_STAR_FILLED if is_primary else _F_STAR_OUTLINE)
+            star_btn.setFixedSize(18, 18)
+            star_btn.setFlat(True)
+            star_btn.setStyleSheet(
+                "QPushButton{background:transparent;border:none;padding:0;}"
+                f"QPushButton{{color:{'#07414F' if is_primary else '#C9D8E2'};}}")
+            star_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            def _star_enter(e, btn=star_btn, primary=is_primary):
+                if not primary:
+                    btn.setFont(_F_STAR_FILLED)
+                    btn.setStyleSheet(
+                        "QPushButton{background:transparent;border:none;"
+                        "color:#07414F;padding:0;}")
+
+            def _star_leave(e, btn=star_btn, primary=is_primary):
+                if not primary:
+                    btn.setFont(_F_STAR_OUTLINE)
+                    btn.setStyleSheet(
+                        "QPushButton{background:transparent;border:none;"
+                        "color:#C9D8E2;padding:0;}")
+
+            star_btn.enterEvent = _star_enter
+            star_btn.leaveEvent = _star_leave
+            star_btn.clicked.connect(lambda _, i=idx: self._set_inline_primary(i))
+            rl.addWidget(star_btn)
+
+            lbl = QLabel(full_name if full_name else "—")
             lbl.setStyleSheet(
                 "font-size:12px; color:#1F2937; background:transparent;")
             lbl.setSizePolicy(
@@ -4393,19 +4428,6 @@ class PlotEditDialog(QWidget):
                 ph_lbl.setStyleSheet(
                     "font-size:11px; color:#6B7280; background:transparent;")
                 rl.addWidget(ph_lbl)
-
-            # Кнопка-тег «отменить изменения» (всегда в hdr, скрыта пока не dirty)
-            btn_revert = QPushButton("отменить изменения")
-            btn_revert.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            btn_revert.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_revert.setFixedHeight(22)
-            btn_revert.setFlat(True)
-            btn_revert.setStyleSheet(
-                "QPushButton{background:#FEF3C7;color:#92400E;border:none;border-radius:11px;"
-                "padding:0 10px;font-size:11px;}"
-                "QPushButton:hover{background:#FDE68A;color:#78350F;}")
-            btn_revert.setVisible(False)
-            rl.addWidget(btn_revert)
 
             # Кнопка-карандаш (pencil): тоггл раскрытия (раскрыт = filled)
             btn_edit = QPushButton()
@@ -4431,13 +4453,6 @@ class PlotEditDialog(QWidget):
 
             # ── Детали (только если раскрыто / режим правки) ─────────
             if is_open:
-                # Snapshot: берём один раз при первом раскрытии, не перезаписываем
-                email_val = (o.get("email", "") if isinstance(o, dict) else "").strip()
-                if idx not in self._contact_snaps:
-                    self._contact_snaps[idx] = {
-                        "name": full_name, "phone": phone, "email": email_val}
-                snap = self._contact_snaps[idx]
-
                 det = QWidget()
                 det.setStyleSheet("QWidget{background:transparent;}")
                 det_lay = QVBoxLayout(det)
@@ -4456,7 +4471,7 @@ class PlotEditDialog(QWidget):
                 contact_row.setSpacing(8)
                 for lbl_txt, val, placeholder in [
                     ("Телефон", phone, "нет телефона"),
-                    ("Email", email_val, "нет email"),
+                    ("Email", (o.get("email", "") if isinstance(o, dict) else "").strip(), "нет email"),
                 ]:
                     col = QVBoxLayout()
                     col.setSpacing(2)
@@ -4471,21 +4486,36 @@ class PlotEditDialog(QWidget):
                 inp_phone = contact_row.itemAt(0).layout().itemAt(1).widget()
                 inp_email = contact_row.itemAt(1).layout().itemAt(1).widget()
 
-                # Роль (метки)
+                # Роль (кнопки-метки)
+                _ROLE_SS_ACTIVE = (
+                    "QPushButton{font-size:10px; padding:2px 8px; border-radius:6px;"
+                    "background:#07414F; color:white; border:none;}")
+                _ROLE_SS_IDLE = (
+                    "QPushButton{font-size:10px; padding:2px 8px; border-radius:6px;"
+                    "background:#E5E7EB; color:#6B7280; border:none;}"
+                    "QPushButton:hover{background:#D1D5DB;}")
                 role_row = QHBoxLayout()
                 role_row.setSpacing(6)
-                for text, active in [("Контакт", not (o.get("is_owner") or o.get("is_member"))),
-                                     ("Собственник", bool(o.get("is_owner"))),
-                                     ("Член СНТ", bool(o.get("is_member")))]:
-                    tag = QLabel(text)
-                    if active:
-                        tag.setStyleSheet(
-                            "font-size:10px; padding:2px 8px; border-radius:6px;"
-                            "background:#07414F; color:white;")
-                    else:
-                        tag.setStyleSheet(
-                            "font-size:10px; padding:2px 8px; border-radius:6px;"
-                            "background:#E5E7EB; color:#6B7280;")
+                role_tags = []
+                for text, role_key in [("Контакт", "contact"),
+                                       ("Собственник", "owner"),
+                                       ("Член СНТ", "member")]:
+                    is_active = (
+                        role_key == "contact" and not (o.get("is_owner") or o.get("is_member"))
+                    ) or (
+                        role_key == "owner" and bool(o.get("is_owner"))
+                    ) or (
+                        role_key == "member" and bool(o.get("is_member"))
+                    )
+                    tag = QPushButton(text)
+                    tag.setCheckable(True)
+                    tag.setChecked(is_active)
+                    tag.setStyleSheet(_ROLE_SS_ACTIVE if is_active else _ROLE_SS_IDLE)
+                    tag.setCursor(Qt.CursorShape.PointingHandCursor)
+                    tag.clicked.connect(
+                        lambda checked, rk=role_key, t=tag, tags=role_tags,
+                               ri=role_icon, ow=o: self._set_inline_role(ow, rk, tags, ri))
+                    role_tags.append((role_key, tag))
                     role_row.addWidget(tag)
                 role_row.addStretch()
                 det_lay.addLayout(role_row)
@@ -4493,27 +4523,7 @@ class PlotEditDialog(QWidget):
                 card_vl.addWidget(det)
 
                 # Сохраняем ссылки на поля для auto-save при схлопывании
-                self._contact_input_refs[idx] = (inp_name, inp_phone, inp_email, btn_revert)
-
-                # Dirty-check: показываем кнопку отмены при любом изменении
-                def _check_dirty(_, n=inp_name, p=inp_phone, e=inp_email,
-                                  b=btn_revert, s=snap):
-                    b.setVisible(
-                        n.text().strip() != s["name"] or
-                        p.text().strip() != s["phone"] or
-                        e.text().strip() != s["email"])
-
-                inp_name.textChanged.connect(_check_dirty)
-                inp_phone.textChanged.connect(_check_dirty)
-                inp_email.textChanged.connect(_check_dirty)
-
-                # Отменить изменения: вернуть поля в исходное состояние
-                def _on_revert(n=inp_name, p=inp_phone, e=inp_email, s=snap):
-                    n.setText(s["name"])
-                    p.setText(s["phone"])
-                    e.setText(s["email"])
-
-                btn_revert.clicked.connect(_on_revert)
+                self._contact_input_refs[idx] = (inp_name, inp_phone, inp_email)
 
             # ── Обработчики ────────────────────────────────────────────
             _idx = idx
@@ -4543,10 +4553,9 @@ class PlotEditDialog(QWidget):
         """Тоггл раскрытия контакта. Открыт → auto-save + закрыть. Закрыт → открыть."""
         if idx in self._expanded_contacts:
             refs = self._contact_input_refs.pop(idx, None)
-            self._contact_snaps.pop(idx, None)
             self._expanded_contacts.discard(idx)
             if refs:
-                inp_name, inp_phone, inp_email, _ = refs
+                inp_name, inp_phone, inp_email = refs
                 self._save_inline_contact(
                     idx, inp_name.text(), inp_phone.text(), inp_email.text())
                 return  # _save_inline_contact уже зовёт _refresh_contacts_preview
@@ -4554,6 +4563,49 @@ class PlotEditDialog(QWidget):
             self._expanded_contacts.add(idx)
         self._refresh_contacts_preview(
             ownership.group_owners(self._active_group))
+
+    def _set_inline_role(self, owner: dict, role_key: str,
+                         tags: list[tuple[str, QPushButton]], role_icon: QLabel):
+        """Устанавливает роль контакта (radio-логика) и обновляет вид in-place."""
+        if not isinstance(owner, dict):
+            return
+        owner["is_owner"] = (role_key == "owner")
+        owner["is_member"] = (role_key == "member")
+        self._group_dirty = True
+        _ACTIVE = (
+            "QPushButton{font-size:10px; padding:2px 8px; border-radius:6px;"
+            "background:#07414F; color:white; border:none;}")
+        _IDLE = (
+            "QPushButton{font-size:10px; padding:2px 8px; border-radius:6px;"
+            "background:#E5E7EB; color:#6B7280; border:none;}"
+            "QPushButton:hover{background:#D1D5DB;}")
+        for rk, btn in tags:
+            is_active = (rk == role_key)
+            btn.setChecked(is_active)
+            btn.setStyleSheet(_ACTIVE if is_active else _IDLE)
+        # Обновить цвет иконки роли в заголовке
+        if role_key == "member":
+            role_icon.setStyleSheet(
+                "background:#D6EBD5; color:#2E7D32; border-radius:9px; font-size:10px;")
+        elif role_key == "owner":
+            role_icon.setStyleSheet(
+                "background:#C9D8E2; color:#07414F; border-radius:9px; font-size:10px;")
+        else:
+            role_icon.setStyleSheet(
+                "background:#E5E7EB; color:#6B7280; border-radius:9px; font-size:10px;")
+
+    def _set_inline_primary(self, idx: int):
+        """Делает контакт по индексу избранным (is_visible=True), остальные — нет."""
+        owners = self._active_group.get("owners", []) or []
+        for i, o in enumerate(owners):
+            if isinstance(o, dict):
+                o["is_visible"] = (i == idx)
+        self._group_dirty = True
+        # Обновить ФИО в шапке активной группы
+        main = owners[idx] if 0 <= idx < len(owners) else None
+        self._active_name_lbl.setText(
+            ownership.owner_name(main) if isinstance(main, dict) else "(нет лиц)")
+        self._refresh_contacts_preview(owners)
 
     def _save_inline_contact(self, idx: int, name: str, phone: str, email: str):
         """Сохраняет отредактированные ФИО/телефон/email контакта по индексу."""
@@ -4567,6 +4619,9 @@ class PlotEditDialog(QWidget):
         o["phone"] = phone.strip()
         o["email"] = email.strip()
         self._group_dirty = True
+        # Обновить ФИО в шапке, если это избранный контакт
+        if o.get("is_visible"):
+            self._active_name_lbl.setText(name.strip() or "(нет имени)")
         self._refresh_contacts_preview(owners)
         self._update_save_state()
 
