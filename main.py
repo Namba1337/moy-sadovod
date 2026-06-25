@@ -1201,23 +1201,6 @@ def main():
     if _icon_path.exists():
         from PyQt6.QtGui import QIcon
         window.setWindowIcon(QIcon(str(_icon_path)))
-
-    # ── Диагностика: логируем показ top-level окон ──────────────────
-    import traceback as _tb
-    _diag_log = open("_flash_log.txt", "w", encoding="utf-8")
-    _orig_show = QWidget.show
-    def _diag_show(self):
-        fw = self.windowFlags()
-        if fw & Qt.WindowType.Window and self is not window:
-            cls = type(self).__name__
-            title = self.windowTitle()
-            msg = f"[FLASH] {cls} title='{title}' flags={int(fw)}\n"
-            _diag_log.write(msg)
-            _diag_log.write("".join(_tb.format_stack(limit=8)))
-            _diag_log.flush()
-        _orig_show(self)
-    QWidget.show = _diag_show
-
     window.show()
     sys.exit(app.exec())
 
