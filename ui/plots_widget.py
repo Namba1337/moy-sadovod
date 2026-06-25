@@ -2952,9 +2952,6 @@ class GroupEditDialog(QWidget):
                 self._set_card_edit_mode(cd, True)
         self._update_edit_footer()
 
-    def _any_editing(self) -> bool:
-        return any(cd.get("is_editing", False) for cd in self._cards)
-
     def _update_edit_footer(self):
         """Обновляет состояние карточек."""
         if self._footer_view is None:
@@ -2964,7 +2961,7 @@ class GroupEditDialog(QWidget):
     def _set_card_edit_mode(self, cd: dict, mode: bool):
         cd["is_editing"] = mode
         if not mode:
-            cd.pop("_is_new", None)  # после первого сохранения карточка уже не «новая»
+            cd.pop("_is_new", None)
         if mode:
             cd["_snap"] = self._card_snapshot(cd)
         else:
@@ -2977,31 +2974,15 @@ class GroupEditDialog(QWidget):
             cd[doc_key].setEnabled(mode)
         for del_key in ("opd_del", "egrn_del", "member_del"):
             cd[del_key].setVisible(mode)
-        # btn_edit — всегда виден в развёрнутом виде, стиль меняется через _refresh_btn_edit
-        # btn_del + btn_cancel + btn_save_card — только в режиме редактирования
         cd["btn_del"].setVisible(mode)
-        cd["btn_cancel"].setVisible(mode)
-        cd["btn_save_card"].setVisible(mode)
-        # В режиме редактирования chevron не реагирует — меняем курсор
-        chevron_cursor = Qt.CursorShape.ArrowCursor if mode else Qt.CursorShape.PointingHandCursor
-        cd["chevron"].setCursor(chevron_cursor)
-        self._refresh_btn_edit(cd)
         star = cd["star_btn"]
-        if mode:
-            if not cd["_is_primary"]:
-                star.setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-            star.setCursor(Qt.CursorShape.ArrowCursor)
+        star.setCursor(
+            Qt.CursorShape.PointingHandCursor if mode and not cd["_is_primary"]
+            else Qt.CursorShape.ArrowCursor)
+        self._refresh_dirty_badges(cd)
         self._update_edit_footer()
 
-    def _on_card_edit_click(self, cd: dict):
-        if cd["is_collapsed"]:
-            self._apply_collapse(cd, collapsed=False)
-        self._set_card_edit_mode(cd, True)
-
     def _on_add_person(self):
-        if self._any_editing():
-            return
         cd = self._add_owner_card({}, is_primary=not self._cards, expanded=True,
                                    start_editing=True)
         cd["_is_new"] = True
@@ -3074,53 +3055,7 @@ class GroupEditDialog(QWidget):
         cd["hdr_lbl"] = hdr_lbl
         hdr_lyt.addWidget(hdr_lbl)
 
-        # ── Левый кластер: кнопка редактирования + отмена + сохранить ──────
-        # (видны только в развёрнутом состоянии)
-
-        btn_edit = QPushButton()
-        btn_edit.setFlat(False)
-        btn_edit.setFixedHeight(26)
-        btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_edit.clicked.connect(lambda _, c=cd: self._on_card_edit_click(c))
-
-        def _edit_enter(e, b=btn_edit, c=cd):
-            if not c.get("is_editing", False):
-                b.setIcon(_mat_icon(0xF88D, 16, fill=1, color="#07414F"))
-            QPushButton.enterEvent(b, e)
-
-        def _edit_leave(e, b=btn_edit, c=cd):
-            if not c.get("is_editing", False):
-                b.setIcon(_mat_icon(0xF88D, 16, fill=0, color="#07414F"))
-            QPushButton.leaveEvent(b, e)
-
-        btn_edit.enterEvent = _edit_enter
-        btn_edit.leaveEvent = _edit_leave
-        cd["btn_edit"] = btn_edit
-        hdr_lyt.addWidget(btn_edit)
-
-        btn_cancel = QPushButton("Отмена")
-        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_cancel.setFixedHeight(26)
-        btn_cancel.setStyleSheet(
-            "QPushButton{background:transparent;color:#6B7280;"
-            "border:1px solid #D1D5DB;border-radius:6px;"
-            "padding:3px 8px;font-size:12px;}"
-            "QPushButton:hover{background:#F3F4F6;border-color:#9CA3AF;}")
-        btn_cancel.clicked.connect(lambda _, c=cd: self._cancel_card_edit(c))
-        cd["btn_cancel"] = btn_cancel
-        hdr_lyt.addWidget(btn_cancel)
-
-        btn_save_card = QPushButton("Сохранить")
-        btn_save_card.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_save_card.setFixedHeight(26)
-        btn_save_card.setStyleSheet(
-            "QPushButton{background:#07414F;color:white;border:none;"
-            "border-radius:6px;padding:3px 8px;font-size:12px;}"
-            "QPushButton:hover{background:#0B5A6E;}"
-            "QPushButton:disabled{background:#E5E7EB;color:#9CA3AF;}")
-        btn_save_card.clicked.connect(lambda _, c=cd: self._set_card_edit_mode(c, False))
-        cd["btn_save_card"] = btn_save_card
-        hdr_lyt.addWidget(btn_save_card)
+        # (место для будущих кнопок — левый кластер убран в пользу авто-сохранения)
 
         # ── Краткое имя (только в свёрнутом состоянии) ───────────────────
         name_summary = QLabel()
@@ -3130,6 +3065,21 @@ class GroupEditDialog(QWidget):
         cd["name_summary"] = name_summary
         hdr_lyt.addWidget(name_summary)
         hdr_lyt.addStretch(1)
+
+        # ── Кнопка-тег «отменить изменения» (видна только при несохранённых правках) ─
+        btn_revert = QPushButton("отменить изменения")
+        btn_revert.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        btn_revert.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_revert.setFixedHeight(22)
+        btn_revert.setFlat(True)
+        btn_revert.setStyleSheet(
+            "QPushButton{background:#FEF3C7;color:#92400E;border:none;border-radius:11px;"
+            "padding:0 10px;font-size:11px;}"
+            "QPushButton:hover{background:#FDE68A;color:#78350F;}")
+        btn_revert.clicked.connect(lambda _, c=cd: self._cancel_card_edit(c))
+        btn_revert.hide()
+        cd["btn_revert"] = btn_revert
+        hdr_lyt.addWidget(btn_revert)
 
         # ── Теги статуса (только в свёрнутом состоянии) ──────────────────
         def _make_tag(text: str, bg: str, fg: str) -> QLabel:
@@ -3373,15 +3323,12 @@ class GroupEditDialog(QWidget):
         self._update_tags(cd)
         self._apply_collapse(cd, collapsed=cd["is_collapsed"])
         self._refresh_card_headers()
-        self._set_card_edit_mode(cd, start_editing)
         self._update_save_state()
         return cd
 
     # ── Collapse / expand ─────────────────────────────────────────────
 
     def _toggle_card(self, cd: dict):
-        if self._any_editing():
-            return  # блокируем любые переключения пока активен режим редактирования
         expanding = cd["is_collapsed"]
         self._apply_collapse(cd, collapsed=not cd["is_collapsed"])
         if expanding:
@@ -3399,37 +3346,7 @@ class GroupEditDialog(QWidget):
         else:
             cd["tag_docs"].setVisible(False)
         cd["chevron"].setText(chr(0xE313) if collapsed else chr(0xE316))
-        self._refresh_btn_edit(cd)
-
-    def _refresh_btn_edit(self, cd: dict):
-        """Обновляет btn_edit: скрыт (свёрнуто) / обычный / выделен (редактирование)."""
-        btn = cd["btn_edit"]
-        if cd["is_collapsed"]:
-            btn.setVisible(False)
-            return
-        btn.setVisible(True)
-        editing = cd.get("is_editing", False)
-        btn.setIconSize(QSize(16, 16))
-        btn.setFont(QFont())
-        btn.setText("Редактировать")
-        btn.setMinimumWidth(0)
-        btn.setMaximumWidth(16777215)
-        if editing:
-            btn.setIcon(_mat_icon(0xF88D, 16, fill=1, color="#07414F"))
-            btn.setStyleSheet(
-                "QPushButton{background:#C9D8E2;color:#07414F;"
-                "border:1px solid #07414F;border-radius:6px;"
-                "padding:4px 12px;font-size:12px;}")
-            btn.setCursor(Qt.CursorShape.ArrowCursor)
-        else:
-            btn.setIcon(_mat_icon(0xF88D, 16, fill=0, color="#07414F"))
-            btn.setStyleSheet(
-                "QPushButton{background:transparent;color:#07414F;"
-                "border:1px solid #C9D8E2;border-radius:6px;"
-                "padding:4px 12px;font-size:12px;}"
-                "QPushButton:hover{background:#EBF4F6;border-color:#07414F;}")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.adjustSize()
+        self._set_card_edit_mode(cd, not collapsed)
 
     # ── Обновление Summary / тегов ────────────────────────────────────
 
@@ -3502,8 +3419,12 @@ class GroupEditDialog(QWidget):
                 b = cd.get(key)
                 if b:
                     b.setVisible(False)
+            b = cd.get("btn_revert")
+            if b:
+                b.setVisible(False)
             return
         cur = self._card_snapshot(cd)
+        any_dirty = False
         for snap_key, badge_key in [
             ("name",   "name_dirty"),
             ("phone",  "phone_dirty"),
@@ -3513,41 +3434,43 @@ class GroupEditDialog(QWidget):
             ("member", "member_dirty"),
         ]:
             b = cd.get(badge_key)
+            changed = cur[snap_key] != snap[snap_key]
             if b:
-                b.setVisible(cur[snap_key] != snap[snap_key])
+                b.setVisible(changed)
+            if changed:
+                any_dirty = True
+        b = cd.get("btn_revert")
+        if b:
+            b.setVisible(any_dirty)
 
     def _cancel_card_edit(self, cd: dict) -> None:
-        if cd.get("_is_new"):
-            self._remove_card(cd)
-            return
         snap = cd.get("_snap")
-        if snap is not None:
-            # Блокируем сигналы на время восстановления, чтобы избежать
-            # промежуточных срабатываний _update_save_state с частичным состоянием
-            widgets = [cd["name_inp"], cd["phone"], cd["email"],
-                       cd["rb_contact"], cd["rb_owner"], cd["rb_member"]]
-            for w in widgets:
-                w.blockSignals(True)
+        if snap is None:
+            return
+        widgets = [cd["name_inp"], cd["phone"], cd["email"],
+                   cd["rb_contact"], cd["rb_owner"], cd["rb_member"]]
+        for w in widgets:
+            w.blockSignals(True)
 
-            cd["name_inp"].setText(snap["name"])
-            cd["phone"].setText(snap["phone"])
-            cd["email"].setText(snap["email"])
-            cd["rb_contact"].setChecked(snap["role"] == "contact")
-            cd["rb_owner"].setChecked(snap["role"] == "owner")
-            cd["rb_member"].setChecked(snap["role"] == "member")
+        cd["name_inp"].setText(snap["name"])
+        cd["phone"].setText(snap["phone"])
+        cd["email"].setText(snap["email"])
+        cd["rb_contact"].setChecked(snap["role"] == "contact")
+        cd["rb_owner"].setChecked(snap["role"] == "owner")
+        cd["rb_member"].setChecked(snap["role"] == "member")
 
-            for w in widgets:
-                w.blockSignals(False)
+        for w in widgets:
+            w.blockSignals(False)
 
-            cd["opd_doc"].set_path(snap["opd"])
-            cd["egrn_doc"].set_path(snap["egrn"])
-            cd["member_doc"].set_path(snap["member"])
+        cd["opd_doc"].set_path(snap["opd"])
+        cd["egrn_doc"].set_path(snap["egrn"])
+        cd["member_doc"].set_path(snap["member"])
 
-            self._update_name_summary(cd)
-            self._update_tags(cd)
-            self._update_doc_badges(cd)
-
-        self._set_card_edit_mode(cd, False)
+        self._update_name_summary(cd)
+        self._update_tags(cd)
+        self._update_doc_badges(cd)
+        self._refresh_dirty_badges(cd)
+        self._update_save_state()
 
     def _set_role(self, cd: dict, role: str):
         for key in ("rb_contact", "rb_owner", "rb_member"):
@@ -3562,8 +3485,6 @@ class GroupEditDialog(QWidget):
 
     def _set_primary(self, card_data: dict):
         if card_data not in self._cards:
-            return
-        if self._any_editing():
             return
         idx = self._cards.index(card_data)
         if idx != 0:
@@ -3634,15 +3555,6 @@ class GroupEditDialog(QWidget):
         return GroupEditDialog._card_snapshot(cd) != snap
 
     def _update_save_state(self):
-        for cd in self._cards:
-            btn = cd.get("btn_save_card")
-            if btn is not None:
-                named = bool(cd["name_inp"].text().strip())
-                enabled = named and self._is_card_dirty(cd)
-                btn.setEnabled(enabled)
-                btn.setCursor(
-                    Qt.CursorShape.PointingHandCursor if enabled
-                    else Qt.CursorShape.ArrowCursor)
         for cd in self._cards:
             self._refresh_dirty_badges(cd)
         if self._btn_create is not None:
@@ -3816,6 +3728,8 @@ class PlotEditDialog(QWidget):
         self._header_editing = False
         self._dirty_fields: set = set()     # поля (num/area) с принятыми изменениями
         self._group_dirty: bool = False     # группа изменена через "Список контактов"
+        self._contact_snaps: dict = {}      # idx → snapshot {"name","phone","email"} при раскрытии
+        self._contact_input_refs: dict = {} # idx → (inp_name, inp_phone, inp_email, btn_revert)
         self._setup_ui()
         self._apply_styles()
 
@@ -3881,7 +3795,7 @@ class PlotEditDialog(QWidget):
             return b
 
         if self._is_edit:
-            # Режим отображения: «Участок № X» + карандаш, под ним площадь
+            # Режим отображения: «Участок № X» + кнопки, под ним площадь
             self._disp_w = QWidget()
             dv = QVBoxLayout(self._disp_w)
             dv.setContentsMargins(0, 0, 0, 0)
@@ -3893,6 +3807,11 @@ class PlotEditDialog(QWidget):
                 "font-size:18px; font-weight:700; color:#1F2937; background:transparent;")
             drow.addWidget(self._num_title)
             drow.addStretch()
+            # Кнопка сохранения (справа от карандаша, скрыта вне режима правки)
+            self._save_btn = _icon_btn(0xE161, self._on_header_save)
+            self._save_btn.setVisible(False)
+            drow.addWidget(self._save_btn)
+            # Карандаш — всегда виден; fill = режим правки активен
             self._edit_btn = _icon_btn(0xF88D, self._on_header_edit)
             drow.addWidget(self._edit_btn)
             dv.addLayout(drow)
@@ -3927,8 +3846,7 @@ class PlotEditDialog(QWidget):
         cap_row.addWidget(self._lbl_num_taken)
         cap_row.addStretch()
         if self._is_edit:
-            self._save_btn = _icon_btn(0xE161, self._on_header_save)
-            cap_row.addWidget(self._save_btn)
+            cap_row.addStretch()
         else:
             # Новый участок: иконка-галочка «сохранить» в том же стиле
             self._btn_save = _icon_btn(0xE161, self._on_accept)
@@ -4150,8 +4068,12 @@ class PlotEditDialog(QWidget):
             self._update_save_state()
 
     def _on_header_edit(self):
-        """Вход в режим правки номера+площади (кнопка-карандаш)."""
-        self._set_header_edit(True)
+        """Тоггл режима правки номера+площади.
+        Если режим не активен — входим. Если активен — выходим без сохранения (откат)."""
+        if self._header_editing:
+            self._set_header_edit(False, revert=True)
+        else:
+            self._set_header_edit(True)
 
     def _set_header_edit(self, editing: bool, *, revert: bool = False):
         if not self._is_edit:
@@ -4160,8 +4082,11 @@ class PlotEditDialog(QWidget):
         if editing:
             self.inp_num.setReadOnly(False)
             self.inp_area.setReadOnly(False)
-            self._disp_w.setVisible(False)
+            self._num_title.setVisible(False)
+            self._area_display.setVisible(False)
             self._edit_block.setVisible(True)
+            self._save_btn.setVisible(True)
+            self._edit_btn.setIcon(_mat_icon(0xF88D, 18, fill=1, color="#07414F"))
             self.inp_num.setFocus()
             self.inp_num.selectAll()
             self._refresh_save_icon()
@@ -4173,7 +4098,10 @@ class PlotEditDialog(QWidget):
             self.inp_area.setReadOnly(True)
             self._lbl_num_taken.hide()
             self._edit_block.setVisible(False)
-            self._disp_w.setVisible(True)
+            self._save_btn.setVisible(False)
+            self._edit_btn.setIcon(_mat_icon(0xF88D, 18, fill=0, color="#6B7280"))
+            self._num_title.setVisible(True)
+            self._area_display.setVisible(True)
             self._refresh_displays()
 
     def _on_header_save(self):
@@ -4196,7 +4124,7 @@ class PlotEditDialog(QWidget):
         ok = bool(self.inp_num.text().strip()) and not self._is_num_taken()
         self._save_btn.setEnabled(ok)
         self._save_btn.setIcon(
-            _mat_icon(0xE161, 18, fill=1, color="#07414F" if ok else "#9CA3AF"))
+            _mat_icon(0xE161, 18, fill=0, color="#07414F" if ok else "#9CA3AF"))
 
     def _refresh_displays(self):
         self._num_title.setText(
@@ -4399,6 +4327,12 @@ class PlotEditDialog(QWidget):
             shown = list(enumerate(owners[:PREVIEW_LIMIT]))
         has_more = len(owners) > PREVIEW_LIMIT
 
+        _INPUT_SS = (
+            "QLineEdit{background:#F8F9FA; border:1px solid #D1D5DB;"
+            "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
+            "QLineEdit:focus{border:1px solid #07414F;}")
+        _LABEL_SS = "font-size:10px; color:#9CA3AF; background:transparent;"
+
         for idx, o in shown:
             is_open = idx in self._expanded_contacts
 
@@ -4412,7 +4346,7 @@ class PlotEditDialog(QWidget):
             card_vl.setContentsMargins(0, 0, 0, 0)
             card_vl.setSpacing(0)
 
-            # ── Заголовок строки (иконка + ФИО + телефон + шеврон) ──────
+            # ── Заголовок строки ──────────────────────────────────────
             hdr = QWidget()
             hdr.setStyleSheet("background:transparent;")
             hdr.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4460,49 +4394,82 @@ class PlotEditDialog(QWidget):
                     "font-size:11px; color:#6B7280; background:transparent;")
                 rl.addWidget(ph_lbl)
 
-            # Шеврон
+            # Кнопка-тег «отменить изменения» (всегда в hdr, скрыта пока не dirty)
+            btn_revert = QPushButton("отменить изменения")
+            btn_revert.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            btn_revert.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_revert.setFixedHeight(22)
+            btn_revert.setFlat(True)
+            btn_revert.setStyleSheet(
+                "QPushButton{background:#FEF3C7;color:#92400E;border:none;border-radius:11px;"
+                "padding:0 10px;font-size:11px;}"
+                "QPushButton:hover{background:#FDE68A;color:#78350F;}")
+            btn_revert.setVisible(False)
+            rl.addWidget(btn_revert)
+
+            # Кнопка-карандаш (pencil): тоггл раскрытия (раскрыт = filled)
+            btn_edit = QPushButton()
+            btn_edit.setFixedSize(22, 22)
+            btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_edit.setStyleSheet(
+                "QPushButton{background:transparent;border:none;border-radius:4px;padding:0;}"
+                "QPushButton:hover{background:#DDE4EE;}")
+            if is_open:
+                btn_edit.setIcon(_mat_icon(0xF88D, 16, fill=1, color="#07414F"))
+            else:
+                btn_edit.setIcon(_mat_icon(0xF88D, 16, fill=0, color="#6B7280"))
+            rl.addWidget(btn_edit)
+
+            # Шеврон (скрыт в режиме правки)
             chevron_lbl = QLabel(chr(0xE5CE) if is_open else chr(0xE5CF))
             chevron_lbl.setFont(_mat_font(16))
             chevron_lbl.setStyleSheet("color:#9CA3AF; background:transparent;")
+            chevron_lbl.setVisible(not is_open)
             rl.addWidget(chevron_lbl)
 
             card_vl.addWidget(hdr)
 
-            # ── Детали (только если раскрыто) ─────────────────────────
+            # ── Детали (только если раскрыто / режим правки) ─────────
             if is_open:
+                # Snapshot: берём один раз при первом раскрытии, не перезаписываем
+                email_val = (o.get("email", "") if isinstance(o, dict) else "").strip()
+                if idx not in self._contact_snaps:
+                    self._contact_snaps[idx] = {
+                        "name": full_name, "phone": phone, "email": email_val}
+                snap = self._contact_snaps[idx]
+
                 det = QWidget()
-                det.setStyleSheet(
-                    "QWidget{background:transparent;}")
+                det.setStyleSheet("QWidget{background:transparent;}")
                 det_lay = QVBoxLayout(det)
                 det_lay.setContentsMargins(24, 4, 8, 6)
                 det_lay.setSpacing(4)
 
-                # Телефон (поле ввода)
-                _lbl_ph = QLabel("Телефон")
-                _lbl_ph.setStyleSheet(
-                    "font-size:10px; color:#9CA3AF; background:transparent;")
-                det_lay.addWidget(_lbl_ph)
-                inp_phone = QLineEdit(phone)
-                inp_phone.setPlaceholderText("нет телефона")
-                inp_phone.setStyleSheet(
-                    "QLineEdit{background:#F8F9FA; border:1px solid #D1D5DB;"
-                    "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
-                    "QLineEdit:focus{border:1px solid #07414F;}")
-                det_lay.addWidget(inp_phone)
+                # ФИО
+                det_lay.addWidget(QLabel("ФИО", styleSheet=_LABEL_SS))
+                inp_name = QLineEdit(full_name)
+                inp_name.setPlaceholderText("Фамилия Имя Отчество")
+                inp_name.setStyleSheet(_INPUT_SS)
+                det_lay.addWidget(inp_name)
 
-                # Email
-                email = (o.get("email", "") if isinstance(o, dict) else "").strip()
-                _lbl_em = QLabel("Email")
-                _lbl_em.setStyleSheet(
-                    "font-size:10px; color:#9CA3AF; background:transparent;")
-                det_lay.addWidget(_lbl_em)
-                inp_email = QLineEdit(email)
-                inp_email.setPlaceholderText("нет email")
-                inp_email.setStyleSheet(
-                    "QLineEdit{background:#F8F9FA; border:1px solid #D1D5DB;"
-                    "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
-                    "QLineEdit:focus{border:1px solid #07414F;}")
-                det_lay.addWidget(inp_email)
+                # Телефон + Email (на одном уровне)
+                contact_row = QHBoxLayout()
+                contact_row.setSpacing(8)
+                for lbl_txt, val, placeholder in [
+                    ("Телефон", phone, "нет телефона"),
+                    ("Email", email_val, "нет email"),
+                ]:
+                    col = QVBoxLayout()
+                    col.setSpacing(2)
+                    col.addWidget(QLabel(lbl_txt, styleSheet=_LABEL_SS))
+                    inp = QLineEdit(val)
+                    inp.setPlaceholderText(placeholder)
+                    inp.setStyleSheet(_INPUT_SS)
+                    col.addWidget(inp)
+                    contact_row.addLayout(col, stretch=1)
+                det_lay.addLayout(contact_row)
+
+                inp_phone = contact_row.itemAt(0).layout().itemAt(1).widget()
+                inp_email = contact_row.itemAt(1).layout().itemAt(1).widget()
 
                 # Роль (метки)
                 role_row = QHBoxLayout()
@@ -4523,25 +4490,38 @@ class PlotEditDialog(QWidget):
                 role_row.addStretch()
                 det_lay.addLayout(role_row)
 
-                # Кнопка «Сохранить»
-                btn_save = QPushButton("Сохранить")
-                btn_save.setObjectName("btnCardSave")
-                btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn_save.setFixedHeight(26)
-                btn_save.setStyleSheet(
-                    "QPushButton{background:#07414F; color:white; border:none;"
-                    "border-radius:6px; padding:4px 14px; font-size:12px;}"
-                    "QPushButton:hover{background:#0B5A6E;}")
-                btn_save.clicked.connect(
-                    lambda _, i=idx, ph=inp_phone, em=inp_email:
-                        self._save_inline_contact(i, ph.text(), em.text()))
-                det_lay.addWidget(btn_save, alignment=Qt.AlignmentFlag.AlignRight)
-
                 card_vl.addWidget(det)
 
-            # Клик по заголовку — тоггл раскрытия
+                # Сохраняем ссылки на поля для auto-save при схлопывании
+                self._contact_input_refs[idx] = (inp_name, inp_phone, inp_email, btn_revert)
+
+                # Dirty-check: показываем кнопку отмены при любом изменении
+                def _check_dirty(_, n=inp_name, p=inp_phone, e=inp_email,
+                                  b=btn_revert, s=snap):
+                    b.setVisible(
+                        n.text().strip() != s["name"] or
+                        p.text().strip() != s["phone"] or
+                        e.text().strip() != s["email"])
+
+                inp_name.textChanged.connect(_check_dirty)
+                inp_phone.textChanged.connect(_check_dirty)
+                inp_email.textChanged.connect(_check_dirty)
+
+                # Отменить изменения: вернуть поля в исходное состояние
+                def _on_revert(n=inp_name, p=inp_phone, e=inp_email, s=snap):
+                    n.setText(s["name"])
+                    p.setText(s["phone"])
+                    e.setText(s["email"])
+
+                btn_revert.clicked.connect(_on_revert)
+
+            # ── Обработчики ────────────────────────────────────────────
             _idx = idx
+            # Клик по заголовку: закрыть с авто-сохранением (если открыт) / открыть
             hdr.mousePressEvent = lambda _, i=_idx: self._toggle_contact_detail(i)
+
+            # Клик по карандашу: аналогичный тоггл
+            btn_edit.clicked.connect(lambda _, i=_idx: self._toggle_contact_detail(i))
 
             self._active_preview_lay.addWidget(card)
 
@@ -4560,22 +4540,30 @@ class PlotEditDialog(QWidget):
             self._contacts_expanded = False
 
     def _toggle_contact_detail(self, idx: int):
-        """Тоггл раскрытия деталей контакта по индексу."""
+        """Тоггл раскрытия контакта. Открыт → auto-save + закрыть. Закрыт → открыть."""
         if idx in self._expanded_contacts:
+            refs = self._contact_input_refs.pop(idx, None)
+            self._contact_snaps.pop(idx, None)
             self._expanded_contacts.discard(idx)
+            if refs:
+                inp_name, inp_phone, inp_email, _ = refs
+                self._save_inline_contact(
+                    idx, inp_name.text(), inp_phone.text(), inp_email.text())
+                return  # _save_inline_contact уже зовёт _refresh_contacts_preview
         else:
             self._expanded_contacts.add(idx)
         self._refresh_contacts_preview(
             ownership.group_owners(self._active_group))
 
-    def _save_inline_contact(self, idx: int, phone: str, email: str):
-        """Сохраняет отредактированные телефон/email контакта по индексу."""
+    def _save_inline_contact(self, idx: int, name: str, phone: str, email: str):
+        """Сохраняет отредактированные ФИО/телефон/email контакта по индексу."""
         owners = self._active_group.get("owners", []) or []
         if idx < 0 or idx >= len(owners):
             return
         o = owners[idx]
         if not isinstance(o, dict):
             return
+        o["name"] = name.strip()
         o["phone"] = phone.strip()
         o["email"] = email.strip()
         self._group_dirty = True
