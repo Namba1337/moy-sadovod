@@ -2225,6 +2225,10 @@ class PlotsWidget(QWidget):
         if plot is not None:
             panel.deleted.connect(self._on_detail_delete)
         self._detail_panel = panel
+        # Скрываем старый виджет до замены, чтобы он не всплыл как top-level окно
+        old = self._drawer_scroll.widget()
+        if old is not None:
+            old.hide()
         self._drawer_scroll.setWidget(panel)
         self._drawer.setVisible(True)
         # Подсветить выбранный участок в списке
@@ -2280,9 +2284,7 @@ class PlotsWidget(QWidget):
         self._drawer.setVisible(False)
         self.list_view.clearSelection()
         if self._detail_panel is not None:
-            self._detail_panel.detach()  # снять focusChanged до удаления
-            self._detail_panel.setVisible(False)  # скрыть ДО отвязки от scroll area
-            self._drawer_scroll.takeWidget()
+            self._detail_panel.detach()
             self._detail_panel.deleteLater()
             self._detail_panel = None
         self._editing_plot = None
@@ -4324,8 +4326,6 @@ class PlotEditDialog(QWidget):
                 w.hide()
                 w.deleteLater()
 
-        QApplication.processEvents()
-
         PREVIEW_LIMIT = 3
         if self._contacts_expanded:
             shown = list(enumerate(owners))
@@ -4343,7 +4343,7 @@ class PlotEditDialog(QWidget):
             is_open = idx in self._expanded_contacts
 
             # Строковый контейнер (vert): заголовок + (опционально) детали
-            card = QWidget()
+            card = QWidget(self)
             card.setStyleSheet(
                 "QWidget{background:transparent;}"
                 "QWidget:hover{background:#E8F0F5;border-radius:4px;}")
@@ -4353,7 +4353,7 @@ class PlotEditDialog(QWidget):
             card_vl.setSpacing(0)
 
             # ── Заголовок строки ──────────────────────────────────────
-            hdr = QWidget()
+            hdr = QWidget(card)
             hdr.setStyleSheet("background:transparent;")
             hdr.setCursor(Qt.CursorShape.PointingHandCursor)
             rl = QHBoxLayout(hdr)
@@ -4364,7 +4364,7 @@ class PlotEditDialog(QWidget):
             full_name = ownership.owner_name(o) if isinstance(o, dict) else str(o)
 
             # Иконка роли (единая person, цвет по роли)
-            role_icon = QLabel()
+            role_icon = QLabel(hdr)
             role_icon.setFixedSize(18, 18)
             role_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
             role_icon.setText(chr(0xe7fd))
@@ -4385,7 +4385,7 @@ class PlotEditDialog(QWidget):
 
             # Звёздочка — пометка «избранный» (главный контакт)
             is_primary = isinstance(o, dict) and bool(o.get("is_visible"))
-            star_btn = QPushButton(chr(0xE838))
+            star_btn = QPushButton(chr(0xE838), hdr)
             star_btn.setFont(_F_STAR_FILLED if is_primary else _F_STAR_OUTLINE)
             star_btn.setFixedSize(18, 18)
             star_btn.setFlat(True)
@@ -4413,7 +4413,7 @@ class PlotEditDialog(QWidget):
             star_btn.clicked.connect(lambda _, i=idx: self._set_inline_primary(i))
             rl.addWidget(star_btn)
 
-            lbl = QLabel(full_name if full_name else "—")
+            lbl = QLabel(full_name if full_name else "—", hdr)
             lbl.setStyleSheet(
                 "font-size:12px; color:#1F2937; background:transparent;")
             lbl.setSizePolicy(
@@ -4424,44 +4424,57 @@ class PlotEditDialog(QWidget):
             # Телефон (свернуто)
             phone = (o.get("phone", "") if isinstance(o, dict) else "").strip()
             if phone and not is_open:
-                ph_lbl = QLabel(phone)
+                ph_lbl = QLabel(phone, hdr)
                 ph_lbl.setStyleSheet(
                     "font-size:11px; color:#6B7280; background:transparent;")
                 rl.addWidget(ph_lbl)
 
-            # Кнопка-карандаш (pencil): тоггл раскрытия (раскрыт = filled)
-            btn_edit = QPushButton()
+            # Кнопка «редактировать»: всегда в layout (22×22), иконка прозрачна по умолчанию
+            btn_edit = QPushButton(hdr)
             btn_edit.setFixedSize(22, 22)
             btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_edit.setStyleSheet(
-                "QPushButton{background:transparent;border:none;border-radius:4px;padding:0;}"
-                "QPushButton:hover{background:#DDE4EE;}")
-            if is_open:
-                btn_edit.setIcon(_mat_icon(0xF88D, 16, fill=1, color="#07414F"))
-            else:
-                btn_edit.setIcon(_mat_icon(0xF88D, 16, fill=0, color="#6B7280"))
+                "QPushButton{background:transparent;border:none;}"
+                "QPushButton:hover{background:transparent;}")
+            # Пустая иконка — кнопка резервирует место, но невидима
+            btn_edit.setIcon(QIcon())
             rl.addWidget(btn_edit)
 
-            # Шеврон (скрыт в режиме правки)
-            chevron_lbl = QLabel(chr(0xE5CE) if is_open else chr(0xE5CF))
+            # Шеврон: стрелка вниз (свернуто) / вверх (развёрнуто)
+            chevron_lbl = QLabel(chr(0xE5CE) if is_open else chr(0xE5CF), hdr)
             chevron_lbl.setFont(_mat_font(16))
             chevron_lbl.setStyleSheet("color:#9CA3AF; background:transparent;")
-            chevron_lbl.setVisible(not is_open)
             rl.addWidget(chevron_lbl)
+
+            # Показ/обновление иконки «редактировать»
+            def _hdr_enter(e, btn=btn_edit, io=is_open):
+                btn.setIcon(_mat_icon(0xE3C9, 16, fill=1 if io else 0,
+                                      color="#07414F" if io else "#6B7280"))
+
+            def _hdr_leave(e, btn=btn_edit, io=is_open):
+                if not io:
+                    btn.setIcon(QIcon())
+
+            hdr.enterEvent = _hdr_enter
+            hdr.leaveEvent = _hdr_leave
+
+            # Если развёрнут — сразу показать fill-иконку
+            if is_open:
+                btn_edit.setIcon(_mat_icon(0xE3C9, 16, fill=1, color="#07414F"))
 
             card_vl.addWidget(hdr)
 
             # ── Детали (только если раскрыто / режим правки) ─────────
             if is_open:
-                det = QWidget()
+                det = QWidget(card)
                 det.setStyleSheet("QWidget{background:transparent;}")
                 det_lay = QVBoxLayout(det)
                 det_lay.setContentsMargins(24, 4, 8, 6)
                 det_lay.setSpacing(4)
 
                 # ФИО
-                det_lay.addWidget(QLabel("ФИО", styleSheet=_LABEL_SS))
-                inp_name = QLineEdit(full_name)
+                det_lay.addWidget(QLabel("ФИО", styleSheet=_LABEL_SS, parent=det))
+                inp_name = QLineEdit(full_name, parent=det)
                 inp_name.setPlaceholderText("Фамилия Имя Отчество")
                 inp_name.setStyleSheet(_INPUT_SS)
                 det_lay.addWidget(inp_name)
@@ -4475,8 +4488,8 @@ class PlotEditDialog(QWidget):
                 ]:
                     col = QVBoxLayout()
                     col.setSpacing(2)
-                    col.addWidget(QLabel(lbl_txt, styleSheet=_LABEL_SS))
-                    inp = QLineEdit(val)
+                    col.addWidget(QLabel(lbl_txt, styleSheet=_LABEL_SS, parent=det))
+                    inp = QLineEdit(val, parent=det)
                     inp.setPlaceholderText(placeholder)
                     inp.setStyleSheet(_INPUT_SS)
                     col.addWidget(inp)
@@ -4507,7 +4520,7 @@ class PlotEditDialog(QWidget):
                     ) or (
                         role_key == "member" and bool(o.get("is_member"))
                     )
-                    tag = QPushButton(text)
+                    tag = QPushButton(text, det)
                     tag.setCheckable(True)
                     tag.setChecked(is_active)
                     tag.setStyleSheet(_ROLE_SS_ACTIVE if is_active else _ROLE_SS_IDLE)
