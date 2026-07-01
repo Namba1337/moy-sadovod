@@ -35,6 +35,22 @@ _DOC_REQUIRED = {
     "member":  {"opd": True,  "egrn": True,  "member": True},
 }
 
+# Цвета круглого фона звезды-«избранного» по роли контакта (bg, fg)
+_ROLE_COLORS = {
+    "contact": ("#E5E7EB", "#6B7280"),
+    "owner":   ("#C9D8E2", "#07414F"),
+    "member":  ("#D6EBD5", "#2E7D32"),
+}
+
+_INPUT_SS = (
+    "QLineEdit{background:#F8F9FA; border:1px solid #D1D5DB;"
+    "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
+    "QLineEdit:focus{border:1px solid #07414F;}")
+_INPUT_ERROR_SS = (
+    "QLineEdit{background:#FEF2F2; border:1px solid #DC2626;"
+    "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
+    "QLineEdit:focus{border:1px solid #DC2626;}")
+
 
 def _plot_num_key(s: str):
     try:
@@ -107,15 +123,21 @@ _F_CHEVRON       = _mat_font(18, fill=0)
 _F_COPY_OUTLINE  = _mat_font(18, fill=0)
 
 
-_copy_toasts: list = []  # держим ссылку, чтобы GC не удалил до показа
-
-
-_SS_COPY_TOAST = (
-    "QLabel{background:#C9D8E2;color:#07414F;border-radius:6px;"
-    "padding:2px 10px;font-size:11px;}")
 _SS_DIRTY_BADGE = (
     "QLabel{background:#DCFCE7;color:#16A34A;border-radius:4px;"
     "padding:0 8px;font-size:11px;}")
+
+
+def _people_names(people: list) -> list:
+    """Уникальные (без учёта регистра) непустые имена из реестра людей —
+    источник для QCompleter автодополнения ФИО."""
+    seen, names = set(), []
+    for p in people:
+        nm = str(p.get("name", "")).strip()
+        if nm and nm.casefold() not in seen:
+            seen.add(nm.casefold())
+            names.append(nm)
+    return names
 
 
 def _normalize_phone(raw: str) -> str:
@@ -145,53 +167,66 @@ def _phone_fmt(d: str) -> str:
     return r
 
 
+_PHONE_PREFIX = "+7 ("  # фиксированная часть маски — не считается «цифрами номера»
+
+
+def _pos_after_n_digits(formatted: str, n: int) -> int:
+    """Позиция в отформатированной строке сразу после n-й цифры НОМЕРА
+    (цифра '7' из фиксированного префикса '+7 (' не считается)."""
+    if not formatted.startswith(_PHONE_PREFIX):
+        return len(formatted)
+    if n <= 0:
+        return len(_PHONE_PREFIX)
+    seen = 0
+    for i in range(len(_PHONE_PREFIX), len(formatted)):
+        if formatted[i].isdigit():
+            seen += 1
+            if seen == n:
+                return i + 1
+    return len(formatted)
+
+
 def _setup_phone_input(inp: "QLineEdit") -> None:
     """Маскирует поле телефона без setInputMask (тонкий курсор, нет шаблона вне edit-режима).
 
-    Отслеживает предыдущее число цифр: если цифр столько же, но текст стал
-    короче — пользователь удалил разделитель; убираем последнюю цифру, чтобы
-    backspace работал интуитивно.
+    Курсор всегда пересчитывается от числа цифр перед ним в уже отредактированном
+    тексте — правка/удаление работает корректно в любом месте номера, не только в конце.
     """
-    _st = {"digits": ""}
+    inp.setMaxLength(len("+7 (XXX) XXX-XX-XX"))
 
     def _on_edited(text: str) -> None:
+        cursor = inp.cursorPosition()
+        digits_before = sum(1 for ch in text[:cursor] if ch.isdigit())
         raw = re.sub(r"\D", "", text)
-        # Убираем ведущий код страны если за ним есть ещё цифры
-        if len(raw) >= 2 and raw[0] in "78":
+        # Ведущие 7/8 (код страны) никогда не записываются — номер уже
+        # начинается с фиксированного +7, набор идёт сразу с кода оператора.
+        if raw and raw[0] in "78":
             raw = raw[1:]
+            digits_before = max(0, digits_before - 1)
         raw = raw[:10]
-        prev = _st["digits"]
-        # Цифр столько же, но текст стал короче → удалён разделитель
-        if raw == prev and len(text) < len(_phone_fmt(prev)):
-            raw = raw[:-1]
-        _st["digits"] = raw
+        digits_before = min(digits_before, len(raw))
         result = _phone_fmt(raw)
         if result != text:
             inp.setText(result)
-            inp.setCursorPosition(len(result))
+            inp.setCursorPosition(_pos_after_n_digits(result, digits_before))
 
     inp.textEdited.connect(_on_edited)
 
 
 def _make_anchor_label(text: str, style: str):
     """Returns (label, row_widget, dirty_badge).
-    row_widget — QWidget фиксированной высоты с меткой, тостом и бейджем «Данные обновлены».
-    Фиксированная высота предотвращает вертикальный сдвиг элементов при появлении бейджей,
+    row_widget — QWidget фиксированной высоты с меткой и бейджем «Данные обновлены».
+    Фиксированная высота предотвращает вертикальный сдвиг элементов при появлении бейджа,
     а отсутствие retainSizeWhenHidden предотвращает горизонтальное переполнение viewport.
-    Toast: label.property('_toast'). Dirty badge: управляется извне по _refresh_dirty_badges."""
+    Dirty badge: управляется извне по _refresh_dirty_badges."""
     lbl = QLabel(text)
     lbl.setStyleSheet(style)
-
-    toast = QLabel("Скопировано")
-    toast.setStyleSheet(_SS_COPY_TOAST)
-    toast.hide()
-    lbl.setProperty("_toast", toast)
 
     dirty = QLabel("Данные обновлены")
     dirty.setStyleSheet(_SS_DIRTY_BADGE)
     dirty.hide()
 
-    # Контейнер фиксированной высоты: бейджи могут появляться/исчезать,
+    # Контейнер фиксированной высоты: бейдж может появляться/исчезать,
     # не меняя высоту строки и не сдвигая элементы ниже.
     row_w = QWidget()
     row_w.setStyleSheet("background:transparent;")
@@ -199,45 +234,15 @@ def _make_anchor_label(text: str, style: str):
     row_lay.setContentsMargins(0, 0, 0, 0)
     row_lay.setSpacing(6)
     row_lay.addWidget(lbl, 0, Qt.AlignmentFlag.AlignVCenter)
-    row_lay.addWidget(toast, 0, Qt.AlignmentFlag.AlignVCenter)
     row_lay.addWidget(dirty, 0, Qt.AlignmentFlag.AlignVCenter)
     row_lay.addStretch()
     # Высота = бейдж с паддингом; задаётся после adjustSize чтобы учесть DPI
-    toast.adjustSize()
     dirty.adjustSize()
-    row_w.setFixedHeight(max(toast.sizeHint().height(), dirty.sizeHint().height()) + 2)
+    row_w.setFixedHeight(dirty.sizeHint().height() + 2)
     return lbl, row_w, dirty
 
 
-def _show_copy_toast(anchor) -> None:
-    toast = anchor.property("_toast")
-    if toast is not None:
-        toast.show()
-        QTimer.singleShot(1000, toast.hide)
-        return
-    # Фолбэк для якорей без layout-тоста (не используется для полей карточки)
-    parent = anchor.parentWidget() or anchor.window()
-    toast = QLabel("Скопировано", parent)
-    toast.setStyleSheet(_SS_COPY_TOAST)
-    toast.adjustSize()
-    text_w = anchor.fontMetrics().horizontalAdvance(anchor.text())
-    p = anchor.mapTo(parent, QPoint(text_w + 6, 0))
-    toast.move(p.x(), p.y() + (anchor.height() - toast.height()) // 2)
-    toast.raise_()
-    toast.show()
-    _copy_toasts.append(toast)
-
-    def _cleanup():
-        toast.deleteLater()
-        try:
-            _copy_toasts.remove(toast)
-        except ValueError:
-            pass
-
-    QTimer.singleShot(3000, _cleanup)
-
-
-def _make_copy_btn(target_inp, anchor_lbl=None) -> "QPushButton":
+def _make_copy_btn(target_inp) -> "QPushButton":
     from PyQt6.QtWidgets import QPushButton as _QB
     btn = _QB(chr(0xE2EC))
     btn.setFont(_F_COPY_OUTLINE)
@@ -261,12 +266,35 @@ def _make_copy_btn(target_inp, anchor_lbl=None) -> "QPushButton":
         text = target_inp.text()
         if text:
             QApplication.clipboard().setText(text)
-        _show_copy_toast(anchor_lbl if anchor_lbl is not None else btn)
 
     btn.enterEvent = _enter
     btn.leaveEvent = _leave
     btn.clicked.connect(_on_click)
     return btn
+
+
+def _make_docs_badge(parent, have: int, total: int) -> QWidget:
+    """Пилюля «не хватает документов»: X/N загружено из требуемых."""
+    badge = QWidget(parent)
+    badge.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    badge.setObjectName("docsBadge")
+    badge.setFixedHeight(18)
+    badge.setStyleSheet(
+        "QWidget#docsBadge{background:#F9DCA4;border-radius:9px;}")
+    badge.installEventFilter(
+        _TooltipFilter(f"Не хватает документов: {total - have} из {total}", badge))
+    badge_lay = QHBoxLayout(badge)
+    badge_lay.setContentsMargins(6, 0, 7, 0)
+    badge_lay.setSpacing(3)
+    badge_icon = QLabel(chr(0xE000), badge)
+    badge_icon.setFont(_mat_font(12))
+    badge_icon.setStyleSheet("color:#73451A; background:transparent;")
+    badge_lay.addWidget(badge_icon)
+    badge_txt = QLabel(f"{have}/{total}", badge)
+    badge_txt.setStyleSheet(
+        "font-size:10px; font-weight:600; color:#73451A; background:transparent;")
+    badge_lay.addWidget(badge_txt)
+    return badge
 
 
 def _owner_opd_doc(owner) -> str:
@@ -382,6 +410,113 @@ class _TooltipFilter(QObject):
         elif event.type() == QEvent.Type.Leave:
             _AppTooltip.hide()
         return False
+
+
+class _ConfirmDialog(QDialog):
+    """Кастомное окно подтверждения деструктивного действия — обходит
+    нативный вид QMessageBox (Windows игнорирует Qt-стили для его чрома)."""
+
+    _RADIUS = 12
+
+    def __init__(self, title: str, message: str, *,
+                 confirm_text: str = "Удалить", cancel_text: str = "Отмена",
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("confirmDialog")
+        self.setStyleSheet(
+            f"QDialog#confirmDialog{{background:#FFFFFF;border-radius:{self._RADIUS}px;}}")
+        self.setModal(True)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 22, 24, 20)
+        lay.setSpacing(8)
+
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(
+            "font-size:17px; font-weight:700; color:#111827; background:transparent;")
+        title_lbl.setWordWrap(True)
+        lay.addWidget(title_lbl)
+
+        msg_lbl = QLabel(message)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setStyleSheet(
+            "font-size:13px; color:#6B7280; background:transparent;")
+        lay.addWidget(msg_lbl)
+
+        lay.addSpacing(10)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+        btn_cancel = QPushButton(cancel_text)
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.setStyleSheet(
+            "QPushButton{background:#F3F4F6;color:#111827;border:none;"
+            "border-radius:6px;padding:7px 16px;font-size:13px;}"
+            "QPushButton:hover{background:#E5E7EB;}")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_confirm = QPushButton(confirm_text)
+        btn_confirm.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_confirm.setStyleSheet(
+            "QPushButton{background:#DC2626;color:#FFFFFF;border:none;"
+            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:#B91C1C;}")
+        btn_confirm.clicked.connect(self.accept)
+        btn_row.addWidget(btn_confirm)
+
+        lay.addLayout(btn_row)
+        self.adjustSize()
+        self._apply_mask()
+
+    def _apply_mask(self):
+        """Обрезает окно маской по скруглённому прямоугольнику — надёжнее,
+        чем WA_TranslucentBackground, который на Windows иногда не composит-
+        ится и оставляет видимым прямоугольник исходного (непрозрачного) окна."""
+        sz = self.size()
+        if sz.width() <= 0 or sz.height() <= 0:
+            return
+        bmp = QBitmap(sz)
+        bmp.fill(Qt.GlobalColor.color0)
+        p = QPainter(bmp)
+        p.setBrush(Qt.GlobalColor.color1)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(self.rect(), self._RADIUS, self._RADIUS)
+        p.end()
+        self.setMask(QRegion(bmp))
+
+    def resizeEvent(self, a0):
+        super().resizeEvent(a0)
+        self._apply_mask()
+
+    @staticmethod
+    def confirm(parent, title: str, message: str, *,
+                confirm_text: str = "Удалить", cancel_text: str = "Отмена") -> bool:
+        host = parent.window() if parent is not None else None
+        overlay = None
+        if host is not None:
+            overlay = QWidget(host)
+            overlay.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            overlay.setStyleSheet("background: rgba(17, 24, 39, 0.45);")
+            overlay.setGeometry(host.rect())
+            overlay.show()
+            overlay.raise_()
+
+        dlg = _ConfirmDialog(title, message, confirm_text=confirm_text,
+                             cancel_text=cancel_text, parent=parent)
+        if parent is not None:
+            dlg.adjustSize()
+            geo = parent.geometry() if parent.isWindow() else host.geometry()
+            dlg.move(geo.center().x() - dlg.width() // 2,
+                     geo.center().y() - dlg.height() // 2)
+        try:
+            return dlg.exec() == QDialog.DialogCode.Accepted
+        finally:
+            if overlay is not None:
+                overlay.hide()
+                overlay.deleteLater()
 
 
 # ============================================================================ #
@@ -1436,7 +1571,7 @@ class _BorderOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(self._color, 1))
-        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1),
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
                                 self._radius, self._radius)
 
 
@@ -2648,15 +2783,6 @@ class _DocFieldWidget(QFrame):
         self._btn_box.setContentsMargins(0, 0, 0, 0)
         self._btn_box.setSpacing(4)
 
-        self._upload_btn = self._make_btn(chr(0xE9FC))
-        self._upload_btn.clicked.connect(self._on_upload)
-        self._btn_box.addWidget(self._upload_btn)
-
-        self._open_btn = self._make_btn(chr(0xE8F4))
-        self._open_btn.clicked.connect(self._on_open)
-        self._open_btn.setVisible(False)
-        self._btn_box.addWidget(self._open_btn)
-
         self._del_btn = self._make_btn(chr(0xE92B))
         self._del_btn.clicked.connect(self.delete_path)
         self._del_btn.setVisible(False)
@@ -2710,7 +2836,8 @@ class _DocFieldWidget(QFrame):
 
         if has:
             self.setStyleSheet(
-                "QFrame#_docFW{background:#F0FDFA;border:1px solid #07414F;border-radius:6px;}")
+                "QFrame#_docFW{background:#F0FDFA;border:1px solid #07414F;border-radius:6px;}"
+                "QFrame#_docFW:hover{background:#E3F7F1;border:1px solid #07414F;}")
             self._icon.setText(chr(0xE86C))
             self._icon.setStyleSheet(
                 "QLabel{background:transparent;border:none;padding:0;color:#2E9E5B;}")
@@ -2726,12 +2853,11 @@ class _DocFieldWidget(QFrame):
             self._sub_lbl.setStyleSheet(
                 "QLabel{background:transparent;border:none;padding:0;font-size:10px;color:#07414F;}")
             self._sub_lbl.setVisible(True)
-            self._upload_btn.setVisible(False)
-            self._open_btn.setVisible(True)
             self._del_btn.setVisible(True)
         elif self._required:
             self.setStyleSheet(
-                "QFrame#_docFW{background:#FFFBEB;border:1px dashed #F59E0B;border-radius:6px;}")
+                "QFrame#_docFW{background:#FFFBEB;border:1.5px dashed #F59E0B;border-radius:6px;}"
+                "QFrame#_docFW:hover{background:#FEF3C7;border:1.5px dashed #D97706;}")
             self._icon.setText(chr(0xE002))
             self._icon.setStyleSheet(
                 "QLabel{background:transparent;border:none;padding:0;color:#D97706;}")
@@ -2744,12 +2870,11 @@ class _DocFieldWidget(QFrame):
             self._sub_lbl.setStyleSheet(
                 "QLabel{background:transparent;border:none;padding:0;font-size:10px;color:#92400E;}")
             self._sub_lbl.setVisible(True)
-            self._upload_btn.setVisible(True)
-            self._open_btn.setVisible(False)
             self._del_btn.setVisible(False)
         else:
             self.setStyleSheet(
-                "QFrame#_docFW{background:#FFFFFF;border:1px solid #D1D5DB;border-radius:6px;}")
+                "QFrame#_docFW{background:#FFFFFF;border:1px solid #D1D5DB;border-radius:6px;}"
+                "QFrame#_docFW:hover{background:#F9FAFB;border:1px solid #9CA3AF;}")
             self._icon.setText(chr(0xE9FC))
             self._icon.setStyleSheet(
                 "QLabel{background:transparent;border:none;padding:0;color:#9CA3AF;}")
@@ -2762,19 +2887,17 @@ class _DocFieldWidget(QFrame):
             self._sub_lbl.setStyleSheet(
                 "QLabel{background:transparent;border:none;padding:0;font-size:10px;color:#9CA3AF;}")
             self._sub_lbl.setVisible(True)
-            self._upload_btn.setVisible(True)
-            self._open_btn.setVisible(False)
             self._del_btn.setVisible(False)
 
         self.path_changed.emit(self._path)
 
-    def _on_click(self, event):
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        if self._path:
-            self._on_open()
-        elif self._interactive:
-            self._on_upload()
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._path:
+                self._on_open()
+            elif self._interactive:
+                self._on_upload()
+        super().mousePressEvent(event)
 
     def _on_upload(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -2853,15 +2976,6 @@ class GroupEditDialog(QWidget):
         self._new_people: list = []  # созданные в этой сессии (сохраняются в _on_accept)
         self._setup_ui()
         self._apply_styles()
-
-    def _people_names(self) -> list:
-        seen, names = set(), []
-        for p in self._people:
-            nm = str(p.get("name", "")).strip()
-            if nm and nm.casefold() not in seen:
-                seen.add(nm.casefold())
-                names.append(nm)
-        return names
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
@@ -3198,7 +3312,7 @@ class GroupEditDialog(QWidget):
         name_inp.textChanged.connect(lambda _, c=cd: self._update_name_summary(c))
         # Ссылка на человека из реестра + автодополнение ФИО.
         cd["person_id"] = owner.get("person_id") if isinstance(owner, dict) else None
-        completer = QCompleter(self._people_names(), name_inp)
+        completer = QCompleter(_people_names(self._people), name_inp)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         name_inp.setCompleter(completer)
@@ -3206,7 +3320,7 @@ class GroupEditDialog(QWidget):
             lambda _t, c=cd: QTimer.singleShot(0, lambda: self._on_name_committed(c)))
         name_inp.editingFinished.connect(lambda c=cd: self._on_name_committed(c))
         name_row_h.addWidget(name_inp)
-        name_row_h.addWidget(_make_copy_btn(name_inp, lbl_fio))
+        name_row_h.addWidget(_make_copy_btn(name_inp))
         name_col.addLayout(name_row_h)
         cd["name_inp"] = name_inp
         content_lyt.addLayout(name_col)
@@ -3234,7 +3348,7 @@ class GroupEditDialog(QWidget):
             inp.setPlaceholderText(placeholder)
             inp.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             inp_row.addWidget(inp)
-            inp_row.addWidget(_make_copy_btn(inp, lbl_contact))
+            inp_row.addWidget(_make_copy_btn(inp))
             col.addLayout(inp_row)
             contact_row.addLayout(col, stretch=1)
             cd[key] = inp
@@ -3542,7 +3656,9 @@ class GroupEditDialog(QWidget):
                 cd["hdr_lbl"].setVisible(False)
                 cd["widget"].setStyleSheet(
                     "QFrame#personCard{"
-                    "background:#EBF4F6;border:1.5px solid #C9D8E2;border-radius:10px;}")
+                    "background:#EBF4F6;border:1.5px solid #C9D8E2;border-radius:10px;}"
+                    "QFrame#personCard:hover{"
+                    "background:#E1EEF2;border:1.5px solid #9FBCCB;}")
             else:
                 star.setFont(_F_STAR_OUTLINE)
                 star.setStyleSheet(
@@ -3552,7 +3668,9 @@ class GroupEditDialog(QWidget):
                 cd["hdr_lbl"].setVisible(False)
                 cd["widget"].setStyleSheet(
                     "QFrame#personCard{"
-                    "background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;}")
+                    "background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;}"
+                    "QFrame#personCard:hover{"
+                    "background:#F3F4F6;border:1px solid #C9D0D8;}")
 
     # ── Сохранение ────────────────────────────────────────────────────
 
@@ -3752,6 +3870,8 @@ class PlotEditDialog(QWidget):
         self._dirty_fields: set = set()     # поля (num/area) с принятыми изменениями
         self._group_dirty: bool = False     # группа изменена через "Список контактов"
         self._contact_input_refs: dict = {} # idx → (inp_name, inp_phone, inp_email)
+        # Реестр людей: источник для автодополнения ФИО и переиспользования контактов.
+        self._people: list = people_reg.load_people()
         self._setup_ui()
         self._apply_styles()
 
@@ -3907,6 +4027,11 @@ class PlotEditDialog(QWidget):
         lbl_act.setStyleSheet(
             "font-size:12px; color:#6B7280; background:transparent;")
         act_hdr.addWidget(lbl_act, stretch=1)
+        self._active_docs_badge_box = QWidget()
+        self._active_docs_badge_box.setStyleSheet("background:transparent;")
+        self._active_docs_badge_lay = QHBoxLayout(self._active_docs_badge_box)
+        self._active_docs_badge_lay.setContentsMargins(0, 0, 0, 0)
+        act_hdr.addWidget(self._active_docs_badge_box)
         self._active_since_lbl = QLabel()
         self._active_since_lbl.setStyleSheet(
             "font-size:12px; color:#6B7280; background:transparent;")
@@ -3940,17 +4065,17 @@ class PlotEditDialog(QWidget):
         sep_line.setStyleSheet("color:#C9D8E2; background:#C9D8E2; max-height:1px;")
         card_lay.addWidget(sep_line)
 
-        self._active_missing_lbl = QLabel()
-        self._active_missing_lbl.setStyleSheet(
-            "font-size:12px; color:#9CA3AF; background:transparent;")
-        self._active_missing_lbl.setWordWrap(True)
-        card_lay.addWidget(self._active_missing_lbl)
+        _debt_hdr = QLabel("Задолженность")
+        _debt_hdr.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        card_lay.addWidget(_debt_hdr)
 
-        self._active_debt_line = QLabel()
-        self._active_debt_line.setStyleSheet(
-            "font-size:12px; color:#374151; background:transparent;")
-        self._active_debt_line.setWordWrap(True)
-        card_lay.addWidget(self._active_debt_line)
+        self._debt_rows_box = QWidget()
+        self._debt_rows_box.setStyleSheet("background:transparent;")
+        self._debt_rows_lay = QVBoxLayout(self._debt_rows_box)
+        self._debt_rows_lay.setContentsMargins(0, 2, 0, 0)
+        self._debt_rows_lay.setSpacing(2)
+        card_lay.addWidget(self._debt_rows_box)
 
         # ── Список контактов (превью + аккордеон) ──────────────────────
         _sep2 = QFrame()
@@ -3968,7 +4093,7 @@ class PlotEditDialog(QWidget):
         self._active_preview_box.setStyleSheet("background:transparent;")
         self._active_preview_lay = QVBoxLayout(self._active_preview_box)
         self._active_preview_lay.setContentsMargins(0, 0, 0, 0)
-        self._active_preview_lay.setSpacing(2)
+        self._active_preview_lay.setSpacing(6)
         card_lay.addWidget(self._active_preview_box)
 
         # Кнопка «Показать все» / «Свернуть»
@@ -3983,6 +4108,18 @@ class PlotEditDialog(QWidget):
         self._btn_show_all.clicked.connect(self._on_toggle_contacts_full)
         self._btn_show_all.setVisible(False)
         card_lay.addWidget(self._btn_show_all)
+
+        # Кнопка «Добавить контакт»
+        self._btn_add_contact = QPushButton("+  Добавить контакт")
+        self._btn_add_contact.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_add_contact.setStyleSheet(
+            "QPushButton{background:transparent;color:#07414F;"
+            "border:1px dashed #9CA3AF;border-radius:6px;"
+            "padding:4px 12px;font-size:12px;}"
+            "QPushButton:hover{background:#EBF4F6;border-color:#07414F;}")
+        self._btn_add_contact.clicked.connect(self._on_add_contact)
+        card_lay.addWidget(self._btn_add_contact)
+
         self._contacts_expanded = False
         self._expanded_contacts: set[int] = set()
 
@@ -4187,16 +4324,11 @@ class PlotEditDialog(QWidget):
 
     def _on_delete_clicked(self):
         """Удаление участка — с подтверждением; решение исполняет хост (PlotsWidget)."""
-        m = QMessageBox(self)
-        m.setWindowTitle("Удаление участка")
-        m.setText("Удалить этот участок?")
-        m.setInformativeText("Будет удалена вся информация участка, включая документы.")
-        m.setIcon(QMessageBox.Icon.Warning)
-        yes = m.addButton("Да, удалить", QMessageBox.ButtonRole.AcceptRole)
-        m.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
-        m.setDefaultButton(yes)
-        m.exec()
-        if m.clickedButton() is yes:
+        confirmed = _ConfirmDialog.confirm(
+            self, "Удалить этот участок?",
+            "Будет удалена вся информация участка, включая документы.",
+            confirm_text="Да, удалить")
+        if confirmed:
             self.detach()
             self.deleted.emit()
 
@@ -4249,6 +4381,17 @@ class PlotEditDialog(QWidget):
         self._active_since_lbl.setText(
             f"Активна с: {since.strftime('%d.%m.%Y')}" if since else "Активна с: —")
 
+        # Бейдж «не хватает документов» по всей группе (в заголовке)
+        while self._active_docs_badge_lay.count():
+            item = self._active_docs_badge_lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        _have, _total = self._group_docs_progress(owners)
+        if _total and _have < _total:
+            self._active_docs_badge_lay.addWidget(
+                _make_docs_badge(self._active_docs_badge_box, _have, _total))
+
         # Счётчики
         n_members = sum(1 for o in owners if isinstance(o, dict) and o.get("is_member"))
         count_lines = []
@@ -4256,14 +4399,31 @@ class PlotEditDialog(QWidget):
             count_lines.append(f"Члены СНТ: {n_members}")
         self._active_counts_lbl.setText("  ·  ".join(count_lines) if count_lines else "")
 
-        # Отсутствующие документы
-        self._active_missing_lbl.setText("\n".join(self._missing_docs_lines(owners)))
-
         # Долг/Аванс
         self._refresh_debt_card()
 
         # Превью контактов (до 3)
         self._refresh_contacts_preview(owners)
+
+    @staticmethod
+    def _group_docs_progress(owners) -> tuple[int, int]:
+        """(загружено, требуется) обязательных документов по всей группе —
+        той же логикой, что и бейдж у каждого контакта в списке контактов."""
+        doc_field = {"opd": "opd_doc", "egrn": "egrn_doc", "member": "member_doc"}
+        have = total = 0
+        for o in owners:
+            if not isinstance(o, dict):
+                continue
+            role_key = ("member" if o.get("is_member")
+                        else "owner" if o.get("is_owner")
+                        else "contact")
+            req = _DOC_REQUIRED[role_key]
+            for k in ("opd", "egrn", "member"):
+                if req[k]:
+                    total += 1
+                    if o.get(doc_field[k]):
+                        have += 1
+        return have, total
 
     @staticmethod
     def _missing_docs_lines(owners) -> list[str]:
@@ -4301,19 +4461,38 @@ class PlotEditDialog(QWidget):
         return lines
 
     def _refresh_debt_card(self):
-        """Долг по ЧВ и электроэнергии — одной строкой в карточке активной группы."""
+        """Долг по ЧВ и электроэнергии — построчно в секции «Задолженность»."""
         from core.utils import fmt_money
         plot_num = str(self._plot_data.get("num", ""))
         since = ownership.group_since(self._active_group)
 
-        def _part(label: str, debt: float) -> str:
+        def _make_row(label: str, debt: float) -> QWidget:
+            row = QWidget()
+            row.setStyleSheet("background:transparent;")
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(8)
+            lbl = QLabel(label)
+            lbl.setStyleSheet("font-size:12px; color:#374151; background:transparent;")
+            row_lay.addWidget(lbl, stretch=1)
             if debt < -0.005:
-                return f"{label} аванс {fmt_money(abs(debt))}"
-            if debt > 0.005:
-                return f"{label} долг {fmt_money(abs(debt))}"
-            return f"{label} {fmt_money(0)}"
+                amt_txt, color = f"-{fmt_money(abs(debt))}", "#2E7D32"
+            elif debt > 0.005:
+                amt_txt, color = fmt_money(debt), "#B45309"
+            else:
+                amt_txt, color = fmt_money(0), "#6B7280"
+            amt = QLabel(amt_txt)
+            amt.setStyleSheet(
+                f"font-size:12px; font-weight:600; color:{color}; background:transparent;")
+            row_lay.addWidget(amt)
+            return row
 
-        parts = []
+        while self._debt_rows_lay.count():
+            item = self._debt_rows_lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
         try:
             from core import vznosy as vzn
             rates = vzn.load_rates()
@@ -4321,7 +4500,7 @@ class PlotEditDialog(QWidget):
             area = vzn.plot_area_map().get(plot_num)
             gb = vzn.balance_for_active_group(
                 plot_num, area, date.today(), rates, adj, self._df, since=since)
-            parts.append(_part("ЧВ:", gb.debt))
+            self._debt_rows_lay.addWidget(_make_row("Членские взносы", gb.debt))
         except Exception:
             pass
         try:
@@ -4329,10 +4508,9 @@ class PlotEditDialog(QWidget):
             egb = en.balance_for_active_group(
                 plot_num, date.today(), en.load_meters(), en.load_rates(),
                 en.load_replacements(), en.load_baseline(), self._df, since=since)
-            parts.append(_part("Эл.:", egb.debt))
+            self._debt_rows_lay.addWidget(_make_row("Электроэнергия", egb.debt))
         except Exception:
             pass
-        self._active_debt_line.setText("   ·   ".join(parts))
 
     def _refresh_contacts_preview(self, owners: list):
         """Обновляет превью контактов под карточкой активной группы."""
@@ -4352,23 +4530,23 @@ class PlotEditDialog(QWidget):
             shown = list(enumerate(owners[:PREVIEW_LIMIT]))
         has_more = len(owners) > PREVIEW_LIMIT
 
-        _INPUT_SS = (
-            "QLineEdit{background:#F8F9FA; border:1px solid #D1D5DB;"
-            "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
-            "QLineEdit:focus{border:1px solid #07414F;}")
         _LABEL_SS = "font-size:10px; color:#9CA3AF; background:transparent;"
 
         for idx, o in shown:
+            row_idx = idx
             is_open = idx in self._expanded_contacts
 
             # Строковый контейнер (vert): заголовок + (опционально) детали
             card = QWidget(self)
+            card.setObjectName("contactPreviewCard")
+            card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             card.setStyleSheet(
-                "QWidget{background:transparent;}"
-                "QWidget:hover{background:#E8F0F5;border-radius:4px;}")
+                "QWidget#contactPreviewCard{background:#FFFFFF;border:1px solid #E5E7EB;"
+                "border-radius:8px;}"
+                "QWidget#contactPreviewCard:hover{background:#E8F0F5;border:1px solid #C9D8E2;}")
             card.setCursor(Qt.CursorShape.PointingHandCursor)
             card_vl = QVBoxLayout(card)
-            card_vl.setContentsMargins(0, 0, 0, 0)
+            card_vl.setContentsMargins(8, 4, 8, 4)
             card_vl.setSpacing(0)
 
             # ── Заголовок строки ──────────────────────────────────────
@@ -4382,51 +4560,39 @@ class PlotEditDialog(QWidget):
             # Имя (нужно для цвета иконки)
             full_name = ownership.owner_name(o) if isinstance(o, dict) else str(o)
 
-            # Иконка роли (единая person, цвет по роли)
-            role_icon = QLabel(hdr)
-            role_icon.setFixedSize(18, 18)
-            role_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            role_icon.setText(chr(0xe7fd))
-            if isinstance(o, dict) and o.get("is_member"):
-                role_icon.setStyleSheet(
-                    "background:#D6EBD5; color:#2E7D32; border-radius:9px;"
-                    "font-size:10px;")
-            elif isinstance(o, dict) and o.get("is_owner"):
-                role_icon.setStyleSheet(
-                    "background:#C9D8E2; color:#07414F; border-radius:9px;"
-                    "font-size:10px;")
-            else:
-                role_icon.setStyleSheet(
-                    "background:#E5E7EB; color:#6B7280; border-radius:9px;"
-                    "font-size:10px;")
-            role_icon.setFont(_mat_font(12))
-            role_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            rl.addWidget(role_icon)
+            # Звёздочка «избранный» на цветном фоне роли — объединяет
+            # прежнюю декоративную иконку-бюст и отдельную кнопку-звезду,
+            # экономит место в строке.
+            role_key0 = ("member" if isinstance(o, dict) and o.get("is_member")
+                         else "owner" if isinstance(o, dict) and o.get("is_owner")
+                         else "contact")
+            role_bg, role_fg = _ROLE_COLORS[role_key0]
 
-            # Звёздочка — пометка «избранный» (главный контакт)
             is_primary = isinstance(o, dict) and bool(o.get("is_visible"))
             star_btn = QPushButton(chr(0xE838), hdr)
+            star_btn._role_bg = role_bg
+            star_btn._role_fg = role_fg
             star_btn.setFont(_F_STAR_FILLED if is_primary else _F_STAR_OUTLINE)
             star_btn.setFixedSize(18, 18)
             star_btn.setFlat(True)
             star_btn.setStyleSheet(
-                "QPushButton{background:transparent;border:none;padding:0;}"
-                f"QPushButton{{color:{'#07414F' if is_primary else '#C9D8E2'};}}")
+                f"QPushButton{{background:{role_bg};border:none;border-radius:9px;"
+                f"padding:0;color:{'#07414F' if is_primary else role_fg};}}")
             star_btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
             def _star_enter(e, btn=star_btn, primary=is_primary):
                 if not primary:
                     btn.setFont(_F_STAR_FILLED)
                     btn.setStyleSheet(
-                        "QPushButton{background:transparent;border:none;"
-                        "color:#07414F;padding:0;}")
+                        f"QPushButton{{background:{btn._role_bg};border:none;"
+                        f"border-radius:9px;padding:0;color:#07414F;}}")
 
             def _star_leave(e, btn=star_btn, primary=is_primary):
                 if not primary:
                     btn.setFont(_F_STAR_OUTLINE)
                     btn.setStyleSheet(
-                        "QPushButton{background:transparent;border:none;"
-                        "color:#C9D8E2;padding:0;}")
+                        f"QPushButton{{background:{btn._role_bg};border:none;"
+                        f"border-radius:9px;padding:0;color:{btn._role_fg};}}")
 
             star_btn.enterEvent = _star_enter
             star_btn.leaveEvent = _star_leave
@@ -4450,6 +4616,16 @@ class PlotEditDialog(QWidget):
                     "font-size:11px; color:#6B7280; background:transparent;")
                 ph_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 rl.addWidget(ph_lbl)
+
+            # Бейдж «не хватает документов» (только в свёрнутом виде)
+            if not is_open and isinstance(o, dict):
+                _req = _DOC_REQUIRED[role_key0]
+                _doc_field = {"opd": "opd_doc", "egrn": "egrn_doc", "member": "member_doc"}
+                _req_keys = [k for k in ("opd", "egrn", "member") if _req[k]]
+                _have = sum(1 for k in _req_keys if o.get(_doc_field[k]))
+                _total = len(_req_keys)
+                if _total and _have < _total:
+                    rl.addWidget(_make_docs_badge(hdr, _have, _total))
 
             # Кнопка «редактировать»: всегда в layout (22×22), иконка прозрачна по умолчанию
             btn_edit = QPushButton(hdr)
@@ -4496,31 +4672,53 @@ class PlotEditDialog(QWidget):
                 det_lay.setSpacing(4)
 
                 # ФИО
-                det_lay.addWidget(QLabel("ФИО", styleSheet=_LABEL_SS, parent=det))
+                lbl_fio = QLabel("ФИО", styleSheet=_LABEL_SS, parent=det)
+                det_lay.addWidget(lbl_fio)
                 inp_name = QLineEdit(full_name, parent=det)
                 inp_name.setPlaceholderText("Фамилия Имя Отчество")
                 inp_name.setStyleSheet(_INPUT_SS)
-                det_lay.addWidget(inp_name)
+                inp_name.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+                # Автодополнение по реестру людей (см. также _add_owner_card).
+                _name_completer = QCompleter(_people_names(self._people), inp_name)
+                _name_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+                _name_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+                inp_name.setCompleter(_name_completer)
+                name_row = QHBoxLayout()
+                name_row.setContentsMargins(0, 0, 0, 0)
+                name_row.setSpacing(4)
+                name_row.addWidget(inp_name)
+                name_row.addWidget(_make_copy_btn(inp_name))
+                det_lay.addLayout(name_row)
 
                 # Телефон + Email (на одном уровне)
                 contact_row = QHBoxLayout()
                 contact_row.setSpacing(8)
-                for lbl_txt, val, placeholder in [
-                    ("Телефон", phone, "нет телефона"),
-                    ("Email", (o.get("email", "") if isinstance(o, dict) else "").strip(), "нет email"),
+                _contact_inputs = []
+                for lbl_txt, val, placeholder, key in [
+                    ("Телефон", _normalize_phone(phone), "нет телефона", "phone"),
+                    ("Email", (o.get("email", "") if isinstance(o, dict) else "").strip(), "нет email", "email"),
                 ]:
                     col = QVBoxLayout()
                     col.setSpacing(2)
-                    col.addWidget(QLabel(lbl_txt, styleSheet=_LABEL_SS, parent=det))
+                    lbl_contact = QLabel(lbl_txt, styleSheet=_LABEL_SS, parent=det)
+                    col.addWidget(lbl_contact)
                     inp = QLineEdit(val, parent=det)
                     inp.setPlaceholderText(placeholder)
                     inp.setStyleSheet(_INPUT_SS)
-                    col.addWidget(inp)
+                    if key == "phone":
+                        inp.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+                        _setup_phone_input(inp)
+                    inp_row = QHBoxLayout()
+                    inp_row.setContentsMargins(0, 0, 0, 0)
+                    inp_row.setSpacing(4)
+                    inp_row.addWidget(inp)
+                    inp_row.addWidget(_make_copy_btn(inp))
+                    col.addLayout(inp_row)
                     contact_row.addLayout(col, stretch=1)
+                    _contact_inputs.append(inp)
                 det_lay.addLayout(contact_row)
 
-                inp_phone = contact_row.itemAt(0).layout().itemAt(1).widget()
-                inp_email = contact_row.itemAt(1).layout().itemAt(1).widget()
+                inp_phone, inp_email = _contact_inputs
 
                 # Роль — сегментированный контрол
                 det_lay.addWidget(QLabel("Роль", styleSheet=_LABEL_SS, parent=det))
@@ -4528,9 +4726,10 @@ class PlotEditDialog(QWidget):
                          else "owner" if o.get("is_owner")
                          else "contact")
 
-                seg_frame = QFrame()
-                seg_frame.setStyleSheet(
-                    "QFrame{border:0.5px solid #CCCCCC; border-radius:8px; background:#F7F7F5;}")
+                # _ClipFrame обрезает дочерние кнопки маской по скруглённому
+                # прямоугольнику и рисует рамку поверх — иначе прямые углы
+                # кнопок вылезают за скругление рамки или оставляют щель.
+                seg_frame = _ClipFrame(QColor("#CCCCCC"), 8)
                 seg_lay = QHBoxLayout(seg_frame)
                 seg_lay.setContentsMargins(0, 0, 0, 0)
                 seg_lay.setSpacing(0)
@@ -4539,14 +4738,12 @@ class PlotEditDialog(QWidget):
                 role_tags = []
                 _SEG_SS = (
                     "QPushButton{font-size:11px; padding:6px 0; border:none; border-radius:0px;"
-                    "border-right:0.5px solid #E3E3E0; background:#F7F7F5; color:#555555;}"
+                    "border-right:1px solid #D8DAD8; background:#F7F7F5; color:#555555;}"
                     "QPushButton:hover:!checked{background:#EDEDEB;}"
-                    "QPushButton#seg_first{border-top-left-radius:7px; border-bottom-left-radius:7px;}"
-                    "QPushButton#seg_last{border-top-right-radius:7px; border-bottom-right-radius:7px; border-right:none;}"
-                    "QPushButton[role=\"contact\"]:checked{background:#E5E7EB; color:#6B7280; font-weight:500; border-right-color:#D1D5DB;}"
-                    "QPushButton[role=\"owner\"]:checked{background:#C9D8E2; color:#07414F; font-weight:500; border-right-color:#B5C8D5;}"
-                    "QPushButton[role=\"member\"]:checked{background:#D6EBD5; color:#2E7D32; font-weight:500; border-right-color:#A6D9BC;}")
-                _names = ["seg_first", "seg_mid", "seg_last"]
+                    "QPushButton#seg_last{border-right:none;}"
+                    "QPushButton[role=\"contact\"]:checked{background:#E5E7EB; color:#6B7280; font-weight:500;}"
+                    "QPushButton[role=\"owner\"]:checked{background:#C9D8E2; color:#07414F; font-weight:500;}"
+                    "QPushButton[role=\"member\"]:checked{background:#D6EBD5; color:#2E7D32; font-weight:500;}")
                 _roles = [("Контакт", "contact"), ("Собственник", "owner"), ("Член СНТ", "member")]
                 for idx, (text, rk) in enumerate(_roles):
                     seg = QPushButton(text, seg_frame)
@@ -4554,25 +4751,20 @@ class PlotEditDialog(QWidget):
                     seg.setChecked(rk == _role)
                     seg.setCursor(Qt.CursorShape.PointingHandCursor)
                     seg.setProperty("role", rk)
-                    seg.setObjectName(_names[idx])
+                    if idx == len(_roles) - 1:
+                        seg.setObjectName("seg_last")
                     seg_group.addButton(seg)
                     seg.setStyleSheet(_SEG_SS)
                     seg.clicked.connect(
-                        lambda checked, rk2=rk, tags=role_tags, ri=role_icon, ow=o:
-                            self._set_inline_role(ow, rk2, tags, ri))
+                        lambda checked, rk2=rk, tags=role_tags, sb=star_btn, ow=o:
+                            self._set_inline_role(ow, rk2, tags, sb))
                     role_tags.append((rk, seg))
                     seg_lay.addWidget(seg, 1)
                 det_lay.addWidget(seg_frame)
+                seg_frame.finish_setup()
 
                 # Документы
-                docs_sep = QFrame()
-                docs_sep.setFrameShape(QFrame.Shape.HLine)
-                docs_sep.setStyleSheet("color:#E5E7EB; background:#E5E7EB; max-height:1px;")
-                det_lay.addWidget(docs_sep)
-
-                docs_hdr = QLabel("Документы")
-                docs_hdr.setStyleSheet(
-                    "font-size:11px; font-weight:600; color:#9CA3AF; background:transparent;")
+                docs_hdr = QLabel("Документы", styleSheet=_LABEL_SS, parent=det)
                 det_lay.addWidget(docs_hdr)
 
                 _role = ("member" if o.get("is_member")
@@ -4592,6 +4784,16 @@ class PlotEditDialog(QWidget):
                 egrn_w.set_required(_req["egrn"])
                 mem_w.set_required(_req["member"])
 
+                # Автодополнение по ФИО: подставляет телефон/email/ОПД/заявление
+                # уже известного человека из реестра (см. _on_inline_name_committed).
+                _name_completer.activated.connect(
+                    lambda _t, ow=o, n=inp_name, p=inp_phone, e=inp_email, odw=opd_w, mdw=mem_w:
+                        QTimer.singleShot(
+                            0, lambda: self._on_inline_name_committed(ow, n, p, e, odw, mdw)))
+                inp_name.editingFinished.connect(
+                    lambda ow=o, n=inp_name, p=inp_phone, e=inp_email, odw=opd_w, mdw=mem_w:
+                        self._on_inline_name_committed(ow, n, p, e, odw, mdw))
+
                 _lbl_ss = "font-size:12px; color:#6B7280; background:transparent;"
                 docs_box = QVBoxLayout()
                 docs_box.setContentsMargins(0, 0, 0, 0)
@@ -4602,18 +4804,32 @@ class PlotEditDialog(QWidget):
 
                 det_lay.addLayout(docs_box)
 
+                # Удалить контакт
+                del_row = QHBoxLayout()
+                del_row.setContentsMargins(0, 6, 0, 0)
+                btn_del_contact = QPushButton("Удалить контакт")
+                btn_del_contact.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_del_contact.setStyleSheet(
+                    "QPushButton{background:transparent;color:#DC2626;border:1px solid #FCA5A5;"
+                    "border-radius:6px;padding:4px 10px;font-size:11px;}"
+                    "QPushButton:hover{background:#FEF2F2;}")
+                btn_del_contact.clicked.connect(lambda _, i=row_idx: self._delete_contact(i))
+                del_row.addWidget(btn_del_contact)
+                del_row.addStretch()
+                det_lay.addLayout(del_row)
+
                 card_vl.addWidget(det)
 
                 # Сохраняем ссылки на поля для auto-save при схлопывании
-                self._contact_input_refs[idx] = (inp_name, inp_phone, inp_email,
+                self._contact_input_refs[row_idx] = (inp_name, inp_phone, inp_email,
                                                  opd_w, egrn_w, mem_w)
 
             # ── Обработчики ────────────────────────────────────────────
             # Клик по заголовку: toggle
-            hdr.mouseReleaseEvent = lambda event, i=idx: self._toggle_contact_detail(i) if event.button() == Qt.MouseButton.LeftButton else None
+            hdr.mouseReleaseEvent = lambda event, i=row_idx: self._toggle_contact_detail(i) if event.button() == Qt.MouseButton.LeftButton else None
 
             # Клик по карандашу: аналогичный тоггл
-            btn_edit.clicked.connect(lambda _, i=idx: self._toggle_contact_detail(i))
+            btn_edit.clicked.connect(lambda _, i=row_idx: self._toggle_contact_detail(i))
 
             self._active_preview_lay.addWidget(card)
 
@@ -4632,23 +4848,66 @@ class PlotEditDialog(QWidget):
             self._contacts_expanded = False
 
     def _toggle_contact_detail(self, idx: int):
-        """Тоггл раскрытия контакта. Открыт → auto-save + закрыть. Закрыт → открыть."""
+        """Тоггл раскрытия контакта. Открыт → auto-save + закрыть. Закрыт → открыть.
+        Развёрнутым может быть только один контакт: при открытии нового все
+        остальные автоматически сохраняются и сворачиваются. Если сохранение
+        заблокировано валидацией (пустое ФИО при заполненных прочих полях) —
+        переключение отменяется, фокус остаётся на невалидном контакте."""
         if idx in self._expanded_contacts:
-            refs = self._contact_input_refs.pop(idx, None)
-            self._expanded_contacts.discard(idx)
-            if refs:
-                inp_name, inp_phone, inp_email, opd_w, egrn_w, mem_w = refs
-                self._save_inline_contact(
-                    idx, inp_name.text(), inp_phone.text(), inp_email.text(),
-                    opd_w.get_path(), egrn_w.get_path(), mem_w.get_path())
-                return  # _save_inline_contact уже зовёт _refresh_contacts_preview
-        else:
-            self._expanded_contacts.add(idx)
+            self._save_and_collapse(idx)
+            return
+        for other_idx in list(self._expanded_contacts):
+            if not self._save_and_collapse(other_idx):
+                return
+        self._expanded_contacts.add(idx)
         self._refresh_contacts_preview(
             ownership.group_owners(self._active_group))
 
+    def _save_and_collapse(self, idx: int) -> bool:
+        """Сохраняет поля развёрнутого контакта idx и сворачивает его.
+        Возвращает False, если сворачивание заблокировано валидацией —
+        в этом случае контакт остаётся развёрнутым.
+
+        Пустое ФИО не сохраняется: если контакт при этом совсем пустой
+        (ни телефона, ни email, ни документов) — он тихо удаляется как
+        неначатый черновик. Если данные всё же есть — карточка остаётся
+        открытой, а поле ФИО подсвечивается как обязательное."""
+        refs = self._contact_input_refs.get(idx)
+        if not refs:
+            self._expanded_contacts.discard(idx)
+            return True
+        inp_name, inp_phone, inp_email, opd_w, egrn_w, mem_w = refs
+        name = inp_name.text().strip()
+        if not name:
+            has_other_data = bool(
+                inp_phone.text().strip() or inp_email.text().strip()
+                or opd_w.get_path() or egrn_w.get_path() or mem_w.get_path())
+            if has_other_data:
+                inp_name.setStyleSheet(_INPUT_ERROR_SS)
+                inp_name.setFocus()
+
+                def _clear_err(_t="", w=inp_name):
+                    w.setStyleSheet(_INPUT_SS)
+                    try:
+                        w.textChanged.disconnect(_clear_err)
+                    except (TypeError, RuntimeError):
+                        pass
+
+                inp_name.textChanged.connect(_clear_err)
+                return False
+            self._contact_input_refs.pop(idx, None)
+            self._expanded_contacts.discard(idx)
+            self._delete_contact_silently(idx)
+            return True
+        self._contact_input_refs.pop(idx, None)
+        self._expanded_contacts.discard(idx)
+        self._save_inline_contact(
+            idx, name, inp_phone.text(), inp_email.text(),
+            opd_w.get_path(), egrn_w.get_path(), mem_w.get_path())
+        return True
+
     def _set_inline_role(self, owner: dict, role_key: str,
-                         tags: list[tuple[str, QPushButton]], role_icon: QLabel):
+                         tags: list[tuple[str, QPushButton]], star_btn: QPushButton):
         """Устанавливает роль контакта (radio-логика) и обновляет вид in-place."""
         if not isinstance(owner, dict):
             return
@@ -4658,16 +4917,14 @@ class PlotEditDialog(QWidget):
         for rk, btn in tags:
             is_active = (rk == role_key)
             btn.setChecked(is_active)
-        # Обновить цвет иконки роли в заголовке
-        if role_key == "member":
-            role_icon.setStyleSheet(
-                "background:#D6EBD5; color:#2E7D32; border-radius:9px; font-size:10px;")
-        elif role_key == "owner":
-            role_icon.setStyleSheet(
-                "background:#C9D8E2; color:#07414F; border-radius:9px; font-size:10px;")
-        else:
-            role_icon.setStyleSheet(
-                "background:#E5E7EB; color:#6B7280; border-radius:9px; font-size:10px;")
+        # Обновить цвет фона звезды-«избранного» под новую роль
+        role_bg, role_fg = _ROLE_COLORS[role_key]
+        star_btn._role_bg = role_bg
+        star_btn._role_fg = role_fg
+        is_primary = bool(owner.get("is_visible"))
+        star_btn.setStyleSheet(
+            f"QPushButton{{background:{role_bg};border:none;border-radius:9px;"
+            f"padding:0;color:{'#07414F' if is_primary else role_fg};}}")
         # Обновить обязательность документов для развёрнутой карточки
         idx = None
         owners = self._active_group.get("owners", []) or []
@@ -4696,6 +4953,78 @@ class PlotEditDialog(QWidget):
             ownership.owner_name(main) if isinstance(main, dict) else "(нет лиц)")
         self._refresh_contacts_preview(owners)
 
+    def _delete_contact_silently(self, idx: int):
+        """Удаляет контакт по индексу без диалога подтверждения
+        (используется для автосброса незаполненного черновика)."""
+        owners = self._active_group.get("owners", []) or []
+        if idx < 0 or idx >= len(owners):
+            return
+        o = owners[idx]
+        was_primary = isinstance(o, dict) and bool(o.get("is_visible"))
+        owners.pop(idx)
+        if was_primary and owners and isinstance(owners[0], dict):
+            owners[0]["is_visible"] = True
+        self._group_dirty = True
+        self._expanded_contacts.clear()
+        self._contact_input_refs.clear()
+        self._refresh_active_card()
+        self._update_save_state()
+
+    def _delete_contact(self, idx: int):
+        """Удаляет контакт по индексу — с подтверждением."""
+        owners = self._active_group.get("owners", []) or []
+        if idx < 0 or idx >= len(owners):
+            return
+        o = owners[idx]
+        name = ownership.owner_name(o) if isinstance(o, dict) else ""
+        confirmed = _ConfirmDialog.confirm(
+            self,
+            f"Удалить контакт «{name}»?" if name else "Удалить этот контакт?",
+            "Данные контакта и прикреплённые документы будут удалены.",
+            confirm_text="Да, удалить")
+        if not confirmed:
+            return
+        self._delete_contact_silently(idx)
+
+    def _on_add_contact(self):
+        """Добавляет пустой контакт и сразу открывает его для заполнения."""
+        owners = self._active_group.setdefault("owners", [])
+        owners.append(_make_owner("", is_owner=False))
+        self._group_dirty = True
+        self._expanded_contacts.clear()
+        self._contact_input_refs.clear()
+        self._expanded_contacts.add(len(owners) - 1)
+        self._contacts_expanded = True
+        self._refresh_active_card()
+        self._update_save_state()
+
+    def _on_inline_name_committed(self, owner, inp_name: "QLineEdit",
+                                  inp_phone: "QLineEdit", inp_email: "QLineEdit",
+                                  opd_w: "_DocFieldWidget", mem_w: "_DocFieldWidget"):
+        """ФИО введено/выбрано в инлайн-карточке → привязать человека из
+        реестра и подставить пустые телефон/email/ОПД/заявление из реестра
+        (переиспользование). ЕГРН не подставляется — она привязана к
+        конкретному объекту, а не к человеку. Аналог _on_name_committed
+        для старого редактора."""
+        if not isinstance(owner, dict):
+            return
+        name = inp_name.text().strip()
+        person = people_reg.find_by_name(self._people, name) if name else None
+        if person:
+            owner["person_id"] = person.get("id")
+            if not inp_phone.text().strip() and person.get("phone"):
+                inp_phone.setText(_normalize_phone(person["phone"]))
+            if not inp_email.text().strip() and person.get("email"):
+                inp_email.setText(person.get("email", ""))
+            if not opd_w.get_path() and person.get("opd_doc"):
+                opd_w.set_path(person["opd_doc"])
+                owner["opd_doc"] = person["opd_doc"]
+            if not mem_w.get_path() and person.get("member_doc"):
+                mem_w.set_path(person["member_doc"])
+                owner["member_doc"] = person["member_doc"]
+        else:
+            owner.pop("person_id", None)
+
     def _save_inline_contact(self, idx: int, name: str, phone: str, email: str,
                              opd_doc: str = "", egrn_doc: str = "",
                              member_doc: str = ""):
@@ -4706,9 +5035,44 @@ class PlotEditDialog(QWidget):
         o = owners[idx]
         if not isinstance(o, dict):
             return
-        o["name"] = name.strip()
-        o["phone"] = phone.strip()
-        o["email"] = email.strip()
+        name = name.strip()
+        phone = phone.strip()
+        email = email.strip()
+        o["name"] = name
+        o["phone"] = phone
+        o["email"] = email
+
+        # Привязка к человеку в реестре: по уже известному person_id, иначе
+        # по совпадению ФИО, иначе — регистрируем нового (как в _on_accept
+        # старого редактора), чтобы он был доступен для автодополнения впредь.
+        person = people_reg.get(self._people, o.get("person_id"))
+        if person is None and name:
+            person = people_reg.find_by_name(self._people, name)
+        registry_changed = False
+        if person is None and name:
+            person = people_reg.create_person(
+                name, phone, email, opd_doc=opd_doc, member_doc=member_doc)
+            self._people.append(person)
+            registry_changed = True
+        if person:
+            o["person_id"] = person["id"]
+            # ОПД и заявление в СНТ не зависят от участка — кэшируем в
+            # реестре, чтобы подтягивать их для этого человека где угодно
+            # (в отличие от ЕГРН, привязанной к конкретному объекту).
+            if opd_doc and person.get("opd_doc") != opd_doc:
+                person["opd_doc"] = opd_doc
+                registry_changed = True
+            if member_doc and person.get("member_doc") != member_doc:
+                person["member_doc"] = member_doc
+                registry_changed = True
+        elif "person_id" in o:
+            del o["person_id"]
+        if registry_changed:
+            try:
+                people_reg.save_people(self._people)
+            except Exception:
+                pass
+
         if opd_doc:
             o["opd_doc"] = opd_doc
         elif "opd_doc" in o:
@@ -4724,7 +5088,7 @@ class PlotEditDialog(QWidget):
         self._group_dirty = True
         # Обновить ФИО в шапке, если это избранный контакт
         if o.get("is_visible"):
-            self._active_name_lbl.setText(name.strip() or "(нет имени)")
+            self._active_name_lbl.setText(name or "(нет имени)")
         self._refresh_contacts_preview(owners)
         self._update_save_state()
 

@@ -1,6 +1,11 @@
 """Реестр людей СНТ — источник истины для контактов владельцев.
 
-Человек = dict ``{"id": str, "name": str, "phone": str, "email": str}``.
+Человек = dict ``{"id": str, "name": str, "phone": str, "email": str,
+"opd_doc": str, "member_doc": str}`` (``opd_doc``/``member_doc`` — необязательные
+пути к последним загруженным «Согласие на ОПД»/«Заявление в СНТ»: эти два
+документа привязаны к человеку, а не к конкретному участку, в отличие от
+выписки ЕГРН, которая относится к конкретному объекту недвижимости и в
+реестре не кэшируется).
 Запись владельца в группе ссылается на человека через поле ``person_id`` и
 дополнительно хранит кэш ``name``/``phone``/``email``: читатели расчётов,
 квитанций и распознавания платежей по ФИО продолжают работать на кэше, а реестр
@@ -69,14 +74,25 @@ def find_by_name(people: list, name: str) -> dict | None:
     return None
 
 
-def create_person(name: str, phone: str = "", email: str = "") -> dict:
-    """Новая запись человека с уникальным id."""
-    return {
+def create_person(name: str, phone: str = "", email: str = "",
+                  opd_doc: str = "", member_doc: str = "") -> dict:
+    """Новая запись человека с уникальным id.
+
+    ``opd_doc``/``member_doc`` — необязательный путь к уже загруженному
+    документу этого контакта (см. докстринг модуля); ключи добавляются,
+    только если значение непустое, чтобы не засорять JSON пустыми полями.
+    """
+    person = {
         "id": uuid.uuid4().hex,
         "name": str(name or "").strip(),
         "phone": str(phone or "").strip(),
         "email": str(email or "").strip(),
     }
+    if opd_doc:
+        person["opd_doc"] = opd_doc
+    if member_doc:
+        person["member_doc"] = member_doc
+    return person
 
 
 # ── миграция: реестр из владельцев участков ───────────────────────────
