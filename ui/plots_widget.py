@@ -4610,7 +4610,7 @@ class PlotEditDialog(QWidget):
 
             # ── Обработчики ────────────────────────────────────────────
             # Клик по заголовку: toggle
-            hdr.mousePressEvent = lambda event, i=idx: self._toggle_contact_detail(i) if event.button() == Qt.MouseButton.LeftButton else None
+            hdr.mouseReleaseEvent = lambda event, i=idx: self._toggle_contact_detail(i) if event.button() == Qt.MouseButton.LeftButton else None
 
             # Клик по карандашу: аналогичный тоггл
             btn_edit.clicked.connect(lambda _, i=idx: self._toggle_contact_detail(i))
