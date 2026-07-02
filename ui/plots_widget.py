@@ -104,15 +104,30 @@ def _mat_font(pixel_size: int = 20, fill: int = 0) -> QFont:
     return f
 
 
+_ICON_OVERSAMPLE = 4  # запас разрешения, чтобы Qt всегда down-, а не upscale'ил
+
+
 def _mat_icon(codepoint: int, size: int = 16, fill: int = 0,
               color: str = "#07414F") -> QIcon:
-    """Рендерит символ Material Symbols в QIcon (для кнопок с текстом)."""
-    pm = QPixmap(size, size)
+    """Рендерит символ Material Symbols в QIcon (для кнопок с текстом).
+
+    Пиксмап рисуется с запасом (devicePixelRatio=_ICON_OVERSAMPLE) — иначе
+    при масштабировании Windows >100% или при iconSize кнопки, не совпадающем
+    с size, Qt растягивает пиксель-в-пиксель низкое разрешение, и иконка
+    получается размытой. Оверсэмплинг гарантирует, что Qt всегда уменьшает
+    (а не увеличивает) картинку, что даёт чёткий результат при любом масштабе.
+    Вызывающий код должен выставить кнопке setIconSize(QSize(size, size)),
+    иначе пиксмап всё равно смасштабируется под чужой размер иконки.
+    """
+    px = size * _ICON_OVERSAMPLE
+    pm = QPixmap(px, px)
+    pm.setDevicePixelRatio(_ICON_OVERSAMPLE)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setFont(_mat_font(size, fill))
     p.setPen(QColor(color))
-    p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, chr(codepoint))
+    p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, chr(codepoint))
     p.end()
     return QIcon(pm)
 
@@ -273,16 +288,17 @@ def _make_copy_btn(target_inp) -> "QPushButton":
     return btn
 
 
-def _make_docs_badge(parent, have: int, total: int) -> QWidget:
-    """Пилюля «не хватает документов»: X/N загружено из требуемых."""
+def _make_warn_pill(parent, text: str, *, tooltip: str = "") -> QWidget:
+    """Пилюля-предупреждение (жёлто-коричневая, с иконкой) — общий стиль для
+    бейджей «не хватает документов» и «номер занят»."""
     badge = QWidget(parent)
     badge.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
     badge.setObjectName("docsBadge")
     badge.setFixedHeight(18)
     badge.setStyleSheet(
         "QWidget#docsBadge{background:#F9DCA4;border-radius:9px;}")
-    badge.installEventFilter(
-        _TooltipFilter(f"Не хватает документов: {total - have} из {total}", badge))
+    if tooltip:
+        badge.installEventFilter(_TooltipFilter(tooltip, badge))
     badge_lay = QHBoxLayout(badge)
     badge_lay.setContentsMargins(6, 0, 7, 0)
     badge_lay.setSpacing(3)
@@ -290,11 +306,18 @@ def _make_docs_badge(parent, have: int, total: int) -> QWidget:
     badge_icon.setFont(_mat_font(12))
     badge_icon.setStyleSheet("color:#73451A; background:transparent;")
     badge_lay.addWidget(badge_icon)
-    badge_txt = QLabel(f"{have}/{total}", badge)
+    badge_txt = QLabel(text, badge)
     badge_txt.setStyleSheet(
         "font-size:10px; font-weight:600; color:#73451A; background:transparent;")
     badge_lay.addWidget(badge_txt)
     return badge
+
+
+def _make_docs_badge(parent, have: int, total: int) -> QWidget:
+    """Пилюля «не хватает документов»: X/N загружено из требуемых."""
+    return _make_warn_pill(
+        parent, f"{have}/{total}",
+        tooltip=f"Не хватает документов: {total - have} из {total}")
 
 
 def _owner_opd_doc(owner) -> str:
@@ -2005,6 +2028,13 @@ def _short_name(full: str) -> str:
     return f"{parts[0]} {initials}".strip()
 
 
+def _truncate_name(full: str, limit: int = 20) -> str:
+    """Обрезает длинное ФИО до limit символов с «…» на конце —
+    чтобы карточка контакта не уезжала за границы соседних полей."""
+    s = str(full or "")
+    return s if len(s) <= limit else s[:limit].rstrip() + "…"
+
+
 def _plot_search_names(plot: dict) -> list[str]:
     """Все ФИО участка (по всем группам) — для поиска."""
     out = []
@@ -2244,6 +2274,7 @@ class PlotsWidget(QWidget):
         def _hdr_icon_btn(tooltip: str, handler) -> QPushButton:
             b = QPushButton()
             b.setFixedSize(32, 32)
+            b.setIconSize(QSize(22, 22))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(tooltip)
             b.setStyleSheet(
@@ -3928,6 +3959,7 @@ class PlotEditDialog(QWidget):
         def _icon_btn(cp: int, handler) -> QPushButton:
             b = QPushButton()
             b.setFixedSize(28, 28)
+            b.setIconSize(QSize(18, 18))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setStyleSheet(
                 "QPushButton{background:transparent;border:none;border-radius:4px;padding:2px;}"
@@ -3979,11 +4011,7 @@ class PlotEditDialog(QWidget):
         _cap_num = QLabel("Номер участка")
         _cap_num.setStyleSheet("color:#6B7280; background:transparent;")
         cap_row.addWidget(_cap_num)
-        self._lbl_num_taken = QLabel("Номер занят")
-        self._lbl_num_taken.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._lbl_num_taken.setStyleSheet(
-            "QLabel{background:#FEE2E2;color:#DC2626;border-radius:6px;"
-            "padding:1px 8px;font-size:11px;}")
+        self._lbl_num_taken = _make_warn_pill(None, "номер занят")
         self._lbl_num_taken.hide()
         cap_row.addWidget(self._lbl_num_taken)
         cap_row.addStretch()
@@ -4302,7 +4330,7 @@ class PlotEditDialog(QWidget):
             self._update_save_state()
 
     def _check_num_duplicate(self):
-        """Показывает бейдж «Номер занят» при совпадении с существующим номером."""
+        """Показывает пилюлю «номер занят» при совпадении с существующим номером."""
         current = self.inp_num.text().strip()
         self._lbl_num_taken.setVisible(bool(current and current in self._existing_nums))
 
@@ -4599,17 +4627,22 @@ class PlotEditDialog(QWidget):
             star_btn.clicked.connect(lambda _, i=idx: self._set_inline_primary(i))
             rl.addWidget(star_btn)
 
-            lbl = QLabel(full_name if full_name else "—", hdr)
+            # Телефон (свернуто) — определяем заранее, чтобы знать, останется
+            # ли место у ФИО в свёрнутой строке.
+            phone = (o.get("phone", "") if isinstance(o, dict) else "").strip()
+            _name_limit = 20 if (phone and not is_open) else 40
+            display_name = _truncate_name(full_name, _name_limit) if full_name else "—"
+            lbl = QLabel(display_name, hdr)
             lbl.setStyleSheet(
                 "font-size:12px; color:#1F2937; background:transparent;")
             lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             lbl.setSizePolicy(
                 QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
             lbl.setMinimumWidth(0)
+            if display_name != full_name:
+                hdr.installEventFilter(_TooltipFilter(full_name, hdr))
             rl.addWidget(lbl, stretch=1)
 
-            # Телефон (свернуто)
-            phone = (o.get("phone", "") if isinstance(o, dict) else "").strip()
             if phone and not is_open:
                 ph_lbl = QLabel(phone, hdr)
                 ph_lbl.setStyleSheet(
@@ -4630,6 +4663,7 @@ class PlotEditDialog(QWidget):
             # Кнопка «редактировать»: всегда в layout (22×22), иконка прозрачна по умолчанию
             btn_edit = QPushButton(hdr)
             btn_edit.setFixedSize(22, 22)
+            btn_edit.setIconSize(QSize(16, 16))
             btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_edit.setStyleSheet(
                 "QPushButton{background:transparent;border:none;}"
