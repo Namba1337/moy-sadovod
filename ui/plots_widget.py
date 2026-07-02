@@ -372,6 +372,26 @@ def _make_owner(name: str, is_owner: bool = True, area: float | None = None,
     return d
 
 
+def _ensure_single_primary(owners: list) -> bool:
+    """Гарантирует единственного «избранного» контакта в группе:
+    если контакт один — он обязательно избранный (даже если ещё не отмечен);
+    если контактов несколько и никто не отмечен избранным — им становится
+    первый в списке. Возвращает True, если что-то изменилось (для
+    self._group_dirty)."""
+    valid = [o for o in owners if isinstance(o, dict)]
+    if not valid:
+        return False
+    if len(valid) == 1:
+        if not valid[0].get("is_visible"):
+            valid[0]["is_visible"] = True
+            return True
+        return False
+    if not any(o.get("is_visible") for o in valid):
+        valid[0]["is_visible"] = True
+        return True
+    return False
+
+
 # ============================================================================ #
 #  Кастомная всплывашка — обходит нативный QToolTip Windows                   #
 # ============================================================================ #
@@ -435,15 +455,19 @@ class _TooltipFilter(QObject):
         return False
 
 
-class _ConfirmDialog(QDialog):
-    """Кастомное окно подтверждения деструктивного действия — обходит
-    нативный вид QMessageBox (Windows игнорирует Qt-стили для его чрома)."""
+class _BasePromptDialog(QDialog):
+    """Общая база кастомных уточняющих окон (_ConfirmDialog, _Save3WayDialog) —
+    обходит нативный вид QMessageBox (Windows игнорирует Qt-стили для его
+    чрома). Единая ФИКСИРОВАННАЯ ширина у всех окон этого семейства — чтобы
+    короткое и длинное сообщение выглядели одним и тем же «прямоугольником»
+    (высота при этом свободно растёт под перенос текста), а не диалогом то
+    квадратной, то узкой вытянутой формы в зависимости от длины текста."""
 
     _RADIUS = 12
+    _WIDTH = 380
+    _MARGIN_H = 24  # см. lay.setContentsMargins ниже — по 24px слева/справа
 
-    def __init__(self, title: str, message: str, *,
-                 confirm_text: str = "Удалить", cancel_text: str = "Отмена",
-                 parent=None):
+    def __init__(self, title: str, message: str, *, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setObjectName("confirmDialog")
@@ -452,51 +476,59 @@ class _ConfirmDialog(QDialog):
         self.setModal(True)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 22, 24, 20)
+        lay.setContentsMargins(self._MARGIN_H, 22, self._MARGIN_H, 20)
         lay.setSpacing(8)
+
+        # Ширина текста фиксируется явно (а не через setFixedWidth диалога) —
+        # иначе высота, посчитанная adjustSize() ДО применения итоговой
+        # ширины диалога, может не совпасть с реальным переносом текста.
+        _text_w = self._WIDTH - 2 * self._MARGIN_H
 
         title_lbl = QLabel(title)
         title_lbl.setStyleSheet(
             "font-size:17px; font-weight:700; color:#111827; background:transparent;")
         title_lbl.setWordWrap(True)
+        title_lbl.setFixedWidth(_text_w)
         lay.addWidget(title_lbl)
 
         msg_lbl = QLabel(message)
         msg_lbl.setWordWrap(True)
+        msg_lbl.setFixedWidth(_text_w)
         msg_lbl.setStyleSheet(
             "font-size:13px; color:#6B7280; background:transparent;")
         lay.addWidget(msg_lbl)
 
         lay.addSpacing(10)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        btn_row.addStretch()
-        btn_cancel = QPushButton(cancel_text)
-        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_cancel.setStyleSheet(
-            "QPushButton{background:#F3F4F6;color:#111827;border:none;"
-            "border-radius:6px;padding:7px 16px;font-size:13px;}"
-            "QPushButton:hover{background:#E5E7EB;}")
-        btn_cancel.clicked.connect(self.reject)
-        btn_row.addWidget(btn_cancel)
+        self._body_lay = lay
+        self._btn_row = QHBoxLayout()
+        self._btn_row.setSpacing(8)
+        self._btn_row.addStretch()
+        lay.addLayout(self._btn_row)
 
-        btn_confirm = QPushButton(confirm_text)
-        btn_confirm.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_confirm.setStyleSheet(
-            "QPushButton{background:#DC2626;color:#FFFFFF;border:none;"
-            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
-            "QPushButton:hover{background:#B91C1C;}")
-        btn_confirm.clicked.connect(self.accept)
-        btn_row.addWidget(btn_confirm)
+    def _insert_widget(self, widget: QWidget):
+        """Вставляет widget между сообщением и строкой кнопок (для окон с
+        доп. содержимым — см. _NewGroupDialog)."""
+        self._body_lay.insertWidget(self._body_lay.count() - 1, widget)
 
-        lay.addLayout(btn_row)
+    def _add_button(self, text: str, style: str, slot) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(style)
+        btn.clicked.connect(slot)
+        self._btn_row.addWidget(btn)
+        return btn
+
+    def _finalize(self):
+        """Вызывается подклассом после добавления всех кнопок: фиксирует
+        итоговую ширину и подгоняет высоту/маску под содержимое."""
+        self.setFixedWidth(self._WIDTH)
         self.adjustSize()
         self._apply_mask()
 
     def _apply_mask(self):
         """Обрезает окно маской по скруглённому прямоугольнику — надёжнее,
-        чем WA_TranslucentBackground, который на Windows иногда не composит-
+        чем WA_TranslucentBackground, который на Windows иногда не композит-
         ится и оставляет видимым прямоугольник исходного (непрозрачного) окна."""
         sz = self.size()
         if sz.width() <= 0 or sz.height() <= 0:
@@ -515,8 +547,10 @@ class _ConfirmDialog(QDialog):
         self._apply_mask()
 
     @staticmethod
-    def confirm(parent, title: str, message: str, *,
-                confirm_text: str = "Удалить", cancel_text: str = "Отмена") -> bool:
+    def _show_centered(dlg: "_BasePromptDialog", parent):
+        """Затемняющий оверлей на хосте + центрирование поверх parent/host.
+        Общая обвязка для confirm()/ask() — вызывающий должен вручную
+        скрыть/удалить overlay после dlg.exec() (см. try/finally у вызовов)."""
         host = parent.window() if parent is not None else None
         overlay = None
         if host is not None:
@@ -526,16 +560,274 @@ class _ConfirmDialog(QDialog):
             overlay.setGeometry(host.rect())
             overlay.show()
             overlay.raise_()
-
-        dlg = _ConfirmDialog(title, message, confirm_text=confirm_text,
-                             cancel_text=cancel_text, parent=parent)
         if parent is not None:
-            dlg.adjustSize()
             geo = parent.geometry() if parent.isWindow() else host.geometry()
             dlg.move(geo.center().x() - dlg.width() // 2,
                      geo.center().y() - dlg.height() // 2)
+        return overlay
+
+
+class _ConfirmDialog(_BasePromptDialog):
+    """Окно подтверждения с двумя исходами: подтвердить / отмена."""
+
+    def __init__(self, title: str, message: str, *,
+                 confirm_text: str = "Удалить", cancel_text: str = "Отмена",
+                 parent=None):
+        super().__init__(title, message, parent=parent)
+        self._add_button(
+            cancel_text,
+            "QPushButton{background:#F3F4F6;color:#111827;border:none;"
+            "border-radius:6px;padding:7px 16px;font-size:13px;}"
+            "QPushButton:hover{background:#E5E7EB;}",
+            self.reject)
+        self._confirm_btn = self._add_button(
+            confirm_text,
+            "QPushButton{background:#DC2626;color:#FFFFFF;border:none;"
+            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:#B91C1C;}"
+            "QPushButton:disabled{background:#F3A6A6;color:#FFFFFF;}",
+            self.accept)
+        self._finalize()
+
+    @staticmethod
+    def confirm(parent, title: str, message: str, *,
+                confirm_text: str = "Удалить", cancel_text: str = "Отмена") -> bool:
+        dlg = _ConfirmDialog(title, message, confirm_text=confirm_text,
+                             cancel_text=cancel_text, parent=parent)
+        overlay = _BasePromptDialog._show_centered(dlg, parent)
         try:
             return dlg.exec() == QDialog.DialogCode.Accepted
+        finally:
+            if overlay is not None:
+                overlay.hide()
+                overlay.deleteLater()
+
+
+class _Save3WayDialog(_BasePromptDialog):
+    """Окно «Сохранить / Не сохранять / Отмена» для несохранённых правок —
+    тот же визуальный приём, что и _ConfirmDialog, но с тремя исходами."""
+
+    def __init__(self, title: str, message: str, *, parent=None):
+        super().__init__(title, message, parent=parent)
+        self.choice = "cancel"
+
+        def _pick(choice: str):
+            self.choice = choice
+            self.accept()
+
+        self._add_button(
+            "Отмена",
+            "QPushButton{background:transparent;color:#6B7280;border:none;"
+            "border-radius:6px;padding:7px 14px;font-size:13px;}"
+            "QPushButton:hover{background:#F3F4F6;}",
+            lambda: _pick("cancel"))
+        self._add_button(
+            "Не сохранять",
+            "QPushButton{background:#F3F4F6;color:#111827;border:none;"
+            "border-radius:6px;padding:7px 16px;font-size:13px;}"
+            "QPushButton:hover{background:#E5E7EB;}",
+            lambda: _pick("discard"))
+        self._add_button(
+            "Сохранить",
+            "QPushButton{background:#07414F;color:#FFFFFF;border:none;"
+            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:#062F38;}",
+            lambda: _pick("save"))
+        self._finalize()
+
+    @staticmethod
+    def ask(parent, title: str, message: str) -> str:
+        """Возвращает 'save' | 'discard' | 'cancel'."""
+        dlg = _Save3WayDialog(title, message, parent=parent)
+        overlay = _BasePromptDialog._show_centered(dlg, parent)
+        try:
+            result = dlg.exec()
+            return dlg.choice if result == QDialog.DialogCode.Accepted else "cancel"
+        finally:
+            if overlay is not None:
+                overlay.hide()
+                overlay.deleteLater()
+
+
+class _NewGroupDialog(_ConfirmDialog):
+    """«Создать новую группу?» — тот же _ConfirmDialog, плюс ОБЯЗАТЕЛЬНОЕ
+    поле ФИО первого контакта (звезда «избранный» — единственный контакт
+    новой группы всегда становится избранным, см. _ensure_single_primary).
+    Кнопка «Создать» неактивна, пока поле пусто — так группа никогда не
+    создаётся без ни одного лица (это же требование действует и для замены
+    активной группы, см. _on_archive_active_group)."""
+
+    def __init__(self, title: str, message: str, people: list, *,
+                confirm_text: str = "Создать", cancel_text: str = "Отмена",
+                parent=None):
+        super().__init__(title, message, confirm_text=confirm_text,
+                         cancel_text=cancel_text, parent=parent)
+
+        row = QWidget()
+        row_lay = QHBoxLayout(row)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.setSpacing(8)
+
+        star = QLabel(chr(0xE838))
+        star.setFont(_F_STAR_FILLED)
+        role_bg, role_fg = _ROLE_COLORS["contact"]
+        star.setFixedSize(18, 18)
+        star.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        star.setStyleSheet(
+            f"background:{role_bg}; color:#07414F; border-radius:9px;")
+        row_lay.addWidget(star)
+
+        self.inp_name = QLineEdit()
+        self.inp_name.setPlaceholderText("Фамилия Имя Отчество")
+        self.inp_name.setStyleSheet(_INPUT_SS)
+        completer = QCompleter(_people_names(people), self.inp_name)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.inp_name.setCompleter(completer)
+        row_lay.addWidget(self.inp_name, stretch=1)
+
+        self._insert_widget(row)
+        self._finalize()
+
+        # «Создать» активна только при непустом ФИО.
+        self._confirm_btn.setEnabled(False)
+        self.inp_name.textChanged.connect(
+            lambda t: self._confirm_btn.setEnabled(bool(t.strip())))
+        self.inp_name.setFocus()
+
+    @staticmethod
+    def ask(parent, title: str, message: str, people: list) -> tuple[bool, str]:
+        """Возвращает (confirmed, contact_name). Если confirmed=True,
+        contact_name гарантированно не пуст (кнопка «Создать» заблокирована
+        при пустом ФИО)."""
+        dlg = _NewGroupDialog(title, message, people, parent=parent)
+        overlay = _BasePromptDialog._show_centered(dlg, parent)
+        try:
+            confirmed = dlg.exec() == QDialog.DialogCode.Accepted
+            return confirmed, dlg.inp_name.text().strip()
+        finally:
+            if overlay is not None:
+                overlay.hide()
+                overlay.deleteLater()
+
+
+class _QuickAddPlotDialog(_ConfirmDialog):
+    """Быстрое добавление участка — модальное окно вместо панели справа
+    (см. PlotsWidget._add_plot): номер (необязательно), площадь и ФИО
+    первого контакта (оба обязательны). Кнопка «Создать» активна только при
+    заполненных площади и ФИО; указанный номер, совпадающий с уже
+    существующим участком, блокирует создание (пилюля «номер занят»)."""
+
+    _LABEL_SS = "font-size:10px; color:#9CA3AF; background:transparent;"
+
+    def __init__(self, title: str, message: str, people: list,
+                existing_nums: set, *, parent=None):
+        super().__init__(title, message, confirm_text="Создать", parent=parent)
+        self._existing_nums = existing_nums
+
+        fields = QWidget()
+        f_lay = QVBoxLayout(fields)
+        f_lay.setContentsMargins(0, 0, 0, 0)
+        f_lay.setSpacing(10)
+
+        # -- Номер участка (необязательно) + пилюля дубля --
+        num_row = QHBoxLayout()
+        num_row.setContentsMargins(0, 0, 0, 0)
+        num_row.setSpacing(6)
+        num_col = QVBoxLayout()
+        num_col.setSpacing(2)
+        num_col.addWidget(QLabel("Номер участка", styleSheet=self._LABEL_SS))
+        self.inp_num = QLineEdit()
+        self.inp_num.setPlaceholderText("например: 15 или 15/207")
+        self.inp_num.setStyleSheet(_INPUT_SS)
+        num_col.addWidget(self.inp_num)
+        num_row.addLayout(num_col, stretch=1)
+        self._num_taken_pill = _make_warn_pill(fields, "номер занят")
+        self._num_taken_pill.hide()
+        num_row.addWidget(self._num_taken_pill, alignment=Qt.AlignmentFlag.AlignBottom)
+        f_lay.addLayout(num_row)
+
+        # -- Площадь --
+        area_col = QVBoxLayout()
+        area_col.setSpacing(2)
+        area_col.addWidget(QLabel("Площадь, м²", styleSheet=self._LABEL_SS))
+        self.inp_area = QLineEdit()
+        self.inp_area.setPlaceholderText("например: 612")
+        self.inp_area.setValidator(QRegularExpressionValidator(
+            QRegularExpression(r"^\d{0,5}([.,]\d{0,2})?$"), self.inp_area))
+        self.inp_area.textEdited.connect(lambda t: (
+            self.inp_area.setText(t.replace(".", ",")),
+            self.inp_area.setCursorPosition(self.inp_area.cursorPosition()),
+        ) if "." in t else None)
+        self.inp_area.setStyleSheet(_INPUT_SS)
+        area_col.addWidget(self.inp_area)
+        f_lay.addLayout(area_col)
+
+        # -- ФИО собственника --
+        name_col = QVBoxLayout()
+        name_col.setSpacing(2)
+        name_col.addWidget(QLabel("ФИО собственника", styleSheet=self._LABEL_SS))
+        name_row = QHBoxLayout()
+        name_row.setContentsMargins(0, 0, 0, 0)
+        name_row.setSpacing(8)
+        star = QLabel(chr(0xE838))
+        star.setFont(_F_STAR_FILLED)
+        role_bg, role_fg = _ROLE_COLORS["contact"]
+        star.setFixedSize(18, 18)
+        star.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        star.setStyleSheet(f"background:{role_bg}; color:#07414F; border-radius:9px;")
+        name_row.addWidget(star)
+        self.inp_name = QLineEdit()
+        self.inp_name.setPlaceholderText("Фамилия Имя Отчество")
+        self.inp_name.setStyleSheet(_INPUT_SS)
+        completer = QCompleter(_people_names(people), self.inp_name)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.inp_name.setCompleter(completer)
+        name_row.addWidget(self.inp_name, stretch=1)
+        name_col.addLayout(name_row)
+        f_lay.addLayout(name_col)
+
+        self._insert_widget(fields)
+        self._finalize()
+
+        self._confirm_btn.setEnabled(False)
+        self.inp_num.textChanged.connect(self._update_state)
+        self.inp_area.textChanged.connect(self._update_state)
+        self.inp_name.textChanged.connect(self._update_state)
+        self.inp_num.setFocus()
+
+    def _update_state(self, *_):
+        num = self.inp_num.text().strip()
+        num_dup = bool(num) and num in self._existing_nums
+        self._num_taken_pill.setVisible(num_dup)
+
+        area_txt = self.inp_area.text().strip().replace(",", ".")
+        area_ok = False
+        if area_txt:
+            try:
+                area_ok = float(area_txt) > 0
+            except ValueError:
+                area_ok = False
+
+        name_ok = bool(self.inp_name.text().strip())
+        self._confirm_btn.setEnabled(area_ok and name_ok and not num_dup)
+
+    @staticmethod
+    def ask(parent, people: list, existing_nums: set):
+        """Возвращает (num, area, name) при подтверждении, иначе None."""
+        dlg = _QuickAddPlotDialog(
+            "Новый участок",
+            "Укажите номер, площадь и ФИО собственника.",
+            people, existing_nums, parent=parent)
+        overlay = _BasePromptDialog._show_centered(dlg, parent)
+        try:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return None
+            num = dlg.inp_num.text().strip()
+            area = float(dlg.inp_area.text().strip().replace(",", "."))
+            name = dlg.inp_name.text().strip()
+            return num, area, name
         finally:
             if overlay is not None:
                 overlay.hide()
@@ -2387,7 +2679,16 @@ class PlotsWidget(QWidget):
     def _open_detail(self, plot):
         """Открывает деталь участка в правом drawer (вместо модального диалога)."""
         if self._detail_panel is not None:
-            self._close_detail()
+            if self._editing_plot is not None:
+                # Редактировали существующий участок — закрываем как при
+                # «Закрыть», а не просто отбрасываем панель. Если пользователь
+                # отменил закрытие (несохранённые правки в открытой карточке
+                # контакта, диалог «Сохранить/Не сохранять/Отмена») — остаёмся
+                # на текущем участке, переход/новый участок не открываем.
+                if not self._detail_panel._on_close():
+                    return
+            else:
+                self._close_detail()  # черновик нового участка — отбрасываем как есть
         self._editing_plot = plot  # None — новый участок
         if plot is not None:
             existing = {str(p.get("num", "")) for p in self._plots if p is not plot}
@@ -2396,6 +2697,7 @@ class PlotsWidget(QWidget):
         panel = PlotEditDialog(plot_data=plot, parent=self, df=self._df,
                                existing_nums=existing)
         panel.closed.connect(self._on_detail_closed)
+        panel.personDeleted.connect(self._on_person_deleted)
         if plot is not None:
             panel.deleted.connect(self._on_detail_delete)
         self._detail_panel = panel
@@ -2414,13 +2716,11 @@ class PlotsWidget(QWidget):
         self._refresh_add_icon()
 
     def _refresh_add_icon(self):
-        """Иконка «Добавить участок»: fill-бирюза когда открыта панель нового
-        участка, иначе серый outline (e146 add_box)."""
-        active = (getattr(self, "_detail_panel", None) is not None
-                  and getattr(self, "_editing_plot", None) is None)
-        self._btn_add.setIcon(_mat_icon(
-            0xE146, 22, fill=1 if active else 0,
-            color="#07414F" if active else "#9CA3AF"))
+        """Иконка «Добавить участок» (f8eb add_home). Статичная — кнопка
+        больше не открывает/переключает панель справа, а открывает модальное
+        окно быстрого добавления (см. _add_plot), поэтому подсветки
+        «активного» состояния больше нет."""
+        self._btn_add.setIcon(_mat_icon(0xF8EB, 22, color="#9CA3AF"))
 
     def _sync_caption_stub(self):
         """Ширина заглушки капшена = ширина желоба скроллбара списка.
@@ -2435,6 +2735,43 @@ class PlotsWidget(QWidget):
             QStyle.PixelMetric.PM_ScrollBarExtent, None,
             self.list_view.verticalScrollBar())
         self._cap_stub.setFixedWidth(ext)
+
+    def _on_person_deleted(self, person_id: str):
+        """Человек удалён полностью (см. PlotEditDialog._delete_contact).
+
+        Диалог участка видит только СВОЙ участок, поэтому убрать человека
+        (вместе с его Выпиской ЕГРН — она у каждого участка своя) со ВСЕХ
+        ОСТАЛЬНЫХ участков должен хост — он один видит self._plots целиком."""
+        if not person_id:
+            return
+        changed = False
+        for plot in self._plots:
+            if plot is self._editing_plot:
+                continue  # этот участок уже обработан самим диалогом
+            for group in ownership.plot_groups(plot):
+                owners = group.get("owners", []) or []
+                kept = []
+                for o in owners:
+                    if isinstance(o, dict) and o.get("person_id") == person_id:
+                        egrn_path = o.get("egrn_doc", "")
+                        if egrn_path:
+                            try:
+                                os.remove(egrn_path)
+                            except OSError:
+                                pass
+                        changed = True
+                        continue
+                    kept.append(o)
+                if len(kept) != len(owners):
+                    # Если удалённый был избранным — избранным становится
+                    # первый в списке; если остался ровно один контакт — он
+                    # автоматически избранный (см. _ensure_single_primary).
+                    _ensure_single_primary(kept)
+                    group["owners"] = kept
+        if changed:
+            self._save()
+            self._recompute_debt()
+            self._rebuild_table()
 
     def _on_detail_closed(self, saved: bool):
         panel = self._detail_panel
@@ -2643,7 +2980,34 @@ class PlotsWidget(QWidget):
         )
 
     def _add_plot(self):
-        self._open_detail(None)
+        """Быстрое добавление участка через модальное окно (номер/площадь/
+        ФИО) вместо панели справа — см. _QuickAddPlotDialog."""
+        existing_nums = {str(p.get("num", "")) for p in self._plots}
+        people = people_reg.load_people()
+        result = _QuickAddPlotDialog.ask(self, people, existing_nums)
+        if result is None:
+            return
+        num, area, name = result
+        person = people_reg.find_by_name(people, name)
+        if person is None:
+            person = people_reg.create_person(name, "", "")
+            people.append(person)
+            try:
+                people_reg.save_people(people)
+            except Exception:
+                pass
+        owner = _make_owner(name, is_owner=False, is_visible=True)
+        owner["person_id"] = person["id"]
+        plot = {
+            "num": num,
+            "area": area,
+            "groups": [{"since": date.today().isoformat(), "until": None,
+                       "owners": [owner]}],
+        }
+        self._plots.append(plot)
+        self._save()
+        self._recompute_debt()
+        self._rebuild_table()
 
 
 # ============================================================================ #
@@ -2814,7 +3178,16 @@ class _DocFieldWidget(QFrame):
         self._btn_box.setContentsMargins(0, 0, 0, 0)
         self._btn_box.setSpacing(4)
 
-        self._del_btn = self._make_btn(chr(0xE92B))
+        self._del_btn = QPushButton()
+        self._del_btn.setFixedSize(22, 22)
+        self._del_btn.setIconSize(QSize(16, 16))
+        self._del_btn.setFlat(True)
+        self._del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._del_btn.setStyleSheet(
+            "QPushButton{background:transparent;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#FEF2F2;}")
+        self._del_btn.setIcon(_mat_icon(0xE92B, 16, color="#DC2626"))
+        self._del_btn.installEventFilter(_TooltipFilter("Удалить документ", self._del_btn))
         self._del_btn.clicked.connect(self.delete_path)
         self._del_btn.setVisible(False)
         self._btn_box.addWidget(self._del_btn)
@@ -2822,19 +3195,6 @@ class _DocFieldWidget(QFrame):
         lay.addLayout(self._btn_box)
 
         self._refresh()
-
-    def _make_btn(self, icon_char: str) -> QPushButton:
-        btn = QPushButton(icon_char)
-        btn.setFont(QFont("Material Symbols Rounded", -1))
-        btn.font().setPixelSize(14)
-        btn.setFixedSize(22, 22)
-        btn.setFlat(True)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(
-            "QPushButton{background:transparent;border:1px solid #D1D5DB;"
-            "border-radius:5px;color:#555555;}"
-            "QPushButton:hover{background:#F3F4F6;}")
-        return btn
 
     def get_path(self) -> str:
         return self._path
@@ -2889,7 +3249,7 @@ class _DocFieldWidget(QFrame):
             self.setStyleSheet(
                 "QFrame#_docFW{background:#FFFBEB;border:1.5px dashed #F59E0B;border-radius:6px;}"
                 "QFrame#_docFW:hover{background:#FEF3C7;border:1.5px dashed #D97706;}")
-            self._icon.setText(chr(0xE002))
+            self._icon.setText(chr(0xE000))
             self._icon.setStyleSheet(
                 "QLabel{background:transparent;border:none;padding:0;color:#D97706;}")
             self._icon.setVisible(True)
@@ -3331,7 +3691,22 @@ class GroupEditDialog(QWidget):
         name_col.setSpacing(3)
         lbl_fio, _fio_lbl_row, _fio_dirty = _make_anchor_label(
             "ФИО", "font-size:12px; color:#6B7280; background:transparent;")
-        name_col.addWidget(_fio_lbl_row)
+        _fio_row = QHBoxLayout()
+        _fio_row.setContentsMargins(0, 0, 0, 0)
+        _fio_row.setSpacing(6)
+        _fio_row.addWidget(_fio_lbl_row)
+        dup_pill = _make_warn_pill(card, "занято — не будет сохранено")
+        dup_pill.hide()
+        # Резервируем место скрытой пилюли — иначе её появление меняет высоту
+        # строки и «дёргает» вниз то, что расположено ниже (см. тот же приём
+        # выше, в инлайн-карточке _refresh_contacts_preview).
+        _dup_sp = dup_pill.sizePolicy()
+        _dup_sp.setRetainSizeWhenHidden(True)
+        dup_pill.setSizePolicy(_dup_sp)
+        cd["dup_pill"] = dup_pill
+        _fio_row.addWidget(dup_pill)
+        _fio_row.addStretch(1)
+        name_col.addLayout(_fio_row)
         cd["name_dirty"] = _fio_dirty
         name_row_h = QHBoxLayout()
         name_row_h.setContentsMargins(0, 0, 0, 0)
@@ -3343,16 +3718,37 @@ class GroupEditDialog(QWidget):
         name_inp.textChanged.connect(lambda _, c=cd: self._update_name_summary(c))
         # Ссылка на человека из реестра + автодополнение ФИО.
         cd["person_id"] = owner.get("person_id") if isinstance(owner, dict) else None
-        completer = QCompleter(_people_names(self._people), name_inp)
+        # Защита от дублей: ФИО остальных карточек этой группы не предлагаются
+        # в автодополнении — иначе можно выбрать уже добавленного человека снова.
+        _other_names_norm0 = {
+            people_reg.norm_name(c["name_inp"].text())
+            for c in self._cards if c["name_inp"].text().strip()
+        }
+        _avail_names = [
+            n for n in _people_names(self._people)
+            if people_reg.norm_name(n) not in _other_names_norm0
+        ]
+        completer = QCompleter(_avail_names, name_inp)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         name_inp.setCompleter(completer)
         completer.activated.connect(
             lambda _t, c=cd: QTimer.singleShot(0, lambda: self._on_name_committed(c)))
         name_inp.editingFinished.connect(lambda c=cd: self._on_name_committed(c))
-        name_row_h.addWidget(name_inp)
+        name_row_h.addWidget(name_inp, stretch=1)
         name_row_h.addWidget(_make_copy_btn(name_inp))
         name_col.addLayout(name_row_h)
+
+        def _check_dup_name(_t="", c=cd, inp=name_inp, pill=dup_pill):
+            norm = people_reg.norm_name(inp.text())
+            others = {
+                people_reg.norm_name(oc["name_inp"].text())
+                for oc in self._cards
+                if oc is not c and oc["name_inp"].text().strip()
+            }
+            pill.setVisible(bool(inp.text().strip()) and norm in others)
+
+        name_inp.textChanged.connect(_check_dup_name)
         cd["name_inp"] = name_inp
         content_lyt.addLayout(name_col)
 
@@ -3524,20 +3920,38 @@ class GroupEditDialog(QWidget):
     def _on_name_committed(self, cd: dict):
         """ФИО введено/выбрано → привязать человека из реестра и подставить контакты.
 
-        Если ФИО совпадает с записью реестра — берём её person_id и заполняем
-        пустые телефон/email из реестра (переиспользование). Иначе сбрасываем
-        привязку — новый человек будет создан в _on_accept. Поля остаются
-        редактируемыми (правка человека в реестре — отдельный шаг, Этап B)."""
+        Если ФИО совпадает с ДРУГОЙ записью реестра — переключаем привязку и
+        заполняем пустые телефон/email из неё (переиспользование), сначала
+        стерев то, что было автоподставлено от ПРЕЖНЕГО человека (см.
+        _on_inline_name_committed — тот же приём).
+
+        Если совпадений нет вообще — считаем, что это ТОТ ЖЕ человек, которому
+        просто исправляют ФИО: person_id не трогаем, переименование запишется
+        в реестр при сохранении (_on_accept). Раньше здесь привязка сбрасывалась
+        при любом несовпадении, из-за чего правка ФИО создавала в реестре дубль
+        вместо переименования. Отвязываем только если поле ФИО очищено совсем."""
         name = cd["name_inp"].text().strip()
-        person = people_reg.find_by_name(self._people, name) if name else None
-        if person:
-            cd["person_id"] = person.get("id")
-            if not cd["phone"].text().strip() and person.get("phone"):
-                cd["phone"].setText(_normalize_phone(person["phone"]))
-            if not cd["email"].text().strip() and person.get("email"):
-                cd["email"].setText(person.get("email", ""))
-        else:
+        if not name:
             cd["person_id"] = None
+            self._update_save_state()
+            return
+        new_person = people_reg.find_by_name(self._people, name)
+        old_person_id = cd.get("person_id")
+        new_person_id = new_person.get("id") if new_person else None
+        if new_person_id and new_person_id != old_person_id:
+            old_person = people_reg.get(self._people, old_person_id)
+            if old_person:
+                if (cd["phone"].text().strip() and old_person.get("phone")
+                        and _normalize_phone(old_person["phone"]) == cd["phone"].text().strip()):
+                    cd["phone"].clear()
+                if (cd["email"].text().strip() and old_person.get("email")
+                        and old_person["email"] == cd["email"].text().strip()):
+                    cd["email"].clear()
+            cd["person_id"] = new_person_id
+            if not cd["phone"].text().strip() and new_person.get("phone"):
+                cd["phone"].setText(_normalize_phone(new_person["phone"]))
+            if not cd["email"].text().strip() and new_person.get("email"):
+                cd["email"].setText(new_person.get("email", ""))
         self._update_save_state()
 
     def _update_tags(self, cd: dict):
@@ -3738,29 +4152,79 @@ class GroupEditDialog(QWidget):
 
     def _on_accept(self):
         owners = []
-        new_people = []
+        registry_changed = False
+        _seen_names_norm: set[str] = set()
         for i, cd in enumerate(self._cards):
             name = cd["name_inp"].text().strip()
             if not name:
                 continue
+            # Защита от дублей: если ФИО совпадает с уже добавленным в этой
+            # группе контактом — пропускаем (не будет сохранено дважды).
+            _norm = people_reg.norm_name(name)
+            if _norm in _seen_names_norm:
+                continue
+            _seen_names_norm.add(_norm)
             phone = cd["phone"].text().strip()
             email = cd["email"].text().strip()
+            opd_doc = cd["opd_doc"].get_path()
+            member_doc = cd["member_doc"].get_path()
+            # Значения ДО этой правки — чтобы отличить «поле было и его явно
+            # очистили» от «поле изначально пустое», см. сброс кэша реестра ниже.
+            _src0 = cd.get("_src") or {}
+            prev_phone = str(_src0.get("phone", ""))
+            prev_email = str(_src0.get("email", ""))
+            prev_opd = str(_src0.get("opd_doc", ""))
+            prev_member = str(_src0.get("member_doc", ""))
             # Привязка к человеку: по person_id карточки, иначе по ФИО, иначе —
             # создаём нового. _on_accept — гарантия дедупа (даже без авто-привязки).
             person = people_reg.get(self._people, cd.get("person_id"))
             if person is None:
                 person = people_reg.find_by_name(self._people, name)
             if person is None:
-                person = people_reg.create_person(name, phone, email)
+                person = people_reg.create_person(
+                    name, phone, email, opd_doc=opd_doc, member_doc=member_doc)
                 self._people.append(person)
-                new_people.append(person)
+                registry_changed = True
+            else:
+                # Человек уже был в реестре — актуализируем кэш ФИО/телефона/
+                # email и ОПД/заявления в СНТ, иначе автодополнение по ФИО
+                # подтягивает устаревшие (или пустые) данные для других
+                # контактов того же человека (см. _save_inline_contact — тот
+                # же приём; ФИО — так же переименование пронесётся всюду).
+                if name and person.get("name") != name:
+                    person["name"] = name
+                    registry_changed = True
+                if phone and person.get("phone") != phone:
+                    person["phone"] = phone
+                    registry_changed = True
+                elif not phone and prev_phone and person.get("phone") == prev_phone:
+                    person.pop("phone", None)
+                    registry_changed = True
+                if email and person.get("email") != email:
+                    person["email"] = email
+                    registry_changed = True
+                elif not email and prev_email and person.get("email") == prev_email:
+                    person.pop("email", None)
+                    registry_changed = True
+                if opd_doc and person.get("opd_doc") != opd_doc:
+                    person["opd_doc"] = opd_doc
+                    registry_changed = True
+                elif not opd_doc and prev_opd and person.get("opd_doc") == prev_opd:
+                    person.pop("opd_doc", None)
+                    registry_changed = True
+                if member_doc and person.get("member_doc") != member_doc:
+                    person["member_doc"] = member_doc
+                    registry_changed = True
+                elif not member_doc and prev_member and person.get("member_doc") == prev_member:
+                    person.pop("member_doc", None)
+                    registry_changed = True
             o = _make_owner(
                 name,
                 cd["rb_owner"].isChecked(),
                 None,
                 cd["rb_contact"].isChecked(),
-                cd["member_doc"].get_path(),
-                cd["opd_doc"].get_path(),
+                member_doc,
+                opd_doc,
                 phone,
                 email,
                 egrn_doc=cd["egrn_doc"].get_path(),
@@ -3774,12 +4238,15 @@ class GroupEditDialog(QWidget):
                     o[k] = src[k]
             owners.append(o)
 
-        if new_people:
+        if registry_changed:
             try:
                 people_reg.save_people(self._people)
             except Exception:
                 pass
 
+        # Один контакт — он автоматически избранный; если избранного нет
+        # вообще — им становится первый в списке (см. _ensure_single_primary).
+        _ensure_single_primary(owners)
         result = dict(self._group)
         result["owners"] = owners
         self._result = result
@@ -3858,6 +4325,36 @@ class GroupEditDialog(QWidget):
         """)
 
 
+class _GroupCardCtx:
+    """Состояние + виджет-ссылки одного карточного блока группы (активной или
+    архивной) внутри PlotEditDialog. Позволяет переиспользовать один и тот же
+    билдер/набор обработчиков инлайн-аккордеона контактов для обеих."""
+
+    def __init__(self, group: dict, *, is_active: bool, orig: dict | None = None):
+        self.group = group          # рабочая копия (мутируется инлайн-правками)
+        self.is_active = is_active
+        self.orig = orig            # исходный dict в self._groups (архивные — для подстановки при сохранении)
+        self.contacts_expanded = False
+        self.expanded_contacts: set[int] = set()
+        self.contact_input_refs: dict = {}   # idx → (inp_name, inp_phone, inp_email, opd_w, egrn_w, mem_w)
+        self.contact_snapshots: dict = {}    # idx → {name,phone,email,opd_doc,egrn_doc,member_doc}
+        # виджеты — назначаются в PlotEditDialog._build_group_card
+        self.card = None
+        self.name_lbl = None
+        self.since_lbl = None
+        self.counts_lbl = None
+        self.docs_badge_box = None
+        self.docs_badge_lay = None
+        self.debt_rows_box = None
+        self.debt_rows_lay = None
+        self.preview_box = None
+        self.preview_lay = None
+        self.show_all_row = None
+        self.show_all_lbl = None
+        self.show_all_arrow = None
+        self.new_group_btn = None   # только у активной группы, см. _build_group_card
+
+
 # ============================================================================ #
 #  PlotEditDialog                                                              #
 # ============================================================================ #
@@ -3873,6 +4370,9 @@ class PlotEditDialog(QWidget):
 
     closed = pyqtSignal(bool)   # saved? — True если есть сохранённые изменения
     deleted = pyqtSignal()      # запрос на удаление участка (только режим правки)
+    personDeleted = pyqtSignal(str)  # person_id — человек удалён полностью;
+        # хост (PlotsWidget) должен убрать его со ВСЕХ остальных участков
+        # (этот диалог видит только свой участок).
 
     def __init__(self, plot_data: dict | None = None, parent=None, df=None,
                  existing_nums: set | None = None):
@@ -3899,8 +4399,12 @@ class PlotEditDialog(QWidget):
         self._save_btn: QPushButton | None = None   # галочка-сохранить в шапке (edit)
         self._header_editing = False
         self._dirty_fields: set = set()     # поля (num/area) с принятыми изменениями
-        self._group_dirty: bool = False     # группа изменена через "Список контактов"
-        self._contact_input_refs: dict = {} # idx → (inp_name, inp_phone, inp_email)
+        self._group_dirty: bool = False     # группа изменена через инлайн-аккордеон контактов
+        # Карточные контексты (виджеты + состояние аккордеона контактов):
+        # один на активную группу (переживает весь диалог) и по одному на
+        # каждую архивную группу (пересоздаются в _refresh_prev_section).
+        self._active_ctx = _GroupCardCtx(self._active_group, is_active=True)
+        self._archived_cards: list[_GroupCardCtx] = []
         # Реестр людей: источник для автодополнения ФИО и переиспользования контактов.
         self._people: list = people_reg.load_people()
         self._setup_ui()
@@ -3956,7 +4460,7 @@ class PlotEditDialog(QWidget):
         self._orig_area = area_text
         self._header_editing = False
 
-        def _icon_btn(cp: int, handler) -> QPushButton:
+        def _icon_btn(cp: int, handler, tooltip: str = "") -> QPushButton:
             b = QPushButton()
             b.setFixedSize(28, 28)
             b.setIconSize(QSize(18, 18))
@@ -3966,6 +4470,8 @@ class PlotEditDialog(QWidget):
                 "QPushButton:hover{background:#F3F4F6;}")
             b.setIcon(_mat_icon(cp, 18, color="#6B7280"))
             b.clicked.connect(handler)
+            if tooltip:
+                b.installEventFilter(_TooltipFilter(tooltip, b))
             return b
 
         if self._is_edit:
@@ -3982,11 +4488,11 @@ class PlotEditDialog(QWidget):
             drow.addWidget(self._num_title)
             drow.addStretch()
             # Кнопка сохранения (справа от карандаша, скрыта вне режима правки)
-            self._save_btn = _icon_btn(0xE161, self._on_header_save)
+            self._save_btn = _icon_btn(0xE161, self._on_header_save, "Сохранить участок")
             self._save_btn.setVisible(False)
             drow.addWidget(self._save_btn)
             # Карандаш — всегда виден; fill = режим правки активен
-            self._edit_btn = _icon_btn(0xF88D, self._on_header_edit)
+            self._edit_btn = _icon_btn(0xF88D, self._on_header_edit, "Редактировать участок")
             drow.addWidget(self._edit_btn)
             dv.addLayout(drow)
             self._area_display = QLabel()
@@ -4048,112 +4554,9 @@ class PlotEditDialog(QWidget):
             self._edit_block.setVisible(False)
             self._refresh_displays()
 
-        # -- Заголовок активной группы --
-        act_hdr = QHBoxLayout()
-        act_hdr.setContentsMargins(0, 4, 0, 0)
-        lbl_act = QLabel("Активная группа")
-        lbl_act.setStyleSheet(
-            "font-size:12px; color:#6B7280; background:transparent;")
-        act_hdr.addWidget(lbl_act, stretch=1)
-        self._active_docs_badge_box = QWidget()
-        self._active_docs_badge_box.setStyleSheet("background:transparent;")
-        self._active_docs_badge_lay = QHBoxLayout(self._active_docs_badge_box)
-        self._active_docs_badge_lay.setContentsMargins(0, 0, 0, 0)
-        act_hdr.addWidget(self._active_docs_badge_box)
-        self._active_since_lbl = QLabel()
-        self._active_since_lbl.setStyleSheet(
-            "font-size:12px; color:#6B7280; background:transparent;")
-        act_hdr.addWidget(self._active_since_lbl)
-        lay.addLayout(act_hdr)
-
-        # -- Карточка активной группы (одна колонка, по макету) --
-        self._active_card = QFrame()
-        self._active_card.setObjectName("activeCard")
-        self._active_card.setStyleSheet(
-            "QFrame#activeCard{"
-            "background:#EBF4F6;border:1px solid #C9D8E2;border-radius:8px;}"
-        )
-        card_lay = QVBoxLayout(self._active_card)
-        card_lay.setContentsMargins(14, 12, 14, 12)
-        card_lay.setSpacing(4)
-
-        self._active_name_lbl = QLabel()
-        self._active_name_lbl.setStyleSheet(
-            "font-size:14px; font-weight:700; color:#07414F; background:transparent;")
-        self._active_name_lbl.setWordWrap(True)
-        card_lay.addWidget(self._active_name_lbl)
-
-        self._active_counts_lbl = QLabel()
-        self._active_counts_lbl.setStyleSheet(
-            "font-size:12px; color:#6B7280; background:transparent;")
-        card_lay.addWidget(self._active_counts_lbl)
-
-        sep_line = QFrame()
-        sep_line.setFrameShape(QFrame.Shape.HLine)
-        sep_line.setStyleSheet("color:#C9D8E2; background:#C9D8E2; max-height:1px;")
-        card_lay.addWidget(sep_line)
-
-        _debt_hdr = QLabel("Задолженность")
-        _debt_hdr.setStyleSheet(
-            "font-size:12px; color:#6B7280; background:transparent;")
-        card_lay.addWidget(_debt_hdr)
-
-        self._debt_rows_box = QWidget()
-        self._debt_rows_box.setStyleSheet("background:transparent;")
-        self._debt_rows_lay = QVBoxLayout(self._debt_rows_box)
-        self._debt_rows_lay.setContentsMargins(0, 2, 0, 0)
-        self._debt_rows_lay.setSpacing(2)
-        card_lay.addWidget(self._debt_rows_box)
-
-        # ── Список контактов (превью + аккордеон) ──────────────────────
-        _sep2 = QFrame()
-        _sep2.setFrameShape(QFrame.Shape.HLine)
-        _sep2.setStyleSheet("color:#C9D8E2; background:#C9D8E2; max-height:1px;")
-        card_lay.addWidget(_sep2)
-
-        _contacts_hdr = QLabel("Список контактов")
-        _contacts_hdr.setStyleSheet(
-            "font-size:12px; color:#6B7280; background:transparent;")
-        card_lay.addWidget(_contacts_hdr)
-
-        # Превью: до 3 контактов, показываются сразу
-        self._active_preview_box = QWidget()
-        self._active_preview_box.setStyleSheet("background:transparent;")
-        self._active_preview_lay = QVBoxLayout(self._active_preview_box)
-        self._active_preview_lay.setContentsMargins(0, 0, 0, 0)
-        self._active_preview_lay.setSpacing(6)
-        card_lay.addWidget(self._active_preview_box)
-
-        # Кнопка «Показать все» / «Свернуть»
-        self._btn_show_all = QPushButton("Показать все")
-        self._btn_show_all.setObjectName("btnSecondary")
-        self._btn_show_all.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_show_all.setStyleSheet(
-            "QPushButton{background:transparent;color:#07414F;"
-            "border:1px solid #D1D5DB;border-radius:6px;"
-            "padding:4px 12px;font-size:12px;}"
-            "QPushButton:hover{background:#EBF4F6;border-color:#07414F;}")
-        self._btn_show_all.clicked.connect(self._on_toggle_contacts_full)
-        self._btn_show_all.setVisible(False)
-        card_lay.addWidget(self._btn_show_all)
-
-        # Кнопка «Добавить контакт»
-        self._btn_add_contact = QPushButton("+  Добавить контакт")
-        self._btn_add_contact.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_add_contact.setStyleSheet(
-            "QPushButton{background:transparent;color:#07414F;"
-            "border:1px dashed #9CA3AF;border-radius:6px;"
-            "padding:4px 12px;font-size:12px;}"
-            "QPushButton:hover{background:#EBF4F6;border-color:#07414F;}")
-        self._btn_add_contact.clicked.connect(self._on_add_contact)
-        card_lay.addWidget(self._btn_add_contact)
-
-        self._contacts_expanded = False
-        self._expanded_contacts: set[int] = set()
-
-        lay.addWidget(self._active_card)
-
-        self._refresh_active_card()
+        # -- Карточка активной группы (шапка + блок, билдер общий с архивными) --
+        self._build_group_card(self._active_ctx, lay, "Активная группа")
+        self._refresh_group_card(self._active_ctx)
 
         # -- Предыдущие группы --
         self._prev_section = QWidget()
@@ -4237,11 +4640,6 @@ class PlotEditDialog(QWidget):
             btn_del.clicked.connect(self._on_delete_clicked)
             f_lay.addWidget(btn_del)
             f_lay.addStretch()
-            btn_archive_group = QPushButton("Заменить активную группу")
-            btn_archive_group.setObjectName("btnSecondary")
-            btn_archive_group.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_archive_group.clicked.connect(self._on_archive_active_group)
-            f_lay.addWidget(btn_archive_group)
             btn_close = QPushButton("Закрыть")
             btn_close.setObjectName("btnFooterClose")
             btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4253,6 +4651,196 @@ class PlotEditDialog(QWidget):
 
         if not self._is_edit:
             self._update_save_state()
+
+    def _build_group_card(self, ctx: "_GroupCardCtx", target_lay: QVBoxLayout,
+                          header_text: str):
+        """Строит визуальный блок группы (шапка + карточка) в target_lay и
+        сохраняет ссылки на виджеты в ctx для _refresh_group_card/
+        _refresh_contacts_preview. Общий для активной и архивных групп —
+        различается только цвет карточки и подписи (см. ctx.is_active)."""
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 4, 0, 0)
+        lbl = QLabel(header_text)
+        lbl.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        hdr.addWidget(lbl, stretch=1)
+        ctx.docs_badge_box = QWidget()
+        ctx.docs_badge_box.setStyleSheet("background:transparent;")
+        ctx.docs_badge_lay = QHBoxLayout(ctx.docs_badge_box)
+        ctx.docs_badge_lay.setContentsMargins(0, 0, 0, 0)
+        hdr.addWidget(ctx.docs_badge_box)
+        ctx.since_lbl = QLabel()
+        ctx.since_lbl.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        hdr.addWidget(ctx.since_lbl)
+        target_lay.addLayout(hdr)
+
+        # -- Карточка группы (одна колонка, по макету) --
+        # ВАЖНО: селектор должен быть по ID (#groupCard), а не голым "QFrame{...}" —
+        # QLabel в Qt сам является подклассом QFrame, и голый тип-селектор
+        # каскадируется на все дочерние QLabel (бордер/радиус), у которых эти
+        # конкретные свойства не переопределены их собственным stylesheet.
+        bg, border = ("#EBF4F6", "#C9D8E2") if ctx.is_active else ("#F8F9FA", "#E5E7EB")
+        ctx.card = QFrame()
+        ctx.card.setObjectName("groupCard")
+        ctx.card.setStyleSheet(
+            f"QFrame#groupCard{{background:{bg};border:1px solid {border};border-radius:8px;}}")
+        card_lay = QVBoxLayout(ctx.card)
+        card_lay.setContentsMargins(14, 12, 14, 12)
+        card_lay.setSpacing(4)
+
+        ctx.name_lbl = QLabel()
+        ctx.name_lbl.setStyleSheet(
+            "font-size:14px; font-weight:700; color:#07414F; background:transparent;")
+        ctx.name_lbl.setWordWrap(True)
+        card_lay.addWidget(ctx.name_lbl)
+
+        ctx.counts_lbl = QLabel()
+        ctx.counts_lbl.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        card_lay.addWidget(ctx.counts_lbl)
+
+        # Тонкая линия от левого до правого края карточки — вылезает за
+        # отступы card_lay (14px) отрицательными полями обёртки, иначе была
+        # бы видна с отступом, как рамка внутри рамки. Обычный QWidget, а не
+        # QFrame(HLine) — у QFrame стиль рисует рамку с фаской (градиент
+        # светлого/тёмного), и background/color в QSS её не перекрывают.
+        sep_line = QWidget()
+        sep_line.setFixedHeight(1)
+        sep_line.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        sep_line.setStyleSheet("background:#E5E7EB;")
+        _sep_wrap = QHBoxLayout()
+        _sep_wrap.setContentsMargins(-14, 0, -14, 0)
+        _sep_wrap.addWidget(sep_line)
+        card_lay.addLayout(_sep_wrap)
+
+        _debt_hdr = QLabel("Задолженность" if ctx.is_active else "Долг на дату закрытия")
+        _debt_hdr.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        card_lay.addWidget(_debt_hdr)
+
+        # Декоративная (некликабельная) белая рамка — тот же стиль, что и у
+        # карточек контактов, просто без hover-подсветки.
+        ctx.debt_rows_box = QWidget()
+        ctx.debt_rows_box.setObjectName("debtBox")
+        ctx.debt_rows_box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        ctx.debt_rows_box.setStyleSheet(
+            "QWidget#debtBox{background:#FFFFFF;border:1px solid #E5E7EB;border-radius:8px;}")
+        ctx.debt_rows_lay = QVBoxLayout(ctx.debt_rows_box)
+        ctx.debt_rows_lay.setContentsMargins(10, 8, 10, 8)
+        ctx.debt_rows_lay.setSpacing(4)
+        card_lay.addWidget(ctx.debt_rows_box)
+
+        # ── Список контактов (превью + аккордеон) ──────────────────────
+        _contacts_hdr = QLabel("Список контактов")
+        _contacts_hdr.setStyleSheet(
+            "font-size:12px; color:#6B7280; background:transparent;")
+        card_lay.addWidget(_contacts_hdr)
+
+        # Превью: до 3 контактов, показываются сразу
+        ctx.preview_box = QWidget()
+        ctx.preview_box.setStyleSheet("background:transparent;")
+        ctx.preview_lay = QVBoxLayout(ctx.preview_box)
+        ctx.preview_lay.setContentsMargins(0, 0, 0, 0)
+        ctx.preview_lay.setSpacing(6)
+        card_lay.addWidget(ctx.preview_box)
+
+        # Строка действий: «Показать всех»/«Свернуть» слева, «Добавить
+        # контакт» справа — оба кликабельный текст, без рамки/фона кнопки.
+        _actions_row = QWidget()
+        _actions_row.setStyleSheet("background:transparent;")
+        _actions_lay = QHBoxLayout(_actions_row)
+        _actions_lay.setContentsMargins(0, 0, 0, 0)
+        _actions_lay.setSpacing(8)
+
+        # «Показать всех» / «Свернуть» — слева, со стрелкой после текста
+        # (вниз — развернуть, вверх — свернуть).
+        ctx.show_all_row = QWidget()
+        ctx.show_all_row.setStyleSheet("background:transparent;")
+        ctx.show_all_row.setCursor(Qt.CursorShape.PointingHandCursor)
+        _sa_lay = QHBoxLayout(ctx.show_all_row)
+        _sa_lay.setContentsMargins(0, 4, 0, 4)
+        _sa_lay.setSpacing(2)
+        _SA_SS = "font-size:12px; color:#07414F; background:transparent;"
+        _SA_SS_HOVER = "font-size:12px; color:#062F38; background:transparent;"
+        ctx.show_all_lbl = QLabel("Показать всех")
+        ctx.show_all_lbl.setStyleSheet(_SA_SS)
+        ctx.show_all_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        _sa_lay.addWidget(ctx.show_all_lbl)
+        ctx.show_all_arrow = QLabel(chr(0xE5CF))
+        ctx.show_all_arrow.setFont(_mat_font(16))
+        ctx.show_all_arrow.setStyleSheet("color:#07414F; background:transparent;")
+        ctx.show_all_arrow.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        _sa_lay.addWidget(ctx.show_all_arrow)
+
+        def _sa_enter(e, c=ctx):
+            c.show_all_lbl.setStyleSheet(_SA_SS_HOVER)
+            c.show_all_arrow.setStyleSheet("color:#062F38; background:transparent;")
+
+        def _sa_leave(e, c=ctx):
+            c.show_all_lbl.setStyleSheet(_SA_SS)
+            c.show_all_arrow.setStyleSheet("color:#07414F; background:transparent;")
+
+        ctx.show_all_row.enterEvent = _sa_enter
+        ctx.show_all_row.leaveEvent = _sa_leave
+        ctx.show_all_row.mouseReleaseEvent = (
+            lambda e, c=ctx: self._on_toggle_contacts_full(c)
+            if e.button() == Qt.MouseButton.LeftButton else None)
+        ctx.show_all_row.setVisible(False)
+        _actions_lay.addWidget(ctx.show_all_row)
+        _actions_lay.addStretch(1)
+
+        # «Добавить контакт» — справа, с иконкой person_add перед текстом.
+        _add_contact_row = QWidget()
+        _add_contact_row.setStyleSheet("background:transparent;")
+        _add_contact_row.setCursor(Qt.CursorShape.PointingHandCursor)
+        _ac_lay = QHBoxLayout(_add_contact_row)
+        _ac_lay.setContentsMargins(0, 4, 0, 4)
+        _ac_lay.setSpacing(4)
+        _AC_SS = "font-size:12px; color:#07414F; background:transparent;"
+        _AC_SS_HOVER = "font-size:12px; color:#062F38; background:transparent;"
+        _ac_icon = QLabel(chr(0xE7FE))
+        _ac_icon.setFont(_mat_font(16))
+        _ac_icon.setStyleSheet("color:#07414F; background:transparent;")
+        _ac_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        _ac_lay.addWidget(_ac_icon)
+        _ac_lbl = QLabel("Добавить контакт")
+        _ac_lbl.setStyleSheet(_AC_SS)
+        _ac_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        _ac_lay.addWidget(_ac_lbl)
+
+        def _ac_enter(e):
+            _ac_lbl.setStyleSheet(_AC_SS_HOVER)
+            _ac_icon.setStyleSheet("color:#062F38; background:transparent;")
+
+        def _ac_leave(e):
+            _ac_lbl.setStyleSheet(_AC_SS)
+            _ac_icon.setStyleSheet("color:#07414F; background:transparent;")
+
+        _add_contact_row.enterEvent = _ac_enter
+        _add_contact_row.leaveEvent = _ac_leave
+        _add_contact_row.mouseReleaseEvent = (
+            lambda e, c=ctx: self._on_add_contact(c)
+            if e.button() == Qt.MouseButton.LeftButton else None)
+        _actions_lay.addWidget(_add_contact_row)
+
+        card_lay.addWidget(_actions_row)
+
+        target_lay.addWidget(ctx.card)
+
+        if ctx.is_active:
+            ctx.new_group_btn = QPushButton(" Создать новую группу")
+            ctx.new_group_btn.setIcon(_mat_icon(0xE7F0, 18, color="#374151"))
+            ctx.new_group_btn.setIconSize(QSize(18, 18))
+            ctx.new_group_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            ctx.new_group_btn.setStyleSheet(
+                "QPushButton{background:#E5E7EB;color:#374151;border:1px solid #D1D5DB;"
+                "border-radius:8px;padding:12px 16px;font-size:14px;font-weight:600;}"
+                "QPushButton:hover{background:#D1D5DB;}"
+                "QPushButton:disabled{background:#F3F4F6;color:#9CA3AF;border:1px solid #E5E7EB;}")
+            ctx.new_group_btn.clicked.connect(self._on_archive_active_group)
+            target_lay.addSpacing(6)
+            target_lay.addWidget(ctx.new_group_btn)
 
     def _on_header_edit(self):
         """Тоггл режима правки номера+площади.
@@ -4334,8 +4922,15 @@ class PlotEditDialog(QWidget):
         current = self.inp_num.text().strip()
         self._lbl_num_taken.setVisible(bool(current and current in self._existing_nums))
 
-    def _on_close(self):
-        """Закрывает панель: если есть закоммиченные изменения — saved=True."""
+    def _on_close(self) -> bool:
+        """Закрывает панель: если есть закоммиченные изменения — saved=True.
+
+        Возвращает False, если пользователь отменил закрытие из-за
+        несохранённых правок в открытой карточке контакта (см.
+        _attempt_close_contact) — панель остаётся как есть, вызывающий код
+        (например, переход на другой участок) должен прерваться."""
+        if not self._confirm_pending_contact_edits():
+            return False
         # Незакоммиченную правку номера/площади откатываем (без предупреждения)
         if self._is_edit and self._header_editing:
             self._set_header_edit(False, revert=True)
@@ -4344,6 +4939,23 @@ class PlotEditDialog(QWidget):
             self._finish(True)
         else:
             self._finish(False)
+        return True
+
+    def _all_card_ctxs(self) -> list:
+        """Все карточные контексты панели: активная группа + все архивные —
+        для операций, затрагивающих раскрытые контакты глобально."""
+        return [self._active_ctx, *self._archived_cards]
+
+    def _confirm_pending_contact_edits(self) -> bool:
+        """Если есть открытая карточка контакта (в любой группе — активной
+        или архивной) с несохранёнными правками — спрашивает через диалог
+        (см. _attempt_close_contact). True — можно продолжать закрытие/
+        переход на другой участок."""
+        for ctx in self._all_card_ctxs():
+            for idx in list(ctx.expanded_contacts):
+                if not self._attempt_close_contact(ctx, idx):
+                    return False
+        return True
 
     def _finish(self, saved: bool):
         """Завершает работу панели: отключает focusChanged и эмитит closed(saved)."""
@@ -4380,8 +4992,10 @@ class PlotEditDialog(QWidget):
                     area_val = None
             except ValueError:
                 pass
+        archived_by_id = {id(c.orig): c.group for c in self._archived_cards}
         final_groups = [
-            self._active_group if g.get("until") is None else g
+            self._active_group if g.get("until") is None
+            else archived_by_id.get(id(g), g)
             for g in self._groups
         ]
         result = {"num": num, "groups": final_groups}
@@ -4395,43 +5009,96 @@ class PlotEditDialog(QWidget):
                 result[k] = self._plot_data[k]
         self._result = result
 
-    def _refresh_active_card(self):
-        owners = ownership.group_owners(self._active_group)
+    def _sync_owners_from_registry(self, owners: list) -> None:
+        """Подтягивает актуальные ФИО/телефон/email/ОПД/заявление из реестра
+        людей для контактов активной группы.
+
+        Эти поля не зависят от участка (см. докстринг core/people.py) —
+        реестр является источником истины (привязка — по стабильному person_id,
+        а не по имени, поэтому переживает переименование). Без этой
+        синхронизации значение, изменённое для человека на ОДНОМ участке,
+        продолжает висеть на его контактах на ДРУГИХ участках, пока их не
+        пересохранят вручную (например, повторным выбором ФИО из
+        автодополнения)."""
+        changed = False
+        for o in owners:
+            if not isinstance(o, dict):
+                continue
+            person = people_reg.get(self._people, o.get("person_id"))
+            if not person:
+                continue
+            for field in ("name", "phone", "email", "opd_doc", "member_doc"):
+                reg_val = str(person.get(field, ""))
+                own_val = str(o.get(field, ""))
+                if reg_val == own_val:
+                    continue
+                if reg_val:
+                    o[field] = reg_val
+                elif field != "name" and field in o:
+                    # "name" не удаляем даже если в реестре почему-то пусто —
+                    # у контакта всегда должно оставаться хоть какое-то ФИО.
+                    del o[field]
+                changed = True
+        if changed:
+            self._group_dirty = True
+
+    def _refresh_group_card(self, ctx: "_GroupCardCtx"):
+        """Обновляет карточку группы (активной или архивной) — имя, дату/
+        период, бейдж документов, счётчики, долг и превью контактов."""
+        owners = ownership.group_owners(ctx.group)
+        self._sync_owners_from_registry(owners)
+        if _ensure_single_primary(owners):
+            self._group_dirty = True
 
         # Имя главного участника (is_visible=True), иначе первый в списке
         main = next((o for o in owners if isinstance(o, dict) and o.get("is_visible")),
                     owners[0] if owners else None)
         name = ownership.owner_name(main) if main else "(нет лиц)"
-        self._active_name_lbl.setText(name)
+        ctx.name_lbl.setText(name)
 
-        # Дата начала (в заголовке)
-        since = ownership.group_since(self._active_group)
-        self._active_since_lbl.setText(
-            f"Активна с: {since.strftime('%d.%m.%Y')}" if since else "Активна с: —")
+        if ctx.new_group_btn is not None:
+            ctx.new_group_btn.setEnabled(bool(owners))
+            ctx.new_group_btn.setToolTip(
+                "" if owners else "Добавьте хотя бы один контакт, чтобы создать новую группу")
+
+        # Дата начала / период (в заголовке)
+        ctx.since_lbl.setText(self._group_period_text(ctx))
 
         # Бейдж «не хватает документов» по всей группе (в заголовке)
-        while self._active_docs_badge_lay.count():
-            item = self._active_docs_badge_lay.takeAt(0)
+        while ctx.docs_badge_lay.count():
+            item = ctx.docs_badge_lay.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
         _have, _total = self._group_docs_progress(owners)
         if _total and _have < _total:
-            self._active_docs_badge_lay.addWidget(
-                _make_docs_badge(self._active_docs_badge_box, _have, _total))
+            ctx.docs_badge_lay.addWidget(
+                _make_docs_badge(ctx.docs_badge_box, _have, _total))
 
         # Счётчики
         n_members = sum(1 for o in owners if isinstance(o, dict) and o.get("is_member"))
         count_lines = []
         if n_members:
             count_lines.append(f"Члены СНТ: {n_members}")
-        self._active_counts_lbl.setText("  ·  ".join(count_lines) if count_lines else "")
+        ctx.counts_lbl.setText("  ·  ".join(count_lines) if count_lines else "")
 
         # Долг/Аванс
-        self._refresh_debt_card()
+        self._refresh_debt_card(ctx)
 
         # Превью контактов (до 3)
-        self._refresh_contacts_preview(owners)
+        self._refresh_contacts_preview(ctx)
+
+    @staticmethod
+    def _group_period_text(ctx: "_GroupCardCtx") -> str:
+        """Текст справа в шапке блока: дата начала (активная) или период
+        начало–окончание (архивная)."""
+        since = ownership.group_since(ctx.group)
+        if ctx.is_active:
+            return f"Активна с: {since.strftime('%d.%m.%Y')}" if since else "Активна с: —"
+        until = ownership.group_until(ctx.group)
+        since_txt = since.strftime("%d.%m.%Y") if since else "начало"
+        until_txt = until.strftime("%d.%m.%Y") if until else "—"
+        return f"{since_txt} – {until_txt}"
 
     @staticmethod
     def _group_docs_progress(owners) -> tuple[int, int]:
@@ -4453,48 +5120,15 @@ class PlotEditDialog(QWidget):
                         have += 1
         return have, total
 
-    @staticmethod
-    def _missing_docs_lines(owners) -> list[str]:
-        """Список строк об отсутствующих документах по ролям.
+    def _refresh_debt_card(self, ctx: "_GroupCardCtx"):
+        """Долг по ЧВ и электроэнергии — построчно в секции «Задолженность».
 
-        Роль определяется 1-в-1 как в карточке GroupEditDialog (_add_owner_card):
-        is_visible → контакт (нужна ОПД), is_owner → собственник (ОПД+ЕГРН),
-        is_member → член СНТ (ОПД+ЕГРН+заявление), иначе контакт.
-        """
-        no_opd = no_egrn = no_mem = 0
-        for o in owners:
-            if not isinstance(o, dict):
-                continue
-            if o.get("is_visible"):
-                req_opd, req_egrn, req_mem = True, False, False
-            elif o.get("is_owner"):
-                req_opd, req_egrn, req_mem = True, True, False
-            elif o.get("is_member"):
-                req_opd, req_egrn, req_mem = True, True, True
-            else:
-                req_opd, req_egrn, req_mem = True, False, False
-            if req_opd and not o.get("opd_doc"):
-                no_opd += 1
-            if req_egrn and not o.get("egrn_doc"):
-                no_egrn += 1
-            if req_mem and not o.get("member_doc"):
-                no_mem += 1
-        lines = []
-        if no_opd:
-            lines.append(f"Отсутствует заявление на ОПД: {no_opd}")
-        if no_egrn:
-            lines.append(f"Отсутствует выписка ЕГРН: {no_egrn}")
-        if no_mem:
-            lines.append(f"Отсутствует заявление в СНТ: {no_mem}")
-        return lines
-
-    def _refresh_debt_card(self):
-        """Долг по ЧВ и электроэнергии — построчно в секции «Задолженность»."""
+        Для активной группы — живой расчёт на сегодня; для архивной —
+        замороженное значение на дату закрытия (``debt_at_close``, см.
+        _apply_replace), НЕ пересчитывается."""
         from core.utils import fmt_money
-        plot_num = str(self._plot_data.get("num", ""))
-        since = ownership.group_since(self._active_group)
 
-        def _make_row(label: str, debt: float) -> QWidget:
+        def _make_row(label: str, debt) -> QWidget:
             row = QWidget()
             row.setStyleSheet("background:transparent;")
             row_lay = QHBoxLayout(row)
@@ -4503,7 +5137,9 @@ class PlotEditDialog(QWidget):
             lbl = QLabel(label)
             lbl.setStyleSheet("font-size:12px; color:#374151; background:transparent;")
             row_lay.addWidget(lbl, stretch=1)
-            if debt < -0.005:
+            if debt is None:
+                amt_txt, color = "—", "#6B7280"
+            elif debt < -0.005:
                 amt_txt, color = f"-{fmt_money(abs(debt))}", "#2E7D32"
             elif debt > 0.005:
                 amt_txt, color = fmt_money(debt), "#B45309"
@@ -4515,12 +5151,20 @@ class PlotEditDialog(QWidget):
             row_lay.addWidget(amt)
             return row
 
-        while self._debt_rows_lay.count():
-            item = self._debt_rows_lay.takeAt(0)
+        while ctx.debt_rows_lay.count():
+            item = ctx.debt_rows_lay.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
 
+        if not ctx.is_active:
+            d = ctx.group.get("debt_at_close") or {}
+            ctx.debt_rows_lay.addWidget(_make_row("Членские взносы", d.get("vznosy")))
+            ctx.debt_rows_lay.addWidget(_make_row("Электроэнергия", d.get("energy")))
+            return
+
+        plot_num = str(self._plot_data.get("num", ""))
+        since = ownership.group_since(ctx.group)
         try:
             from core import vznosy as vzn
             rates = vzn.load_rates()
@@ -4528,7 +5172,7 @@ class PlotEditDialog(QWidget):
             area = vzn.plot_area_map().get(plot_num)
             gb = vzn.balance_for_active_group(
                 plot_num, area, date.today(), rates, adj, self._df, since=since)
-            self._debt_rows_lay.addWidget(_make_row("Членские взносы", gb.debt))
+            ctx.debt_rows_lay.addWidget(_make_row("Членские взносы", gb.debt))
         except Exception:
             pass
         try:
@@ -4536,33 +5180,146 @@ class PlotEditDialog(QWidget):
             egb = en.balance_for_active_group(
                 plot_num, date.today(), en.load_meters(), en.load_rates(),
                 en.load_replacements(), en.load_baseline(), self._df, since=since)
-            self._debt_rows_lay.addWidget(_make_row("Электроэнергия", egb.debt))
+            ctx.debt_rows_lay.addWidget(_make_row("Электроэнергия", egb.debt))
         except Exception:
             pass
 
-    def _refresh_contacts_preview(self, owners: list):
-        """Обновляет превью контактов под карточкой активной группы."""
+    def _pending_contact_overrides(self, ctx: "_GroupCardCtx") -> dict:
+        """Текущие (ещё НЕ сохранённые) значения полей развёрнутых карточек.
+
+        Используется при перерисовке списка, которую вызвало постороннее
+        действие (например, клик по звезде ДРУГОГО контакта), а не явное
+        сохранение или сворачивание этой карточки — чтобы не откатить то, что
+        пользователь уже начал печатать, к последним сохранённым данным.
+        В отличие от старой _flush_expanded_contacts — НИЧЕГО не пишет в
+        owners: сохранение теперь явное (кнопка «Сохранить» или выбор
+        «Сохранить» в диалоге, см. _attempt_close_contact)."""
+        result: dict = {}
+        for idx in list(ctx.expanded_contacts):
+            refs = ctx.contact_input_refs.get(idx)
+            if not refs:
+                continue
+            inp_name, inp_phone, inp_email, opd_w, egrn_w, mem_w = refs
+            try:
+                result[idx] = {
+                    "name": inp_name.text().strip(),
+                    "phone": inp_phone.text().strip(),
+                    "email": inp_email.text().strip(),
+                    "opd_doc": opd_w.get_path(),
+                    "egrn_doc": egrn_w.get_path(),
+                    "member_doc": mem_w.get_path(),
+                }
+            except RuntimeError:
+                # Виджеты уже уничтожены Qt (например, контакт выпал за
+                # PREVIEW_LIMIT при переключении «Показать все»/«Свернуть»).
+                # Восстанавливать нечего — забываем протухшую ссылку.
+                ctx.contact_input_refs.pop(idx, None)
+        return result
+
+    def _contact_is_dirty(self, ctx: "_GroupCardCtx", idx: int) -> bool:
+        """Есть ли у развёрнутой карточки idx несохранённые правки —
+        сравнение текущих полей со снимком на момент разворачивания."""
+        refs = ctx.contact_input_refs.get(idx)
+        snap = ctx.contact_snapshots.get(idx)
+        if not refs or snap is None:
+            return False
+        inp_name, inp_phone, inp_email, opd_w, egrn_w, mem_w = refs
+        try:
+            current = {
+                "name": inp_name.text().strip(),
+                "phone": inp_phone.text().strip(),
+                "email": inp_email.text().strip(),
+                "opd_doc": opd_w.get_path(),
+                "egrn_doc": egrn_w.get_path(),
+                "member_doc": mem_w.get_path(),
+            }
+        except RuntimeError:
+            return False
+        return current != snap
+
+    def _discard_contact(self, ctx: "_GroupCardCtx", idx: int):
+        """Сворачивает карточку idx БЕЗ сохранения — откатывает к тому, что
+        уже есть в owners[idx]. Пустой ещё-не-сохранённый черновик при этом
+        тихо удаляется (как раньше делал _save_and_collapse для пустого ФИО)."""
+        ctx.contact_input_refs.pop(idx, None)
+        ctx.contact_snapshots.pop(idx, None)
+        ctx.expanded_contacts.discard(idx)
+        owners = ctx.group.get("owners", []) or []
+        o = owners[idx] if 0 <= idx < len(owners) else None
+        if (isinstance(o, dict) and not ownership.owner_name(o)
+                and not o.get("phone") and not o.get("email")
+                and not o.get("opd_doc") and not o.get("egrn_doc")
+                and not o.get("member_doc")):
+            self._delete_contact_silently(ctx, idx)
+        else:
+            self._refresh_contacts_preview(ctx)
+            self._update_save_state()
+
+    def _attempt_close_contact(self, ctx: "_GroupCardCtx", idx: int) -> bool:
+        """Пытается закрыть (свернуть) карточку idx — при уходе на другой
+        контакт, закрытии панели участка или переходе на другой участок.
+
+        Если правок нет — сворачивает молча. Если есть — спрашивает через
+        диалог «Сохранить / Не сохранять / Отмена». Возвращает True, если
+        можно продолжать (карточка закрыта — сохранена или правки отброшены),
+        False — пользователь отменил, карточка остаётся открытой (и вызвавшее
+        действие тоже должно быть отменено)."""
+        if idx not in ctx.contact_input_refs:
+            ctx.expanded_contacts.discard(idx)
+            ctx.contact_snapshots.pop(idx, None)
+            return True
+        if not self._contact_is_dirty(ctx, idx):
+            self._discard_contact(ctx, idx)
+            return True
+        owners = ctx.group.get("owners", []) or []
+        o = owners[idx] if 0 <= idx < len(owners) else None
+        name = ownership.owner_name(o) if isinstance(o, dict) else ""
+        choice = _Save3WayDialog.ask(
+            self,
+            f"Сохранить изменения в «{name}»?" if name else "Сохранить изменения контакта?",
+            "Есть несохранённые правки ФИО, контактов или документов.")
+        if choice == "save":
+            return self._save_and_collapse(ctx, idx)
+        if choice == "discard":
+            self._discard_contact(ctx, idx)
+            return True
+        return False
+
+    def _refresh_contacts_preview(self, ctx: "_GroupCardCtx"):
+        """Обновляет превью контактов под карточкой группы (активной или архивной)."""
+        owners = ownership.group_owners(ctx.group)
+        _pending_overrides = self._pending_contact_overrides(ctx)
         _AppTooltip.hide()
         # Очистка: скрываем перед удалением, чтобы не всплывали как top-level окна
-        while self._active_preview_lay.count():
-            item = self._active_preview_lay.takeAt(0)
+        while ctx.preview_lay.count():
+            item = ctx.preview_lay.takeAt(0)
             w = item.widget()
             if w:
                 w.hide()
                 w.deleteLater()
 
         PREVIEW_LIMIT = 3
-        if self._contacts_expanded:
+        if ctx.contacts_expanded:
             shown = list(enumerate(owners))
         else:
             shown = list(enumerate(owners[:PREVIEW_LIMIT]))
         has_more = len(owners) > PREVIEW_LIMIT
 
+        # Контакты, выпавшие за PREVIEW_LIMIT (или вовсе исчезнувшие) при этой
+        # перерисовке, только что получили deleteLater() выше — их виджеты
+        # больше не существуют, хотя индекс мог остаться «развёрнутым».
+        # Забываем ссылки, чтобы никто потом не обратился к удалённому
+        # C/C++ объекту (см. _pending_contact_overrides/_contact_is_dirty).
+        _shown_idxs = {i for i, _ in shown}
+        for _stale_idx in [i for i in ctx.contact_input_refs if i not in _shown_idxs]:
+            ctx.contact_input_refs.pop(_stale_idx, None)
+            ctx.contact_snapshots.pop(_stale_idx, None)
+
         _LABEL_SS = "font-size:10px; color:#9CA3AF; background:transparent;"
 
         for idx, o in shown:
             row_idx = idx
-            is_open = idx in self._expanded_contacts
+            is_open = idx in ctx.expanded_contacts
 
             # Строковый контейнер (vert): заголовок + (опционально) детали
             card = QWidget(self)
@@ -4587,6 +5344,12 @@ class PlotEditDialog(QWidget):
 
             # Имя (нужно для цвета иконки)
             full_name = ownership.owner_name(o) if isinstance(o, dict) else str(o)
+            # Незавершённый ввод в уже открытой карточке — предпочитаем его
+            # сохранённым данным при перерисовке, вызванной посторонним
+            # действием (см. _pending_contact_overrides).
+            _pending = _pending_overrides.get(idx) if is_open else None
+            if _pending is not None:
+                full_name = _pending["name"]
 
             # Звёздочка «избранный» на цветном фоне роли — объединяет
             # прежнюю декоративную иконку-бюст и отдельную кнопку-звезду,
@@ -4624,12 +5387,16 @@ class PlotEditDialog(QWidget):
 
             star_btn.enterEvent = _star_enter
             star_btn.leaveEvent = _star_leave
-            star_btn.clicked.connect(lambda _, i=idx: self._set_inline_primary(i))
+            star_btn.clicked.connect(lambda _, i=idx, c=ctx: self._set_inline_primary(c, i))
             rl.addWidget(star_btn)
 
             # Телефон (свернуто) — определяем заранее, чтобы знать, останется
             # ли место у ФИО в свёрнутой строке.
             phone = (o.get("phone", "") if isinstance(o, dict) else "").strip()
+            email_val = (o.get("email", "") if isinstance(o, dict) else "").strip()
+            if _pending is not None:
+                phone = _pending["phone"]
+                email_val = _pending["email"]
             _name_limit = 20 if (phone and not is_open) else 40
             display_name = _truncate_name(full_name, _name_limit) if full_name else "—"
             lbl = QLabel(display_name, hdr)
@@ -4639,7 +5406,7 @@ class PlotEditDialog(QWidget):
             lbl.setSizePolicy(
                 QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
             lbl.setMinimumWidth(0)
-            if display_name != full_name:
+            if full_name and display_name != full_name:
                 hdr.installEventFilter(_TooltipFilter(full_name, hdr))
             rl.addWidget(lbl, stretch=1)
 
@@ -4660,16 +5427,74 @@ class PlotEditDialog(QWidget):
                 if _total and _have < _total:
                     rl.addWidget(_make_docs_badge(hdr, _have, _total))
 
-            # Кнопка «редактировать»: всегда в layout (22×22), иконка прозрачна по умолчанию
+            # Кнопки «убрать из списка» / «удалить контакт» — только в развёрнутом
+            # виде, левее карандаша. Первая лишь отвязывает контакт от ЭТОЙ группы
+            # (данные человека и его документы не трогает); вторая — необратимо
+            # удаляет запись и относящуюся к участку Выписку ЕГРН.
+            if is_open:
+                btn_remove_list = QPushButton(hdr)
+                btn_remove_list.setFixedSize(22, 22)
+                btn_remove_list.setIconSize(QSize(16, 16))
+                btn_remove_list.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_remove_list.setStyleSheet(
+                    "QPushButton{background:transparent;border:none;border-radius:4px;}"
+                    "QPushButton:hover{background:#F3F4F6;}")
+                btn_remove_list.setIcon(_mat_icon(0xE15B, 16, color="#6B7280"))
+                btn_remove_list.installEventFilter(
+                    _TooltipFilter("Убрать из списка (без удаления данных)", btn_remove_list))
+                btn_remove_list.clicked.connect(
+                    lambda _, i=row_idx, c=ctx: self._remove_contact_from_list(c, i))
+                rl.addWidget(btn_remove_list)
+
+                btn_del_contact = QPushButton(hdr)
+                btn_del_contact.setFixedSize(22, 22)
+                btn_del_contact.setIconSize(QSize(16, 16))
+                btn_del_contact.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_del_contact.setStyleSheet(
+                    "QPushButton{background:transparent;border:none;border-radius:4px;}"
+                    "QPushButton:hover{background:#FEF2F2;}")
+                btn_del_contact.setIcon(_mat_icon(0xEF66, 16, color="#DC2626"))
+                btn_del_contact.installEventFilter(
+                    _TooltipFilter("Удалить контакт", btn_del_contact))
+                btn_del_contact.clicked.connect(
+                    lambda _, i=row_idx, c=ctx: self._delete_contact(c, i))
+                rl.addWidget(btn_del_contact)
+
+            # Кнопка справа: карандаш (свёрнуто, только на hover) — открыть на
+            # правку; ЯВНАЯ «Сохранить» (развёрнуто) — вместо прежнего
+            # карандаша-филл, чтобы момент сохранения был однозначным, а не
+            # угадывался по сворачиванию (см. _attempt_close_contact — клик
+            # по фону шапки/другому контакту теперь спрашивает через диалог,
+            # если правки не сохранены явно этой кнопкой).
             btn_edit = QPushButton(hdr)
             btn_edit.setFixedSize(22, 22)
             btn_edit.setIconSize(QSize(16, 16))
             btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_edit.setStyleSheet(
-                "QPushButton{background:transparent;border:none;}"
-                "QPushButton:hover{background:transparent;}")
-            # Пустая иконка — кнопка резервирует место, но невидима
-            btn_edit.setIcon(QIcon())
+            if is_open:
+                btn_edit.setStyleSheet(
+                    "QPushButton{background:transparent;border:none;border-radius:4px;}"
+                    "QPushButton:hover{background:#F3F4F6;}")
+                btn_edit.setIcon(_mat_icon(0xE161, 16, fill=0, color="#07414F"))
+                btn_edit.installEventFilter(_TooltipFilter("Сохранить", btn_edit))
+                btn_edit.clicked.connect(
+                    lambda _, i=row_idx, c=ctx: self._save_and_collapse(c, i))
+            else:
+                btn_edit.setStyleSheet(
+                    "QPushButton{background:transparent;border:none;}"
+                    "QPushButton:hover{background:transparent;}")
+                # Пустая иконка — кнопка резервирует место, но невидима до hover
+                btn_edit.setIcon(QIcon())
+                btn_edit.clicked.connect(
+                    lambda _, i=row_idx, c=ctx: self._toggle_contact_detail(c, i))
+
+                def _hdr_enter(e, btn=btn_edit):
+                    btn.setIcon(_mat_icon(0xE3C9, 16, fill=0, color="#6B7280"))
+
+                def _hdr_leave(e, btn=btn_edit):
+                    btn.setIcon(QIcon())
+
+                hdr.enterEvent = _hdr_enter
+                hdr.leaveEvent = _hdr_leave
             rl.addWidget(btn_edit)
 
             # Шеврон: стрелка вниз (свернуто) / вверх (развёрнуто)
@@ -4678,22 +5503,6 @@ class PlotEditDialog(QWidget):
             chevron_lbl.setStyleSheet("color:#9CA3AF; background:transparent;")
             chevron_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             rl.addWidget(chevron_lbl)
-
-            # Показ/обновление иконки «редактировать»
-            def _hdr_enter(e, btn=btn_edit, io=is_open):
-                btn.setIcon(_mat_icon(0xE3C9, 16, fill=1 if io else 0,
-                                      color="#07414F" if io else "#6B7280"))
-
-            def _hdr_leave(e, btn=btn_edit, io=is_open):
-                if not io:
-                    btn.setIcon(QIcon())
-
-            hdr.enterEvent = _hdr_enter
-            hdr.leaveEvent = _hdr_leave
-
-            # Если развёрнут — сразу показать fill-иконку
-            if is_open:
-                btn_edit.setIcon(_mat_icon(0xE3C9, 16, fill=1, color="#07414F"))
 
             card_vl.addWidget(hdr)
 
@@ -4705,32 +5514,71 @@ class PlotEditDialog(QWidget):
                 det_lay.setContentsMargins(24, 4, 8, 6)
                 det_lay.setSpacing(4)
 
-                # ФИО
+                # ФИО — своя колонка с тем же интервалом метка/поле (2px),
+                # что и у Телефона/Email ниже, для единообразия отступов.
+                fio_col = QVBoxLayout()
+                fio_col.setSpacing(2)
+                lbl_fio_row = QHBoxLayout()
+                lbl_fio_row.setContentsMargins(0, 0, 0, 0)
+                lbl_fio_row.setSpacing(6)
                 lbl_fio = QLabel("ФИО", styleSheet=_LABEL_SS, parent=det)
-                det_lay.addWidget(lbl_fio)
+                lbl_fio_row.addWidget(lbl_fio)
+                dup_pill = _make_warn_pill(det, "занято — не будет сохранено")
+                dup_pill.hide()
+                # Резервируем место скрытой пилюли — иначе её появление меняет
+                # высоту строки и «дёргает» вниз всё, что расположено ниже
+                # (безопасно: после неё addStretch(), переполнения по ширине нет —
+                # см. заметку про retainSizeWhenHidden в qt_win11_gotchas).
+                _dup_sp = dup_pill.sizePolicy()
+                _dup_sp.setRetainSizeWhenHidden(True)
+                dup_pill.setSizePolicy(_dup_sp)
+                lbl_fio_row.addWidget(dup_pill)
+                lbl_fio_row.addStretch(1)
+                fio_col.addLayout(lbl_fio_row)
                 inp_name = QLineEdit(full_name, parent=det)
                 inp_name.setPlaceholderText("Фамилия Имя Отчество")
                 inp_name.setStyleSheet(_INPUT_SS)
                 inp_name.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
-                # Автодополнение по реестру людей (см. также _add_owner_card).
-                _name_completer = QCompleter(_people_names(self._people), inp_name)
+                # Защита от дублей: ФИО остальных контактов ЭТОЙ группы (кроме
+                # себя) не предлагаются в автодополнении — иначе можно выбрать
+                # уже добавленного человека второй раз.
+                _other_names_norm = {
+                    people_reg.norm_name(ownership.owner_name(ow))
+                    for j, ow in enumerate(owners)
+                    if j != idx and isinstance(ow, dict) and ownership.owner_name(ow)
+                }
+                _avail_names = [
+                    n for n in _people_names(self._people)
+                    if people_reg.norm_name(n) not in _other_names_norm
+                ]
+                _name_completer = QCompleter(_avail_names, inp_name)
                 _name_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
                 _name_completer.setFilterMode(Qt.MatchFlag.MatchContains)
                 inp_name.setCompleter(_name_completer)
                 name_row = QHBoxLayout()
                 name_row.setContentsMargins(0, 0, 0, 0)
                 name_row.setSpacing(4)
-                name_row.addWidget(inp_name)
+                name_row.addWidget(inp_name, stretch=1)
                 name_row.addWidget(_make_copy_btn(inp_name))
-                det_lay.addLayout(name_row)
+                fio_col.addLayout(name_row)
+                det_lay.addLayout(fio_col)
+
+                def _check_dup_name(_t="", inp=inp_name, pill=dup_pill,
+                                     others=_other_names_norm):
+                    pill.setVisible(
+                        bool(inp.text().strip())
+                        and people_reg.norm_name(inp.text()) in others)
+
+                inp_name.textChanged.connect(_check_dup_name)
+                _check_dup_name()
 
                 # Телефон + Email (на одном уровне)
                 contact_row = QHBoxLayout()
                 contact_row.setSpacing(8)
                 _contact_inputs = []
                 for lbl_txt, val, placeholder, key in [
-                    ("Телефон", _normalize_phone(phone), "нет телефона", "phone"),
-                    ("Email", (o.get("email", "") if isinstance(o, dict) else "").strip(), "нет email", "email"),
+                    ("Телефон", _normalize_phone(phone), "+7 (xxx) xxx-xx-xx", "phone"),
+                    ("Email", email_val, "example@mail.ru", "email"),
                 ]:
                     col = QVBoxLayout()
                     col.setSpacing(2)
@@ -4790,8 +5638,8 @@ class PlotEditDialog(QWidget):
                     seg_group.addButton(seg)
                     seg.setStyleSheet(_SEG_SS)
                     seg.clicked.connect(
-                        lambda checked, rk2=rk, tags=role_tags, sb=star_btn, ow=o:
-                            self._set_inline_role(ow, rk2, tags, sb))
+                        lambda checked, rk2=rk, tags=role_tags, sb=star_btn, ow=o, c=ctx:
+                            self._set_inline_role(c, ow, rk2, tags, sb))
                     role_tags.append((rk, seg))
                     seg_lay.addWidget(seg, 1)
                 det_lay.addWidget(seg_frame)
@@ -4809,6 +5657,10 @@ class PlotEditDialog(QWidget):
                 opd_path    = o.get("opd_doc", "")    if isinstance(o, dict) else ""
                 egrn_path   = o.get("egrn_doc", "")   if isinstance(o, dict) else ""
                 member_path = o.get("member_doc", "") if isinstance(o, dict) else ""
+                if _pending is not None:
+                    opd_path = _pending["opd_doc"]
+                    egrn_path = _pending["egrn_doc"]
+                    member_path = _pending["member_doc"]
 
                 opd_w  = _DocFieldWidget(opd_path, upload_tip="Согласие на ОПД")
                 egrn_w = _DocFieldWidget(egrn_path, upload_tip="Выписка ЕГРН")
@@ -4838,66 +5690,74 @@ class PlotEditDialog(QWidget):
 
                 det_lay.addLayout(docs_box)
 
-                # Удалить контакт
-                del_row = QHBoxLayout()
-                del_row.setContentsMargins(0, 6, 0, 0)
-                btn_del_contact = QPushButton("Удалить контакт")
-                btn_del_contact.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn_del_contact.setStyleSheet(
-                    "QPushButton{background:transparent;color:#DC2626;border:1px solid #FCA5A5;"
-                    "border-radius:6px;padding:4px 10px;font-size:11px;}"
-                    "QPushButton:hover{background:#FEF2F2;}")
-                btn_del_contact.clicked.connect(lambda _, i=row_idx: self._delete_contact(i))
-                del_row.addWidget(btn_del_contact)
-                del_row.addStretch()
-                det_lay.addLayout(del_row)
-
                 card_vl.addWidget(det)
 
-                # Сохраняем ссылки на поля для auto-save при схлопывании
-                self._contact_input_refs[row_idx] = (inp_name, inp_phone, inp_email,
+                # Сохраняем ссылки на поля для явного сохранения/сравнения
+                ctx.contact_input_refs[row_idx] = (inp_name, inp_phone, inp_email,
                                                  opd_w, egrn_w, mem_w)
+                # Снимок «уже сохранённого» состояния — только при первом
+                # разворачивании; на повторных перерисовках (см. _pending_
+                # contact_overrides) базу для сравнения трогать нельзя, иначе
+                # несохранённая правка перестанет считаться несохранённой.
+                if row_idx not in ctx.contact_snapshots:
+                    ctx.contact_snapshots[row_idx] = {
+                        "name": ownership.owner_name(o) if isinstance(o, dict) else "",
+                        "phone": (o.get("phone", "") if isinstance(o, dict) else "").strip(),
+                        "email": (o.get("email", "") if isinstance(o, dict) else "").strip(),
+                        "opd_doc": o.get("opd_doc", "") if isinstance(o, dict) else "",
+                        "egrn_doc": o.get("egrn_doc", "") if isinstance(o, dict) else "",
+                        "member_doc": o.get("member_doc", "") if isinstance(o, dict) else "",
+                    }
 
             # ── Обработчики ────────────────────────────────────────────
-            # Клик по заголовку: toggle
-            hdr.mouseReleaseEvent = lambda event, i=row_idx: self._toggle_contact_detail(i) if event.button() == Qt.MouseButton.LeftButton else None
+            # Клик по заголовку (фону, не по кнопке «Сохранить»): попытка
+            # закрыть карточку — с диалогом, если есть несохранённые правки.
+            hdr.mouseReleaseEvent = (
+                lambda event, i=row_idx, c=ctx: self._toggle_contact_detail(c, i)
+                if event.button() == Qt.MouseButton.LeftButton else None)
 
-            # Клик по карандашу: аналогичный тоггл
-            btn_edit.clicked.connect(lambda _, i=row_idx: self._toggle_contact_detail(i))
-
-            self._active_preview_lay.addWidget(card)
+            ctx.preview_lay.addWidget(card)
 
         if not shown:
             empty_lbl = QLabel("(нет лиц)")
             empty_lbl.setStyleSheet(
                 "font-size:12px; color:#9CA3AF; background:transparent;")
-            self._active_preview_lay.addWidget(empty_lbl)
+            ctx.preview_lay.addWidget(empty_lbl)
 
         if has_more:
-            self._btn_show_all.setVisible(True)
-            self._btn_show_all.setText(
-                "Свернуть" if self._contacts_expanded else "Показать все")
+            ctx.show_all_row.setVisible(True)
+            ctx.show_all_lbl.setText(
+                "Свернуть" if ctx.contacts_expanded else "Показать всех")
+            ctx.show_all_arrow.setText(
+                chr(0xE5CE) if ctx.contacts_expanded else chr(0xE5CF))
         else:
-            self._btn_show_all.setVisible(False)
-            self._contacts_expanded = False
+            ctx.show_all_row.setVisible(False)
+            ctx.contacts_expanded = False
 
-    def _toggle_contact_detail(self, idx: int):
-        """Тоггл раскрытия контакта. Открыт → auto-save + закрыть. Закрыт → открыть.
-        Развёрнутым может быть только один контакт: при открытии нового все
-        остальные автоматически сохраняются и сворачиваются. Если сохранение
-        заблокировано валидацией (пустое ФИО при заполненных прочих полях) —
-        переключение отменяется, фокус остаётся на невалидном контакте."""
-        if idx in self._expanded_contacts:
-            self._save_and_collapse(idx)
+    def _toggle_contact_detail(self, ctx: "_GroupCardCtx", idx: int):
+        """Тоггл раскрытия контакта. Открыт → попытка закрыть (см.
+        _attempt_close_contact — если есть несохранённые правки, спросит
+        через диалог; явное сохранение — отдельная кнопка «Сохранить» в
+        шапке карточки). Закрыт → открыть.
+
+        Развёрнутым может быть только один контакт СРАЗУ ПО ВСЕЙ ПАНЕЛИ
+        (активная + все архивные группы): при открытии нового все остальные
+        (в т.ч. в других карточках) сначала пытаются закрыться тем же путём.
+        Если пользователь отменил закрытие (в диалоге или из-за валидации) —
+        переключение отменяется, старая карточка остаётся открытой."""
+        if idx in ctx.expanded_contacts:
+            self._attempt_close_contact(ctx, idx)
             return
-        for other_idx in list(self._expanded_contacts):
-            if not self._save_and_collapse(other_idx):
-                return
-        self._expanded_contacts.add(idx)
-        self._refresh_contacts_preview(
-            ownership.group_owners(self._active_group))
+        for other_ctx in self._all_card_ctxs():
+            for other_idx in list(other_ctx.expanded_contacts):
+                if other_ctx is ctx and other_idx == idx:
+                    continue
+                if not self._attempt_close_contact(other_ctx, other_idx):
+                    return
+        ctx.expanded_contacts.add(idx)
+        self._refresh_contacts_preview(ctx)
 
-    def _save_and_collapse(self, idx: int) -> bool:
+    def _save_and_collapse(self, ctx: "_GroupCardCtx", idx: int) -> bool:
         """Сохраняет поля развёрнутого контакта idx и сворачивает его.
         Возвращает False, если сворачивание заблокировано валидацией —
         в этом случае контакт остаётся развёрнутым.
@@ -4905,13 +5765,36 @@ class PlotEditDialog(QWidget):
         Пустое ФИО не сохраняется: если контакт при этом совсем пустой
         (ни телефона, ни email, ни документов) — он тихо удаляется как
         неначатый черновик. Если данные всё же есть — карточка остаётся
-        открытой, а поле ФИО подсвечивается как обязательное."""
-        refs = self._contact_input_refs.get(idx)
+        открытой, а поле ФИО подсвечивается как обязательное.
+
+        ФИО, совпадающее (без учёта регистра/пробелов) с другим контактом
+        этой же группы, тоже блокирует сохранение — защита от дублей."""
+        refs = ctx.contact_input_refs.get(idx)
         if not refs:
-            self._expanded_contacts.discard(idx)
+            ctx.expanded_contacts.discard(idx)
+            ctx.contact_snapshots.pop(idx, None)
             return True
         inp_name, inp_phone, inp_email, opd_w, egrn_w, mem_w = refs
         name = inp_name.text().strip()
+        if name:
+            owners = ownership.group_owners(ctx.group)
+            is_dup = any(
+                j != idx and isinstance(ow, dict)
+                and people_reg.norm_name(ownership.owner_name(ow)) == people_reg.norm_name(name)
+                for j, ow in enumerate(owners))
+            if is_dup:
+                inp_name.setStyleSheet(_INPUT_ERROR_SS)
+                inp_name.setFocus()
+
+                def _clear_dup_err(_t="", w=inp_name):
+                    w.setStyleSheet(_INPUT_SS)
+                    try:
+                        w.textChanged.disconnect(_clear_dup_err)
+                    except (TypeError, RuntimeError):
+                        pass
+
+                inp_name.textChanged.connect(_clear_dup_err)
+                return False
         if not name:
             has_other_data = bool(
                 inp_phone.text().strip() or inp_email.text().strip()
@@ -4929,18 +5812,20 @@ class PlotEditDialog(QWidget):
 
                 inp_name.textChanged.connect(_clear_err)
                 return False
-            self._contact_input_refs.pop(idx, None)
-            self._expanded_contacts.discard(idx)
-            self._delete_contact_silently(idx)
+            ctx.contact_input_refs.pop(idx, None)
+            ctx.contact_snapshots.pop(idx, None)
+            ctx.expanded_contacts.discard(idx)
+            self._delete_contact_silently(ctx, idx)
             return True
-        self._contact_input_refs.pop(idx, None)
-        self._expanded_contacts.discard(idx)
+        ctx.contact_input_refs.pop(idx, None)
+        ctx.contact_snapshots.pop(idx, None)
+        ctx.expanded_contacts.discard(idx)
         self._save_inline_contact(
-            idx, name, inp_phone.text(), inp_email.text(),
+            ctx, idx, name, inp_phone.text(), inp_email.text(),
             opd_w.get_path(), egrn_w.get_path(), mem_w.get_path())
         return True
 
-    def _set_inline_role(self, owner: dict, role_key: str,
+    def _set_inline_role(self, ctx: "_GroupCardCtx", owner: dict, role_key: str,
                          tags: list[tuple[str, QPushButton]], star_btn: QPushButton):
         """Устанавливает роль контакта (radio-логика) и обновляет вид in-place."""
         if not isinstance(owner, dict):
@@ -4961,75 +5846,136 @@ class PlotEditDialog(QWidget):
             f"padding:0;color:{'#07414F' if is_primary else role_fg};}}")
         # Обновить обязательность документов для развёрнутой карточки
         idx = None
-        owners = self._active_group.get("owners", []) or []
+        owners = ctx.group.get("owners", []) or []
         for i, o in enumerate(owners):
             if o is owner:
                 idx = i
                 break
         if idx is not None:
-            refs = self._contact_input_refs.get(idx)
+            refs = ctx.contact_input_refs.get(idx)
             if refs and len(refs) == 6:
                 _req = _DOC_REQUIRED[role_key]
                 refs[3].set_required(_req["opd"])
                 refs[4].set_required(_req["egrn"])
                 refs[5].set_required(_req["member"])
 
-    def _set_inline_primary(self, idx: int):
+    def _set_inline_primary(self, ctx: "_GroupCardCtx", idx: int):
         """Делает контакт по индексу избранным (is_visible=True), остальные — нет."""
-        owners = self._active_group.get("owners", []) or []
+        owners = ctx.group.get("owners", []) or []
         for i, o in enumerate(owners):
             if isinstance(o, dict):
                 o["is_visible"] = (i == idx)
         self._group_dirty = True
-        # Обновить ФИО в шапке активной группы
+        # Обновить ФИО в шапке группы
         main = owners[idx] if 0 <= idx < len(owners) else None
-        self._active_name_lbl.setText(
+        ctx.name_lbl.setText(
             ownership.owner_name(main) if isinstance(main, dict) else "(нет лиц)")
-        self._refresh_contacts_preview(owners)
+        self._refresh_contacts_preview(ctx)
 
-    def _delete_contact_silently(self, idx: int):
+    def _delete_contact_silently(self, ctx: "_GroupCardCtx", idx: int):
         """Удаляет контакт по индексу без диалога подтверждения
-        (используется для автосброса незаполненного черновика)."""
-        owners = self._active_group.get("owners", []) or []
+        (используется для автосброса незаполненного черновика).
+
+        Если удалённый был избранным (или после удаления остался ровно один
+        контакт) — новый избранный назначается в _refresh_group_card
+        (см. _ensure_single_primary)."""
+        owners = ctx.group.get("owners", []) or []
         if idx < 0 or idx >= len(owners):
             return
-        o = owners[idx]
-        was_primary = isinstance(o, dict) and bool(o.get("is_visible"))
         owners.pop(idx)
-        if was_primary and owners and isinstance(owners[0], dict):
-            owners[0]["is_visible"] = True
         self._group_dirty = True
-        self._expanded_contacts.clear()
-        self._contact_input_refs.clear()
-        self._refresh_active_card()
+        ctx.expanded_contacts.clear()
+        ctx.contact_input_refs.clear()
+        ctx.contact_snapshots.clear()
+        self._refresh_group_card(ctx)
         self._update_save_state()
 
-    def _delete_contact(self, idx: int):
-        """Удаляет контакт по индексу — с подтверждением."""
-        owners = self._active_group.get("owners", []) or []
+    def _remove_contact_from_list(self, ctx: "_GroupCardCtx", idx: int):
+        """Убирает контакт из списка ЭТОЙ группы — с подтверждением, но без
+        удаления чего-либо: сам человек и его документы (в т.ч. ОПД и заявление
+        в СНТ, закэшированные в реестре людей) не затрагиваются и остаются
+        доступны для повторного добавления. В отличие от _delete_contact —
+        необратимой операции."""
+        owners = ctx.group.get("owners", []) or []
         if idx < 0 or idx >= len(owners):
             return
         o = owners[idx]
         name = ownership.owner_name(o) if isinstance(o, dict) else ""
         confirmed = _ConfirmDialog.confirm(
             self,
-            f"Удалить контакт «{name}»?" if name else "Удалить этот контакт?",
-            "Данные контакта и прикреплённые документы будут удалены.",
+            f"Убрать «{name}» из списка?" if name else "Убрать этот контакт из списка?",
+            "Контакт останется в реестре людей — его данные и документы "
+            "не удаляются, его можно будет добавить снова.",
+            confirm_text="Убрать")
+        if not confirmed:
+            return
+        self._delete_contact_silently(ctx, idx)
+
+    def _delete_contact(self, ctx: "_GroupCardCtx", idx: int):
+        """Полностью и безвозвратно удаляет человека — с подтверждением.
+
+        Убирает его отовсюду: из списка ЭТОЙ группы, из реестра людей, и (через
+        сигнал personDeleted) со ВСЕХ остальных участков, где он указан —
+        вместе со всеми его документами (ОПД, заявление в СНТ — они одни на
+        человека; и Выписками ЕГРН — они у каждого участка свои, поэтому
+        удаляются по одной на каждом участке, включая этот).
+
+        Если контакт ещё не сохранён (нет person_id — например, только что
+        добавленный пустой черновик), в реестре и на других участках удалять
+        нечего — просто убирается запись на этом участке."""
+        owners = ctx.group.get("owners", []) or []
+        if idx < 0 or idx >= len(owners):
+            return
+        o = owners[idx]
+        if not isinstance(o, dict):
+            o = {}
+        name = ownership.owner_name(o)
+        confirmed = _ConfirmDialog.confirm(
+            self,
+            f"Удалить «{name}» полностью?" if name else "Удалить этот контакт?",
+            "Человек и все его документы (ОПД, заявление в СНТ, выписки ЕГРН "
+            "на всех участках) будут удалены безвозвратно.",
             confirm_text="Да, удалить")
         if not confirmed:
             return
-        self._delete_contact_silently(idx)
+        person_id = o.get("person_id")
+        person = people_reg.get(self._people, person_id) if person_id else None
+        if person:
+            for field in ("opd_doc", "member_doc"):
+                path = person.get(field, "")
+                if path:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            self._people[:] = [p for p in self._people if p is not person]
+            try:
+                people_reg.save_people(self._people)
+            except Exception:
+                pass
+        egrn_path = o.get("egrn_doc", "")
+        if egrn_path:
+            try:
+                os.remove(egrn_path)
+            except OSError:
+                pass
+        self._delete_contact_silently(ctx, idx)
+        if person_id:
+            self.personDeleted.emit(person_id)
 
-    def _on_add_contact(self):
+    def _on_add_contact(self, ctx: "_GroupCardCtx"):
         """Добавляет пустой контакт и сразу открывает его для заполнения."""
-        owners = self._active_group.setdefault("owners", [])
+        if not self._confirm_pending_contact_edits():
+            return
+        owners = ctx.group.setdefault("owners", [])
         owners.append(_make_owner("", is_owner=False))
         self._group_dirty = True
-        self._expanded_contacts.clear()
-        self._contact_input_refs.clear()
-        self._expanded_contacts.add(len(owners) - 1)
-        self._contacts_expanded = True
-        self._refresh_active_card()
+        ctx.expanded_contacts.clear()
+        ctx.contact_input_refs.clear()
+        ctx.contact_snapshots.clear()
+        ctx.expanded_contacts.add(len(owners) - 1)
+        ctx.contacts_expanded = True
+        self._refresh_group_card(ctx)
         self._update_save_state()
 
     def _on_inline_name_committed(self, owner, inp_name: "QLineEdit",
@@ -5039,31 +5985,60 @@ class PlotEditDialog(QWidget):
         реестра и подставить пустые телефон/email/ОПД/заявление из реестра
         (переиспользование). ЕГРН не подставляется — она привязана к
         конкретному объекту, а не к человеку. Аналог _on_name_committed
-        для старого редактора."""
+        для старого редактора.
+
+        Если ФИО совпало с ДРУГИМ существующим человеком в реестре — переключаем
+        привязку (сначала стираем то, что было автоподставлено от ПРЕЖНЕГО
+        человека, сравнивая с его данными в реестре, чтобы не затереть то, что
+        пользователь ввёл вручную).
+
+        Если совпадений нет вообще — считаем, что это ТОТ ЖЕ человек, которому
+        просто исправляют ФИО (опечатка и т.п.): person_id НЕ трогаем, а само
+        переименование запишется в его запись реестра при сохранении карточки
+        (_save_inline_contact). Раньше здесь безусловно отвязывали person_id
+        при любом несовпадении — из-за этого правка ФИО существующего контакта
+        создавала в реестре ДУБЛЬ вместо переименования."""
         if not isinstance(owner, dict):
             return
         name = inp_name.text().strip()
-        person = people_reg.find_by_name(self._people, name) if name else None
-        if person:
-            owner["person_id"] = person.get("id")
-            if not inp_phone.text().strip() and person.get("phone"):
-                inp_phone.setText(_normalize_phone(person["phone"]))
-            if not inp_email.text().strip() and person.get("email"):
-                inp_email.setText(person.get("email", ""))
-            if not opd_w.get_path() and person.get("opd_doc"):
-                opd_w.set_path(person["opd_doc"])
-                owner["opd_doc"] = person["opd_doc"]
-            if not mem_w.get_path() and person.get("member_doc"):
-                mem_w.set_path(person["member_doc"])
-                owner["member_doc"] = person["member_doc"]
-        else:
+        if not name:
             owner.pop("person_id", None)
+            return
+        new_person = people_reg.find_by_name(self._people, name)
+        old_person_id = owner.get("person_id")
+        new_person_id = new_person.get("id") if new_person else None
+        if new_person_id and new_person_id != old_person_id:
+            old_person = people_reg.get(self._people, old_person_id)
+            if old_person:
+                if (inp_phone.text().strip() and old_person.get("phone")
+                        and _normalize_phone(old_person["phone"]) == inp_phone.text().strip()):
+                    inp_phone.clear()
+                if (inp_email.text().strip() and old_person.get("email")
+                        and old_person["email"] == inp_email.text().strip()):
+                    inp_email.clear()
+                if opd_w.get_path() and opd_w.get_path() == old_person.get("opd_doc"):
+                    opd_w.delete_path()
+                    owner.pop("opd_doc", None)
+                if mem_w.get_path() and mem_w.get_path() == old_person.get("member_doc"):
+                    mem_w.delete_path()
+                    owner.pop("member_doc", None)
+            owner["person_id"] = new_person_id
+            if not inp_phone.text().strip() and new_person.get("phone"):
+                inp_phone.setText(_normalize_phone(new_person["phone"]))
+            if not inp_email.text().strip() and new_person.get("email"):
+                inp_email.setText(new_person.get("email", ""))
+            if not opd_w.get_path() and new_person.get("opd_doc"):
+                opd_w.set_path(new_person["opd_doc"])
+                owner["opd_doc"] = new_person["opd_doc"]
+            if not mem_w.get_path() and new_person.get("member_doc"):
+                mem_w.set_path(new_person["member_doc"])
+                owner["member_doc"] = new_person["member_doc"]
 
-    def _save_inline_contact(self, idx: int, name: str, phone: str, email: str,
-                             opd_doc: str = "", egrn_doc: str = "",
+    def _save_inline_contact(self, ctx: "_GroupCardCtx", idx: int, name: str, phone: str,
+                             email: str, opd_doc: str = "", egrn_doc: str = "",
                              member_doc: str = ""):
         """Сохраняет отредактированные ФИО/телефон/email контакта по индексу."""
-        owners = self._active_group.get("owners", []) or []
+        owners = ctx.group.get("owners", []) or []
         if idx < 0 or idx >= len(owners):
             return
         o = owners[idx]
@@ -5072,6 +6047,12 @@ class PlotEditDialog(QWidget):
         name = name.strip()
         phone = phone.strip()
         email = email.strip()
+        # Значения ДО перезаписи — чтобы отличить «поле было и его явно очистили»
+        # от «поле изначально пустое», см. ниже сброс кэша реестра.
+        prev_phone = str(o.get("phone", ""))
+        prev_email = str(o.get("email", ""))
+        prev_opd = str(o.get("opd_doc", ""))
+        prev_member = str(o.get("member_doc", ""))
         o["name"] = name
         o["phone"] = phone
         o["email"] = email
@@ -5090,14 +6071,41 @@ class PlotEditDialog(QWidget):
             registry_changed = True
         if person:
             o["person_id"] = person["id"]
-            # ОПД и заявление в СНТ не зависят от участка — кэшируем в
-            # реестре, чтобы подтягивать их для этого человека где угодно
-            # (в отличие от ЕГРН, привязанной к конкретному объекту).
+            # ФИО тоже не зависит от участка: если это переименование того же
+            # человека (person_id не менялся, см. _on_inline_name_committed),
+            # проносим новое имя и в реестр — иначе его старые появления на
+            # других участках продолжат показывать старое ФИО.
+            if name and person.get("name") != name:
+                person["name"] = name
+                registry_changed = True
+            # Телефон/email/ОПД/заявление в СНТ не зависят от участка —
+            # кэшируем в реестре, чтобы подтягивать их для этого человека
+            # где угодно (в отличие от ЕГРН, привязанной к конкретному объекту).
+            if phone and person.get("phone") != phone:
+                person["phone"] = phone
+                registry_changed = True
+            elif not phone and prev_phone and person.get("phone") == prev_phone:
+                # Явно очистили ранее заполненное поле — забываем и в реестре,
+                # иначе оно тут же вернётся при следующем выборе этого ФИО.
+                person.pop("phone", None)
+                registry_changed = True
+            if email and person.get("email") != email:
+                person["email"] = email
+                registry_changed = True
+            elif not email and prev_email and person.get("email") == prev_email:
+                person.pop("email", None)
+                registry_changed = True
             if opd_doc and person.get("opd_doc") != opd_doc:
                 person["opd_doc"] = opd_doc
                 registry_changed = True
+            elif not opd_doc and prev_opd and person.get("opd_doc") == prev_opd:
+                person.pop("opd_doc", None)
+                registry_changed = True
             if member_doc and person.get("member_doc") != member_doc:
                 person["member_doc"] = member_doc
+                registry_changed = True
+            elif not member_doc and prev_member and person.get("member_doc") == prev_member:
+                person.pop("member_doc", None)
                 registry_changed = True
         elif "person_id" in o:
             del o["person_id"]
@@ -5122,11 +6130,14 @@ class PlotEditDialog(QWidget):
         self._group_dirty = True
         # Обновить ФИО в шапке, если это избранный контакт
         if o.get("is_visible"):
-            self._active_name_lbl.setText(name or "(нет имени)")
-        self._refresh_contacts_preview(owners)
+            ctx.name_lbl.setText(name or "(нет имени)")
+        self._refresh_contacts_preview(ctx)
         self._update_save_state()
 
     def _refresh_prev_section(self):
+        """Перестраивает секцию «Предыдущие группы»: для каждой архивной
+        группы создаёт рабочую копию (см. докстринг класса о «Отмена») и
+        полноценный блок тем же билдером, что и активная группа."""
         archived = ownership.archived_groups({"groups": self._groups})
         self._prev_section.setVisible(bool(archived))
         # Очищаем и перестраиваем все карточки предыдущих групп
@@ -5134,23 +6145,34 @@ class PlotEditDialog(QWidget):
             item = self._prev_card_lyt.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self._archived_cards = []
         if not archived:
             self._prev_scroll.setMinimumHeight(0)
             self._prev_scroll.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX — без лимита
             return
-        first_card = None
+        first_block = None
         for i, g in enumerate(archived):
-            c = self._make_archived_preview(g)
-            self._prev_card_lyt.addWidget(c)
+            copy = dict(g)
+            copy["owners"] = list(g.get("owners", []) or [])
+            ctx = _GroupCardCtx(copy, is_active=False, orig=g)
+            block = QWidget()
+            block.setStyleSheet("background:transparent;")
+            block_lyt = QVBoxLayout(block)
+            block_lyt.setContentsMargins(0, 0, 0, 0)
+            block_lyt.setSpacing(4)
+            self._build_group_card(ctx, block_lyt, "Архивная группа")
+            self._refresh_group_card(ctx)
+            self._prev_card_lyt.addWidget(block)
+            self._archived_cards.append(ctx)
             if i == 0:
-                first_card = c
+                first_block = block
         # Фиксируем высоту области под одну карточку (+ «peek», если групп несколько),
         # чтобы минимальный размер окна резервировал место на полную предыдущую группу,
         # а лишние группы уходили под скролл. Сначала синхронно по sizeHint (чтобы окно
         # открылось нужной высоты), затем уточняем по фактической высоте после раскладки.
-        self._apply_prev_height(first_card.sizeHint().height(), len(archived))
+        self._apply_prev_height(first_block.sizeHint().height(), len(archived))
         QTimer.singleShot(
-            0, lambda c=first_card, n=len(archived): self._refine_prev_height(c, n))
+            0, lambda b=first_block, n=len(archived): self._refine_prev_height(b, n))
 
     def _apply_prev_height(self, one_h: int, count: int):
         target = max(int(one_h), 130)  # «пол» на случай заниженного sizeHint до показа
@@ -5159,9 +6181,9 @@ class PlotEditDialog(QWidget):
         self._prev_scroll.setMinimumHeight(target)
         self._prev_scroll.setMaximumHeight(target)
 
-    def _refine_prev_height(self, first_card, count: int):
+    def _refine_prev_height(self, first_block, count: int):
         try:
-            one_h = max(first_card.sizeHint().height(), first_card.height())
+            one_h = max(first_block.sizeHint().height(), first_block.height())
         except RuntimeError:
             return  # карточка уже удалена (повторный refresh)
         self._apply_prev_height(one_h, count)
@@ -5170,125 +6192,62 @@ class PlotEditDialog(QWidget):
         if self.height() < need:
             self.resize(self.width(), need)
 
-    def _make_archived_preview(self, group: dict) -> QFrame:
-        """Полная карточка предыдущей группы — как активная, с «Списком контактов»."""
-        owners = ownership.group_owners(group)
-
-        card = QFrame()
-        card.setObjectName("prevCard")
-        card.setStyleSheet(
-            "QFrame#prevCard{background:#F8F9FA;border:1px solid #E5E7EB;border-radius:8px;}")
-        card_lay = QHBoxLayout(card)
-        card_lay.setContentsMargins(14, 12, 14, 12)
-        card_lay.setSpacing(14)
-
-        # ── Левая часть: период + ФИО + счётчики + отсутствующие документы ──
-        left_w = QWidget()
-        left_w.setStyleSheet("background:transparent;")
-        left_lyt = QVBoxLayout(left_w)
-        left_lyt.setContentsMargins(0, 0, 0, 0)
-        left_lyt.setSpacing(4)
-
-        since = ownership.group_since(group)
-        until = ownership.group_until(group)
-        since_txt = since.strftime("%d.%m.%Y") if since else "начало"
-        until_txt = until.strftime("%d.%m.%Y") if until else "—"
-        period_lbl = QLabel(f"Активна с {since_txt} по {until_txt}")
-        period_lbl.setStyleSheet("font-size:11px; color:#9CA3AF; background:transparent;")
-        left_lyt.addWidget(period_lbl)
-
-        main = next((o for o in owners if isinstance(o, dict) and o.get("is_visible")),
-                    owners[0] if owners else None)
-        name = ownership.owner_name(main) if main else "(нет лиц)"
-        name_lbl = QLabel(name)
-        name_lbl.setStyleSheet(
-            "font-size:14px; font-weight:700; color:#07414F; background:transparent;")
-        name_lbl.setWordWrap(True)
-        left_lyt.addWidget(name_lbl)
-
-        n_members = sum(1 for o in owners if isinstance(o, dict) and o.get("is_member"))
-        if n_members:
-            counts_lbl = QLabel(f"Члены СНТ: {n_members}")
-            counts_lbl.setStyleSheet("font-size:12px; color:#6B7280; background:transparent;")
-            left_lyt.addWidget(counts_lbl)
-
-        missing = self._missing_docs_lines(owners)
-        if missing:
-            sep = QFrame()
-            sep.setFrameShape(QFrame.Shape.HLine)
-            sep.setStyleSheet("color:#E5E7EB; background:#E5E7EB; max-height:1px;")
-            left_lyt.addWidget(sep)
-            missing_lbl = QLabel("\n".join(missing))
-            missing_lbl.setStyleSheet("font-size:12px; color:#9CA3AF; background:transparent;")
-            left_lyt.addWidget(missing_lbl)
-        left_lyt.addStretch()
-        card_lay.addWidget(left_w, stretch=1)
-
-        # ── Правая часть: долг на дату закрытия + «Список контактов» ──
-        right_w = QWidget()
-        right_w.setStyleSheet("background:transparent;")
-        right_w.setFixedWidth(220)
-        right_lyt = QVBoxLayout(right_w)
-        right_lyt.setContentsMargins(0, 0, 0, 0)
-        right_lyt.setSpacing(8)
-
-        from core.utils import fmt_money
-        debt_v = (group.get("debt_at_close") or {}).get("vznosy")
-        debt_e = (group.get("debt_at_close") or {}).get("energy")
-        debt_card = QFrame()
-        debt_card.setStyleSheet(
-            "QFrame{background:#FFFFFF;border:1px solid #E5E7EB;border-radius:6px;}")
-        debt_lay = QVBoxLayout(debt_card)
-        debt_lay.setContentsMargins(10, 8, 10, 8)
-        debt_lay.setSpacing(4)
-        debt_title = QLabel("Долг на дату закрытия")
-        debt_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        debt_title.setStyleSheet(
-            "font-size:11px; font-weight:600; color:#6B7280; background:transparent;")
-        debt_lay.addWidget(debt_title)
-        for cap, val in (("ЧВ:", debt_v), ("Электр.:", debt_e)):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(cap))
-            vlbl = QLabel(fmt_money(val) if val is not None else "—")
-            vlbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            vlbl.setStyleSheet("font-size:12px; font-weight:600; background:transparent;")
-            row.addWidget(vlbl, stretch=1)
-            debt_lay.addLayout(row)
-        right_lyt.addWidget(debt_card)
-
-        btn_contacts = QPushButton("Список контактов")
-        btn_contacts.setObjectName("btnSecondary")
-        btn_contacts.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_contacts.clicked.connect(lambda _, g=group: self._on_edit_prev_group(g))
-        right_lyt.addWidget(btn_contacts)
-        right_lyt.addStretch()
-        card_lay.addWidget(right_w)
-
-        return card
-
-    def _on_edit_prev_group(self, group: dict):
-        """Редактирование состава предыдущей (архивной) группы — под-панель."""
-        self._open_contacts(("prev", group), group, is_new=False)
-
     def _on_edit_active_group(self):
         """Открывает редактор контактов (под-панель)."""
         self._open_contacts(("active", None), self._active_group, is_new=False)
 
-    def _on_toggle_contacts_full(self):
-        """Переключает превью (3) ↔ полный список."""
-        self._contacts_expanded = not self._contacts_expanded
-        self._refresh_contacts_preview(
-            ownership.group_owners(self._active_group))
+    def _on_toggle_contacts_full(self, ctx: "_GroupCardCtx"):
+        """Переключает превью (3) ↔ полный список.
+
+        Свёртывание в превью может унести за пределы видимости открытую
+        карточку (если она за пределами первых трёх) — тогда её виджеты будут
+        уничтожены и восстановить несохранённый ввод будет неоткуда, поэтому
+        сначала спрашиваем через тот же диалог, что и при закрытии участка."""
+        if not self._confirm_pending_contact_edits():
+            return
+        ctx.contacts_expanded = not ctx.contacts_expanded
+        self._refresh_contacts_preview(ctx)
 
     def _on_archive_active_group(self):
+        """«Создать новую группу»: текущая активная группа уходит в архив,
+        на её месте — пустая новая, сразу редактируемая инлайн в этой же
+        карточке (как активная группа при создании нового участка) — без
+        перехода на отдельный экран.
+
+        Кнопка неактивна, пока в активной группе нет ни одного лица (см.
+        _refresh_group_card) — проверка ниже оставлена только как защита от
+        рассинхронизации состояния кнопки, без модального предупреждения."""
         if not ownership.group_owners(self._active_group):
-            QMessageBox.warning(self, "Нет лиц",
-                                "В активной группе нет ни одного лица. "
-                                "Добавьте хотя бы одно перед архивированием.")
             return
-        # Дата закрытия текущей = «Дата начала группы» новой (укажет в под-панели).
-        new_active = {"since": date.today().isoformat(), "until": None, "owners": []}
-        self._open_contacts(("replace", None), new_active, is_new=True)
+        confirmed, contact_name = _NewGroupDialog.ask(
+            self, "Создать новую группу?",
+            "Текущая активная группа будет перемещена в архив (с долгом на "
+            "сегодняшний день). Укажите ФИО первого контакта новой группы.",
+            self._people)
+        if not confirmed:
+            return
+        # Дата закрытия текущей = дата начала новой (сегодня). contact_name
+        # гарантированно не пуст — кнопка «Создать» неактивна при пустом ФИО
+        # (см. _NewGroupDialog), поэтому владелец здесь есть всегда.
+        owner = _make_owner(contact_name, is_owner=False)
+        owner["person_id"] = self._link_or_create_person(contact_name)
+        new_active = {"since": date.today().isoformat(), "until": None, "owners": [owner]}
+        self._apply_replace(new_active)
+
+    def _link_or_create_person(self, name: str) -> str:
+        """Находит человека в реестре по ФИО или регистрирует нового —
+        та же логика привязки, что и при инлайн-сохранении контакта
+        (см. _save_inline_contact), чтобы имя сразу попало в реестр людей
+        (автодополнение/переиспользование на других участках)."""
+        person = people_reg.find_by_name(self._people, name)
+        if person is None:
+            person = people_reg.create_person(name, "", "")
+            self._people.append(person)
+            try:
+                people_reg.save_people(self._people)
+            except Exception:
+                pass
+        return person["id"]
 
     # ── Под-панель «Список контактов» (Фаза 2) ───────────────────────────
     def _open_contacts(self, ctx, group: dict, is_new: bool):
@@ -5317,17 +6276,10 @@ class PlotEditDialog(QWidget):
             kind = ctx[0]
             if kind == "active":
                 self._active_group = result
+                self._active_ctx.group = result
                 self._group_dirty = True
-                self._refresh_active_card()
+                self._refresh_group_card(self._active_ctx)
                 self._update_save_state()
-            elif kind == "prev":
-                group = ctx[1]
-                for i, g in enumerate(self._groups):
-                    if g is group:
-                        self._groups[i] = result
-                        break
-                self._group_dirty = True
-                self._refresh_prev_section()
             elif kind == "replace":
                 self._apply_replace(result)
         # Вернуться к детали, убрать панель контактов
@@ -5341,7 +6293,7 @@ class PlotEditDialog(QWidget):
         self._contacts_ctx = None
 
     def _apply_replace(self, new_active: dict):
-        """Архивирует текущую активную группу и ставит новую (из под-панели)."""
+        """Архивирует текущую активную группу и ставит новую на её место."""
         since_new = ownership.group_since(new_active)
         exit_date = since_new or date.today()
         if since_new is None:
@@ -5359,8 +6311,9 @@ class PlotEditDialog(QWidget):
         updated.append(new_active)
         self._groups = updated
         self._active_group = new_active
+        self._active_ctx.group = new_active
         self._group_dirty = True
-        self._refresh_active_card()
+        self._refresh_group_card(self._active_ctx)
         self._refresh_prev_section()
         self._update_save_state()
 
@@ -5398,12 +6351,22 @@ class PlotEditDialog(QWidget):
         current = self.inp_num.text().strip()
         return bool(current and current in self._existing_nums)
 
+    def _has_named_owner(self) -> bool:
+        """Есть ли в активной группе хотя бы один контакт с непустым ФИО.
+
+        Отличается от простой проверки «список owners не пуст»: пустой
+        черновик, добавленный кнопкой «Добавить контакт», но так и не
+        заполненный/сохранённый, тоже попадает в owners (см. _on_add_contact) —
+        без этой проверки участок можно было создать с таким «пустым»
+        контактом, который выглядит как сохранённый, а на деле не заполнен."""
+        return any(isinstance(o, dict) and ownership.owner_name(o)
+                   for o in ownership.group_owners(self._active_group))
+
     def _update_save_state(self):
         if self._btn_save is None or self._is_edit:
             return
-        has_owners = bool(ownership.group_owners(self._active_group))
         num_ok = bool(self.inp_num.text().strip()) and not self._is_num_taken()
-        ok = has_owners and num_ok
+        ok = self._has_named_owner() and num_ok
         self._btn_save.setEnabled(ok)
         self._btn_save.setCursor(
             Qt.CursorShape.PointingHandCursor if ok else Qt.CursorShape.ArrowCursor)
@@ -5413,6 +6376,11 @@ class PlotEditDialog(QWidget):
 
     def _on_accept(self):
         """Сохранение нового участка (кнопка «Сохранить» в футере)."""
+        # Открытая карточка контакта с несохранёнными правками — сначала
+        # спрашиваем (см. _attempt_close_contact), иначе «Создать» могло
+        # тихо отбросить только что введённые, но не сохранённые ФИО/контакты.
+        if not self._confirm_pending_contact_edits():
+            return
         num = self.inp_num.text().strip()
         if not num:
             QMessageBox.warning(self, "Ошибка", "Укажите номер участка")
@@ -5427,9 +6395,9 @@ class PlotEditDialog(QWidget):
                 QMessageBox.warning(self, "Ошибка",
                                     "Площадь должна быть положительным числом")
                 return
-        if not ownership.group_owners(self._active_group):
+        if not self._has_named_owner():
             QMessageBox.warning(self, "Ошибка",
-                                "В активной группе должно быть хотя бы одно лицо")
+                                "В активной группе должно быть хотя бы одно лицо с заполненным ФИО")
             return
         self._build_result()
         self._finish(True)

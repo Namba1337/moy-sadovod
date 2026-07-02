@@ -48,6 +48,12 @@ def _norm_name(name) -> str:
     return re.sub(r"\s+", " ", str(name or "").strip()).casefold()
 
 
+def norm_name(name) -> str:
+    """Публичная обёртка над ``_norm_name`` — для сравнения ФИО за пределами
+    модуля (например, защита от дублей контактов внутри группы в UI)."""
+    return _norm_name(name)
+
+
 def people_index(people: list) -> dict:
     """{id: person} — для быстрого резолва person_id → запись."""
     return {p["id"]: p for p in (people or [])
