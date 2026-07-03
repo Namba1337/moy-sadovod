@@ -2340,12 +2340,6 @@ def _plot_primary_name(plot: dict) -> str:
     return ownership.owner_name(main) if main else ""
 
 
-def _plot_primary_phone(plot: dict) -> str:
-    """Телефон главного контакта активной группы, либо пусто."""
-    main = _plot_primary_owner(plot)
-    return str(main.get("phone", "")) if isinstance(main, dict) else ""
-
-
 def _short_name(full: str) -> str:
     """«Фамилия Имя Отчество» → «Фамилия И.О.» (для списка)."""
     parts = str(full or "").split()
@@ -2375,14 +2369,15 @@ def _plot_search_names(plot: dict) -> list[str]:
 
 class PlotsListModel(QAbstractListModel):
     """Плоский список участков для QListView. Отрисовкой занимается делегат
-    (читает участок через UserRole / plot_at). Долг — из внешнего кэша."""
+    (читает участок через UserRole / plot_at). Долги — из внешнего кэша."""
 
     PlotRole = Qt.ItemDataRole.UserRole + 1
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rows: list = []
-        self._debt: dict = {}   # num -> float | None (None = нет данных)
+        self._debt: dict = {"vznosy": {}, "energy": {}}
+        self._selected: set[str] = set()   # num → selected
 
     def set_plots(self, plots: list):
         self.beginResetModel()
@@ -2390,7 +2385,7 @@ class PlotsListModel(QAbstractListModel):
         self.endResetModel()
 
     def set_debt_cache(self, debt: dict):
-        self._debt = debt or {}
+        self._debt = debt or {"vznosy": {}, "energy": {}}
         if self._rows:
             self.dataChanged.emit(self.index(0), self.index(len(self._rows) - 1))
 
@@ -2406,11 +2401,48 @@ class PlotsListModel(QAbstractListModel):
                 return i
         return -1
 
-    def debt_text(self, plot: dict) -> str:
-        v = self._debt.get(str(plot.get("num", "")))
+    def _fmt_debt(self, plot: dict, key: str) -> str:
+        v = self._debt.get(key, {}).get(str(plot.get("num", "")))
         if v is None or abs(v) < 0.005:
             return "—"
         return fmt_money(v)
+
+    def vznosy_debt_text(self, plot: dict) -> str:
+        return self._fmt_debt(plot, "vznosy")
+
+    def energy_debt_text(self, plot: dict) -> str:
+        return self._fmt_debt(plot, "energy")
+
+    # -- selection ---------------------------------------------------------- #
+
+    def is_selected(self, plot: dict) -> bool:
+        return str(plot.get("num", "")) in self._selected
+
+    def toggle_selection(self, plot: dict):
+        num = str(plot.get("num", ""))
+        if num in self._selected:
+            self._selected.discard(num)
+        else:
+            self._selected.add(num)
+        row = self.row_of(plot)
+        if row >= 0:
+            idx = self.index(row)
+            self.dataChanged.emit(idx, idx)
+
+    def select_all(self, plots: list):
+        for p in plots:
+            self._selected.add(str(p.get("num", "")))
+        if self._rows:
+            self.dataChanged.emit(self.index(0), self.index(len(self._rows) - 1))
+
+    def deselect_all(self):
+        if self._selected:
+            self._selected.clear()
+            if self._rows:
+                self.dataChanged.emit(self.index(0), self.index(len(self._rows) - 1))
+
+    def get_selected_nums(self) -> set[str]:
+        return set(self._selected)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -2421,19 +2453,79 @@ class PlotsListModel(QAbstractListModel):
 
 
 class _PlotRowDelegate(QStyledItemDelegate):
-    """Чистая строка списка: № (слева) · ФИО · Долг (справа). Без сетки."""
+    """Чистая строка списка: [x] № · ФИО · Членские взносы · Электроэнергия. Без сетки."""
 
     _ROW_H   = 36
+    _CB_W    = 28
     _NUM_W   = 44
-    _PHONE_W = 140
-    _DEBT_W  = 110
+    _VZ_W    = 110
+    _EN_W    = 110
     _PAD     = 14
     _FG_NUM  = QColor("#1F2937")
     _FG_NAME = QColor("#1F2937")
-    _FG_PHONE = QColor("#374151")
     _FG_DEBT = QColor("#374151")
+    _FG_CB   = QColor("#07414F")
+    _FG_CB_OFF = QColor("#C3CAD3")
     _SEL_BG  = QColor("#C9D8E2")
     _HOV_BG  = QColor("#EBF4F6")
+
+    _IC_CHECKED   = chr(0xE834)   # check_box
+    _IC_UNCHECKED = chr(0xE835)   # check_box_outline_blank
+    _IC_FONT_NAME = "Material Symbols Rounded"
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view = view
+        self._hover_idx = QModelIndex()
+        self._fill_tag = QFont.Tag.fromString("FILL")
+        view.viewport().installEventFilter(self)
+
+    def _cb_rect(self, cell_rect: QRect) -> QRect:
+        """Прямоугольник чекбокса внутри строки."""
+        cb_size = 18
+        x = cell_rect.left() + self._PAD
+        y = cell_rect.top() + (cell_rect.height() - cb_size) // 2
+        return QRect(x, y, cb_size, cb_size)
+
+    def _is_cb_hover(self, pos: "QPoint") -> bool:
+        idx = self._view.indexAt(pos)
+        if not idx.isValid():
+            return False
+        return self._cb_rect(self._view.visualRect(idx)).contains(pos)
+
+    def eventFilter(self, obj, event):
+        if obj is self._view.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                pos = event.position().toPoint()
+                new_hover = self._view.indexAt(pos)
+                if new_hover != self._hover_idx:
+                    old = self._hover_idx
+                    self._hover_idx = new_hover
+                    if old.isValid():
+                        self._view.viewport().update(self._view.visualRect(old))
+                    if new_hover.isValid():
+                        self._view.viewport().update(self._view.visualRect(new_hover))
+                if self._is_cb_hover(pos):
+                    self._view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                else:
+                    self._view.viewport().unsetCursor()
+            elif event.type() == QEvent.Type.Leave:
+                if self._hover_idx.isValid():
+                    old = self._hover_idx
+                    self._hover_idx = QModelIndex()
+                    self._view.viewport().update(self._view.visualRect(old))
+                self._view.viewport().unsetCursor()
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    pos = event.position().toPoint()
+                    idx = self._view.indexAt(pos)
+                    if idx.isValid() and self._cb_rect(self._view.visualRect(idx)).contains(pos):
+                        model = idx.model()
+                        plot = model.plot_at(idx.row())
+                        if plot is not None:
+                            model.toggle_selection(plot)
+                            return True
+        return super().eventFilter(obj, event)
 
     def sizeHint(self, option, index):
         return QSize(option.rect.width(), self._ROW_H)
@@ -2455,31 +2547,43 @@ class _PlotRowDelegate(QStyledItemDelegate):
             painter.setBrush(self._SEL_BG if selected else self._HOV_BG)
             painter.drawRoundedRect(QRectF(rect.adjusted(4, 3, -4, -3)), 8, 8)
 
+        # Чекбокс (слева)
+        is_checked = model.is_selected(plot)
+        cb_r = self._cb_rect(rect)
+        f_cb = QFont(self._IC_FONT_NAME)
+        f_cb.setPixelSize(18)
+        f_cb.setVariableAxis(self._fill_tag, 1.0 if is_checked else 0.0)
+        painter.setFont(f_cb)
+        painter.setPen(self._FG_CB if is_checked else self._FG_CB_OFF)
+        painter.drawText(cb_r, Qt.AlignmentFlag.AlignCenter,
+                         self._IC_CHECKED if is_checked else self._IC_UNCHECKED)
+
+        # Сдвигаем весь контент вправо на ширину чекбокса + зазор
+        content_left = rect.left() + self._PAD + self._CB_W
+
         f = QFont(); f.setPixelSize(13)
         painter.setFont(f)
-        # Текст оптически центрируем на 1px выше (AlignVCenter сажает глиф чуть ниже).
         vtop = rect.top() - 1
-        # № (слева)
+        # №
         painter.setPen(self._FG_NUM)
-        num_rect = QRect(rect.left() + self._PAD, vtop, self._NUM_W, rect.height())
+        num_rect = QRect(content_left, vtop, self._NUM_W, rect.height())
         painter.drawText(num_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          str(plot.get("num", "")))
-        # Долг (справа)
-        debt_rect = QRect(rect.right() - self._PAD - self._DEBT_W, vtop,
-                          self._DEBT_W, rect.height())
+        # Электроэнергия (справа)
+        en_rect = QRect(rect.right() - self._PAD - self._EN_W, vtop,
+                        self._EN_W, rect.height())
         painter.setPen(self._FG_DEBT)
-        painter.drawText(debt_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                         model.debt_text(plot))
-        # Телефон (перед долгом; зазор 8 — как spacing капшена)
-        phone_rect = QRect(debt_rect.left() - 8 - self._PHONE_W, vtop,
-                           self._PHONE_W, rect.height())
-        phone = _plot_primary_phone(plot)
-        painter.setPen(self._FG_PHONE)
-        painter.drawText(phone_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                         phone or "—")
-        # ФИО (между № и телефоном)
-        name_left = rect.left() + self._PAD + self._NUM_W + 8
-        name_rect = QRect(name_left, vtop, phone_rect.left() - name_left - 8, rect.height())
+        painter.drawText(en_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                         model.energy_debt_text(plot))
+        # Членские взносы
+        vz_rect = QRect(en_rect.left() - 8 - self._VZ_W, vtop,
+                        self._VZ_W, rect.height())
+        painter.setPen(self._FG_DEBT)
+        painter.drawText(vz_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                         model.vznosy_debt_text(plot))
+        # ФИО (между № и членскими взносами)
+        name_left = content_left + self._NUM_W + 8
+        name_rect = QRect(name_left, vtop, vz_rect.left() - name_left - 8, rect.height())
         name = _short_name(_plot_primary_name(plot)) or "—"
         elided = QFontMetrics(f).elidedText(name, Qt.TextElideMode.ElideRight, name_rect.width())
         painter.setPen(self._FG_NAME)
@@ -2506,7 +2610,7 @@ class PlotsWidget(QWidget):
         self._plots: list = self._load()
         self._df = None                       # выписка — нужна для долга в списке/детали
         self._search_text = ""
-        self._debt_cache: dict = {}           # num -> float | None (долг ЧВ+электро)
+        self._debt_cache: dict = {}           # {"vznosy": {num: float}, "energy": {num: float}}
         self._setup_ui()
         self._rebuild_table()
         # Выровнять заглушку капшена под желоб скроллбара после раскладки
@@ -2517,6 +2621,9 @@ class PlotsWidget(QWidget):
         self._df = df
         self._recompute_debt()
         self.list_model.set_debt_cache(self._debt_cache)
+        self.list_view.viewport().update()
+        self._refresh_master_cb()
+        self._refresh_toolbar()
 
     def _load(self) -> list:
         try:
@@ -2603,7 +2710,7 @@ class PlotsWidget(QWidget):
             b.setFixedSize(32, 32)
             b.setIconSize(QSize(22, 22))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setToolTip(tooltip)
+            b.installEventFilter(_TooltipFilter(tooltip, b))
             b.setStyleSheet(
                 "QPushButton{background:transparent;border:none;border-radius:6px;}"
                 "QPushButton:hover{background:#EBF4F6;}")
@@ -2611,11 +2718,39 @@ class PlotsWidget(QWidget):
             return b
 
         self._btn_import = _hdr_icon_btn("Импорт из Excel", self._import_from_excel)
-        self._btn_import.setIcon(_mat_icon(0xEAF3, 22, color="#9CA3AF"))  # file_open
         list_hdr.addWidget(self._btn_import)
         self._btn_add = _hdr_icon_btn("Добавить участок", self._add_plot)
         list_hdr.addWidget(self._btn_add)
-        self._refresh_add_icon()
+        QTimer.singleShot(0, self._refresh_icons)
+
+        # ── Панель групповых операций ──────────────────────────────────────
+        toolbar = QWidget()
+        toolbar.setStyleSheet("background:transparent;")
+        tb_l = QHBoxLayout(toolbar)
+        tb_l.setContentsMargins(0, 4, 0, 4)
+        tb_l.setSpacing(8)
+        self._selected_lbl = QLabel("")
+        self._selected_lbl.setStyleSheet(
+            "font-size:12px; color:#07414F; background:transparent; font-weight:600;")
+        tb_l.addWidget(self._selected_lbl)
+        tb_l.addStretch()
+        self._btn_bulk_delete = QPushButton()
+        self._btn_bulk_delete.setFixedSize(28, 28)
+        self._btn_bulk_delete.setIconSize(QSize(18, 18))
+        self._btn_bulk_delete.setIcon(_mat_icon(0xE92B, 18, color="#DC2626"))  # delete
+        self._btn_bulk_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_bulk_delete.setEnabled(False)
+        self._btn_bulk_delete.clicked.connect(self._bulk_delete)
+        self._btn_bulk_delete.installEventFilter(
+            _TooltipFilter("Удалить выбранные", self._btn_bulk_delete))
+        _SS_TB_BTN = (
+            "QPushButton{background:transparent;border:none;border-radius:6px;}"
+            "QPushButton:hover{background:#FEF2F2;}"
+            "QPushButton:disabled{background:transparent;}")
+        self._btn_bulk_delete.setStyleSheet(_SS_TB_BTN)
+        tb_l.addWidget(self._btn_bulk_delete)
+        self._toolbar = toolbar
+        self._toolbar.setVisible(False)
 
         # Капшен колонок (геометрия ~ как в делегате)
         cap = QWidget()
@@ -2623,17 +2758,29 @@ class PlotsWidget(QWidget):
         cap_l = QHBoxLayout(cap)
         cap_l.setContentsMargins(_PlotRowDelegate._PAD, 0, _PlotRowDelegate._PAD, 0)
         cap_l.setSpacing(8)
+        # Master-чекбокс
+        _cb_font = QFont("Material Symbols Rounded")
+        _cb_font.setPixelSize(18)
+        self._master_cb = QLabel(chr(0xE835))  # check_box_outline_blank
+        self._master_cb.setFont(_cb_font)
+        self._master_cb.setStyleSheet("color:#C3CAD3; background:transparent;")
+        self._master_cb.setFixedSize(_PlotRowDelegate._CB_W, _PlotRowDelegate._CB_W)
+        self._master_cb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._master_cb.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._master_cb.mousePressEvent = self._on_master_cb_click
+        cap_l.addWidget(self._master_cb)
         cap_num = QLabel("№"); cap_num.setFixedWidth(_PlotRowDelegate._NUM_W)
         cap_name = QLabel("Контакт")
-        cap_phone = QLabel("Телефон"); cap_phone.setFixedWidth(_PlotRowDelegate._PHONE_W)
-        cap_debt = QLabel("Долг"); cap_debt.setFixedWidth(_PlotRowDelegate._DEBT_W)
-        cap_debt.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        for c in (cap_num, cap_name, cap_phone, cap_debt):
+        cap_vz = QLabel("Член. взносы"); cap_vz.setFixedWidth(_PlotRowDelegate._VZ_W)
+        cap_vz.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        cap_en = QLabel("Электроэнергия"); cap_en.setFixedWidth(_PlotRowDelegate._EN_W)
+        cap_en.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        for c in (cap_num, cap_name, cap_vz, cap_en):
             c.setStyleSheet("font-size:11px; color:#9CA3AF; background:transparent;")
         cap_l.addWidget(cap_num)
         cap_l.addWidget(cap_name, stretch=1)
-        cap_l.addWidget(cap_phone)
-        cap_l.addWidget(cap_debt)
+        cap_l.addWidget(cap_vz)
+        cap_l.addWidget(cap_en)
         # Заглушка под скроллбар — чтобы колонки капшена совпали с данными
         # (делегат рисует в вьюпорте, уже на ширину желоба). Ширина выставляется
         # в _sync_caption_stub по фактической ширине желоба списка.
@@ -2642,6 +2789,8 @@ class PlotsWidget(QWidget):
         cap_l.addWidget(self._cap_stub)
 
         self.list_model = PlotsListModel(self)
+        self.list_model.dataChanged.connect(self._refresh_master_cb)
+        self.list_model.dataChanged.connect(self._refresh_toolbar)
         self.list_view = QListView()
         self.list_view.setModel(self.list_model)
         self._row_delegate = _PlotRowDelegate(self.list_view)
@@ -2686,6 +2835,7 @@ class PlotsWidget(QWidget):
         # справа 8 — небольшой зазор скроллбара до разделителя.
         table_vbox.setContentsMargins(24, 24, 8, 24)
         table_vbox.addLayout(list_hdr)
+        table_vbox.addWidget(self._toolbar)
         table_vbox.addWidget(cap)
         table_vbox.addWidget(self.list_view, stretch=1)
 
@@ -2818,6 +2968,66 @@ class PlotsWidget(QWidget):
         «активного» состояния больше нет."""
         self._btn_add.setIcon(_mat_icon(0xF8EB, 22, color="#9CA3AF"))
 
+    def _refresh_icons(self):
+        """Обновить иконки кнопок «Импорт» и «Добавить» одновременно."""
+        self._btn_import.setIcon(_mat_icon(0xEAF3, 22, color="#9CA3AF"))
+        self._refresh_add_icon()
+
+    _IC_CHECKED   = chr(0xE834)   # check_box
+    _IC_UNCHECKED = chr(0xE835)   # check_box_outline_blank
+
+    def _on_master_cb_click(self, event):
+        selected = self.list_model.get_selected_nums()
+        visible = self.list_model._rows
+        if len(selected) >= len(visible) and len(visible) > 0:
+            self.list_model.deselect_all()
+        else:
+            self.list_model.select_all(visible)
+        self._refresh_master_cb()
+
+    def _refresh_master_cb(self):
+        selected = self.list_model.get_selected_nums()
+        visible = self.list_model._rows
+        if not visible:
+            icon = self._IC_UNCHECKED
+            color = "#C3CAD3"
+        elif not selected:
+            icon = self._IC_UNCHECKED
+            color = "#C3CAD3"
+        elif len(selected) >= len(visible):
+            icon = self._IC_CHECKED
+            color = "#07414F"
+        else:
+            icon = chr(0xE15B)  # remove (indeterminate)
+            color = "#07414F"
+        self._master_cb.setText(icon)
+        self._master_cb.setStyleSheet(f"color:{color}; background:transparent;")
+
+    def _refresh_toolbar(self):
+        n = len(self.list_model.get_selected_nums())
+        self._toolbar.setVisible(n > 0)
+        self._selected_lbl.setText(f"Выбрано: {n}")
+        self._btn_bulk_delete.setEnabled(n > 0)
+
+    def _bulk_delete(self):
+        nums = self.list_model.get_selected_nums()
+        if not nums:
+            return
+        reply = QMessageBox.question(
+            self, "Удаление участков",
+            f"Удалить {len(nums)} участков безвозвратно?\n"
+            "Это действие нельзя отменить.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._plots = [p for p in self._plots
+                       if str(p.get("num", "")) not in nums]
+        self.list_model.deselect_all()
+        self._save()
+        self._recompute_debt()
+        self._rebuild_table()
+
     def _sync_caption_stub(self):
         """Ширина заглушки капшена = ширина желоба скроллбара списка.
 
@@ -2906,6 +3116,8 @@ class PlotsWidget(QWidget):
                      or any(text in nm.lower() for nm in _plot_search_names(p))]
         self.list_model.set_plots(plots)
         self.list_model.set_debt_cache(self._debt_cache)
+        self._refresh_master_cb()
+        self._refresh_toolbar()
         total, shown = len(self._plots), len(plots)
         self._count_lbl.setText(f"{shown} из {total}" if shown < total else str(total))
 
@@ -2919,8 +3131,9 @@ class PlotsWidget(QWidget):
             self._open_detail(plot)
 
     def _recompute_debt(self):
-        """Кэш долга (ЧВ+электро) по всем участкам. «—» (None), если нет выписки."""
-        debt: dict = {}
+        """Кэш долга по Членским взносам и Электроэнергии (отдельно) по всем участкам."""
+        vznosy_debt: dict = {}
+        energy_debt: dict = {}
         if self._df is not None:
             try:
                 from core import vznosy as vzn
@@ -2933,23 +3146,21 @@ class PlotsWidget(QWidget):
                 for p in self._plots:
                     num = str(p.get("num", ""))
                     since = ownership.group_since(ownership.active_group(p) or {})
-                    total = 0.0; got = False
                     try:
                         gb = vzn.balance_for_active_group(
                             num, area_map.get(num), today, rates, adj, self._df, since=since)
-                        total += gb.debt; got = True
+                        vznosy_debt[num] = gb.debt
                     except Exception:
                         pass
                     try:
                         egb = en.balance_for_active_group(
                             num, today, meters, en_rates, repl, base, self._df, since=since)
-                        total += egb.debt; got = True
+                        energy_debt[num] = egb.debt
                     except Exception:
                         pass
-                    debt[num] = total if got else None
             except Exception:
-                debt = {}
-        self._debt_cache = debt
+                pass
+        self._debt_cache = {"vznosy": vznosy_debt, "energy": energy_debt}
 
     def _on_detail_delete(self):
         """Удаление участка из панели детали (подтверждение — в самой панели)."""
