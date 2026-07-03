@@ -3333,7 +3333,7 @@ class DetailWidget(QWidget):
         QTreeView#mainTable::branch:open:has-children:!has-siblings,
         QTreeView#mainTable::branch:open:has-children:has-siblings { image: none; }
         QTreeView#mainTable QScrollBar:vertical {
-            width: 12px; background: #F0F4F8; border: none;
+            width: 12px; background: transparent; border: none;
         }
         QTreeView#mainTable QScrollBar::handle:vertical {
             background: #B5C8D5; border-radius: 5px; min-height: 24px;
@@ -3341,6 +3341,8 @@ class DetailWidget(QWidget):
         }
         QTreeView#mainTable QScrollBar::add-line:vertical,
         QTreeView#mainTable QScrollBar::sub-line:vertical { height: 0; }
+        QTreeView#mainTable QScrollBar::add-page:vertical,
+        QTreeView#mainTable QScrollBar::sub-page:vertical { background: none; }
     """
 
     # ------------------------------------------ редактор категорий ---------- #

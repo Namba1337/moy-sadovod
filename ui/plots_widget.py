@@ -11,8 +11,8 @@ from PyQt6.QtCore import (
     QRegularExpression, QSize, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBitmap, QColor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen, QPixmap,
-    QPolygon, QRegion, QRegularExpressionValidator,
+    QBitmap, QColor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen,
+    QPixmap, QPolygon, QRegion, QRegularExpressionValidator,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog,
@@ -50,6 +50,7 @@ _INPUT_ERROR_SS = (
     "QLineEdit{background:#FEF2F2; border:1px solid #DC2626;"
     "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
     "QLineEdit:focus{border:1px solid #DC2626;}")
+_FIELD_LABEL_SS = "font-size:10px; color:#9CA3AF; background:transparent;"
 
 
 def _plot_num_key(s: str):
@@ -136,6 +137,24 @@ _F_STAR_OUTLINE  = _mat_font(20, fill=0)
 _F_STAR_FILLED   = _mat_font(20, fill=1)
 _F_CHEVRON       = _mat_font(18, fill=0)
 _F_COPY_OUTLINE  = _mat_font(18, fill=0)
+def _make_decorative_star(role_key: str = "contact") -> QLabel:
+    """Некликабельная звезда «избранный» для диалогов создания (_NewGroupDialog,
+    _QuickAddPlotDialog) — тот же визуальный язык (форма/цвета), что и активная
+    звезда в превью контактов группы (см. _refresh_contacts_preview).
+
+    Рисуется через _mat_icon() (растровая иконка с оверсэмплингом), а НЕ через
+    QFont-глиф на QLabel.setText() — текстовый рендер шрифта Material Symbols
+    оказался чувствителен к субпиксельному позиционированию окна и давал чуть
+    разный видимый размер звезды в разных диалогах при полностью идентичном
+    коде; растровая иконка от этого не зависит (как и все остальные иконки в
+    приложении)."""
+    role_bg, _ = _ROLE_COLORS[role_key]
+    star = QLabel()
+    star.setFixedSize(18, 18)
+    star.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    star.setStyleSheet(f"background:{role_bg}; border-radius:9px;")
+    star.setPixmap(_mat_icon(0xE838, 12, fill=1, color="#07414F").pixmap(12, 12))
+    return star
 
 
 _SS_DIRTY_BADGE = (
@@ -650,32 +669,41 @@ class _Save3WayDialog(_BasePromptDialog):
 
 
 class _NewGroupDialog(_ConfirmDialog):
-    """«Создать новую группу?» — тот же _ConfirmDialog, плюс ОБЯЗАТЕЛЬНОЕ
-    поле ФИО первого контакта (звезда «избранный» — единственный контакт
-    новой группы всегда становится избранным, см. _ensure_single_primary).
-    Кнопка «Создать» неактивна, пока поле пусто — так группа никогда не
-    создаётся без ни одного лица (это же требование действует и для замены
-    активной группы, см. _on_archive_active_group)."""
+    """«Создать новую группу?» — тот же _ConfirmDialog, плюс дата начала
+    новой группы и ОБЯЗАТЕЛЬНОЕ поле ФИО первого контакта (звезда
+    «избранный» — единственный контакт новой группы всегда становится
+    избранным, см. _ensure_single_primary). Кнопка «Создать» неактивна, пока
+    ФИО пусто — так группа никогда не создаётся без ни одного лица (это же
+    требование действует и для замены активной группы, см.
+    _on_archive_active_group). Дата не может быть раньше начала текущей
+    активной группы (min_since) — иначе архивная и новая группы пересекутся
+    по датам."""
 
     def __init__(self, title: str, message: str, people: list, *,
-                confirm_text: str = "Создать", cancel_text: str = "Отмена",
-                parent=None):
+                min_since=None, confirm_text: str = "Создать",
+                cancel_text: str = "Отмена", parent=None):
         super().__init__(title, message, confirm_text=confirm_text,
                          cancel_text=cancel_text, parent=parent)
+
+        date_col = QVBoxLayout()
+        date_col.setSpacing(2)
+        date_col.addWidget(QLabel("Дата начала", styleSheet=_FIELD_LABEL_SS))
+        self.inp_since = QDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
+        self.inp_since.setDate(QDate.currentDate())
+        if min_since is not None:
+            self.inp_since.setMinimumDate(
+                QDate(min_since.year, min_since.month, min_since.day).addDays(1))
+        date_col.addWidget(self.inp_since)
+        date_box = QWidget()
+        date_box.setLayout(date_col)
+        self._insert_widget(date_box)
 
         row = QWidget()
         row_lay = QHBoxLayout(row)
         row_lay.setContentsMargins(0, 0, 0, 0)
         row_lay.setSpacing(8)
 
-        star = QLabel(chr(0xE838))
-        star.setFont(_F_STAR_FILLED)
-        role_bg, role_fg = _ROLE_COLORS["contact"]
-        star.setFixedSize(18, 18)
-        star.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        star.setStyleSheet(
-            f"background:{role_bg}; color:#07414F; border-radius:9px;")
-        row_lay.addWidget(star)
+        row_lay.addWidget(_make_decorative_star())
 
         self.inp_name = QLineEdit()
         self.inp_name.setPlaceholderText("Фамилия Имя Отчество")
@@ -696,15 +724,18 @@ class _NewGroupDialog(_ConfirmDialog):
         self.inp_name.setFocus()
 
     @staticmethod
-    def ask(parent, title: str, message: str, people: list) -> tuple[bool, str]:
-        """Возвращает (confirmed, contact_name). Если confirmed=True,
+    def ask(parent, title: str, message: str, people: list,
+           min_since=None) -> tuple[bool, str, "date | None"]:
+        """Возвращает (confirmed, contact_name, since). Если confirmed=True,
         contact_name гарантированно не пуст (кнопка «Создать» заблокирована
-        при пустом ФИО)."""
-        dlg = _NewGroupDialog(title, message, people, parent=parent)
+        при пустом ФИО), since — выбранная дата начала (не раньше min_since)."""
+        dlg = _NewGroupDialog(title, message, people, min_since=min_since, parent=parent)
         overlay = _BasePromptDialog._show_centered(dlg, parent)
         try:
             confirmed = dlg.exec() == QDialog.DialogCode.Accepted
-            return confirmed, dlg.inp_name.text().strip()
+            qd = dlg.inp_since.date()
+            since = date(qd.year(), qd.month(), qd.day())
+            return confirmed, dlg.inp_name.text().strip(), since
         finally:
             if overlay is not None:
                 overlay.hide()
@@ -713,12 +744,11 @@ class _NewGroupDialog(_ConfirmDialog):
 
 class _QuickAddPlotDialog(_ConfirmDialog):
     """Быстрое добавление участка — модальное окно вместо панели справа
-    (см. PlotsWidget._add_plot): номер (необязательно), площадь и ФИО
-    первого контакта (оба обязательны). Кнопка «Создать» активна только при
-    заполненных площади и ФИО; указанный номер, совпадающий с уже
-    существующим участком, блокирует создание (пилюля «номер занят»)."""
-
-    _LABEL_SS = "font-size:10px; color:#9CA3AF; background:transparent;"
+    (см. PlotsWidget._add_plot): номер и площадь необязательны, обязательно
+    только ФИО первого контакта. Кнопка «Создать» активна только при
+    заполненном ФИО; указанный номер, совпадающий с уже существующим
+    участком, блокирует создание (пилюля «номер занят» — рядом с подписью
+    поля, как и у дубля ФИО в карточке контакта)."""
 
     def __init__(self, title: str, message: str, people: list,
                 existing_nums: set, *, parent=None):
@@ -730,27 +760,31 @@ class _QuickAddPlotDialog(_ConfirmDialog):
         f_lay.setContentsMargins(0, 0, 0, 0)
         f_lay.setSpacing(10)
 
-        # -- Номер участка (необязательно) + пилюля дубля --
-        num_row = QHBoxLayout()
-        num_row.setContentsMargins(0, 0, 0, 0)
-        num_row.setSpacing(6)
+        # -- Номер участка (необязательно) + пилюля дубля рядом с подписью --
         num_col = QVBoxLayout()
         num_col.setSpacing(2)
-        num_col.addWidget(QLabel("Номер участка", styleSheet=self._LABEL_SS))
+        num_lbl_row = QHBoxLayout()
+        num_lbl_row.setContentsMargins(0, 0, 0, 0)
+        num_lbl_row.setSpacing(6)
+        num_lbl_row.addWidget(QLabel("Номер участка", styleSheet=_FIELD_LABEL_SS))
+        self._num_taken_pill = _make_warn_pill(fields, "номер занят")
+        self._num_taken_pill.hide()
+        _pill_sp = self._num_taken_pill.sizePolicy()
+        _pill_sp.setRetainSizeWhenHidden(True)
+        self._num_taken_pill.setSizePolicy(_pill_sp)
+        num_lbl_row.addWidget(self._num_taken_pill)
+        num_lbl_row.addStretch(1)
+        num_col.addLayout(num_lbl_row)
         self.inp_num = QLineEdit()
         self.inp_num.setPlaceholderText("например: 15 или 15/207")
         self.inp_num.setStyleSheet(_INPUT_SS)
         num_col.addWidget(self.inp_num)
-        num_row.addLayout(num_col, stretch=1)
-        self._num_taken_pill = _make_warn_pill(fields, "номер занят")
-        self._num_taken_pill.hide()
-        num_row.addWidget(self._num_taken_pill, alignment=Qt.AlignmentFlag.AlignBottom)
-        f_lay.addLayout(num_row)
+        f_lay.addLayout(num_col)
 
-        # -- Площадь --
+        # -- Площадь (необязательно) --
         area_col = QVBoxLayout()
         area_col.setSpacing(2)
-        area_col.addWidget(QLabel("Площадь, м²", styleSheet=self._LABEL_SS))
+        area_col.addWidget(QLabel("Площадь, м² (необязательно)", styleSheet=_FIELD_LABEL_SS))
         self.inp_area = QLineEdit()
         self.inp_area.setPlaceholderText("например: 612")
         self.inp_area.setValidator(QRegularExpressionValidator(
@@ -766,17 +800,11 @@ class _QuickAddPlotDialog(_ConfirmDialog):
         # -- ФИО собственника --
         name_col = QVBoxLayout()
         name_col.setSpacing(2)
-        name_col.addWidget(QLabel("ФИО собственника", styleSheet=self._LABEL_SS))
+        name_col.addWidget(QLabel("ФИО собственника", styleSheet=_FIELD_LABEL_SS))
         name_row = QHBoxLayout()
         name_row.setContentsMargins(0, 0, 0, 0)
         name_row.setSpacing(8)
-        star = QLabel(chr(0xE838))
-        star.setFont(_F_STAR_FILLED)
-        role_bg, role_fg = _ROLE_COLORS["contact"]
-        star.setFixedSize(18, 18)
-        star.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        star.setStyleSheet(f"background:{role_bg}; color:#07414F; border-radius:9px;")
-        name_row.addWidget(star)
+        name_row.addWidget(_make_decorative_star())
         self.inp_name = QLineEdit()
         self.inp_name.setPlaceholderText("Фамилия Имя Отчество")
         self.inp_name.setStyleSheet(_INPUT_SS)
@@ -795,15 +823,17 @@ class _QuickAddPlotDialog(_ConfirmDialog):
         self.inp_num.textChanged.connect(self._update_state)
         self.inp_area.textChanged.connect(self._update_state)
         self.inp_name.textChanged.connect(self._update_state)
-        self.inp_num.setFocus()
+        self.inp_name.setFocus()
 
     def _update_state(self, *_):
         num = self.inp_num.text().strip()
         num_dup = bool(num) and num in self._existing_nums
         self._num_taken_pill.setVisible(num_dup)
 
+        # Площадь необязательна: пусто — ок, а вот заведомо некорректное
+        # значение (например, одна лишь запятая) блокирует создание.
         area_txt = self.inp_area.text().strip().replace(",", ".")
-        area_ok = False
+        area_ok = True
         if area_txt:
             try:
                 area_ok = float(area_txt) > 0
@@ -815,17 +845,20 @@ class _QuickAddPlotDialog(_ConfirmDialog):
 
     @staticmethod
     def ask(parent, people: list, existing_nums: set):
-        """Возвращает (num, area, name) при подтверждении, иначе None."""
+        """Возвращает (num, area, name) при подтверждении, иначе None.
+        area — None, если поле оставлено пустым (необязательное)."""
         dlg = _QuickAddPlotDialog(
             "Новый участок",
-            "Укажите номер, площадь и ФИО собственника.",
+            "Обязательно только ФИО собственника — номер и площадь можно "
+            "уточнить позже.",
             people, existing_nums, parent=parent)
         overlay = _BasePromptDialog._show_centered(dlg, parent)
         try:
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return None
             num = dlg.inp_num.text().strip()
-            area = float(dlg.inp_area.text().strip().replace(",", "."))
+            area_txt = dlg.inp_area.text().strip().replace(",", ".")
+            area = float(area_txt) if area_txt else None
             name = dlg.inp_name.text().strip()
             return num, area, name
         finally:
@@ -1755,7 +1788,7 @@ _TREE_STYLE = """
     QTreeView#mainTable::item:hover { background: #DDE4EE; }
     QTreeView#mainTable::item:selected { background: #C9D8E2; color: #07414F; }
     QTreeView#mainTable QScrollBar:vertical {
-        width: 12px; background: #F0F4F8; border: none;
+        width: 12px; background: transparent; border: none;
     }
     QTreeView#mainTable QScrollBar::handle:vertical {
         background: #B5C8D5; border-radius: 5px; min-height: 24px;
@@ -1763,6 +1796,8 @@ _TREE_STYLE = """
     }
     QTreeView#mainTable QScrollBar::add-line:vertical,
     QTreeView#mainTable QScrollBar::sub-line:vertical { height: 0; }
+    QTreeView#mainTable QScrollBar::add-page:vertical,
+    QTreeView#mainTable QScrollBar::sub-page:vertical { background: none; }
 """
 
 _SB_W = 12  # ширина скроллбара — должна совпадать с QSS выше
@@ -2620,8 +2655,22 @@ class PlotsWidget(QWidget):
         self.list_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_view.setFrameShape(QFrame.Shape.NoFrame)
+        # «transparent» на скроллбаре ненадёжно перекрывает глобальный фон
+        # #F0F3F9 у QAbstractScrollArea (виден именно он вместо «ничего»,
+        # см. подробный докстринг у _drawer_scroll ниже) — поэтому вместо
+        # прозрачности красим «дорожку» тем же сплошным цветом, что и
+        # реальный фон под ней (contentFrame — белый), это гарантированно
+        # рендерится вне зависимости от тонкостей альфа-композитинга Qt.
         self.list_view.setStyleSheet(
-            "QListView{background:transparent;border:none;outline:0;}")
+            "QListView{background:transparent;border:none;outline:0;}"
+            "QListView QScrollBar:vertical{background:#FFFFFF;width:8px;border:none;}"
+            "QListView QScrollBar::handle:vertical{"
+            "background:#C3CAD3;border-radius:4px;min-height:30px;}"
+            "QListView QScrollBar::handle:vertical:hover{background:#97A1AE;}"
+            "QListView QScrollBar::add-line:vertical,"
+            "QListView QScrollBar::sub-line:vertical{height:0;}"
+            "QListView QScrollBar::add-page:vertical,"
+            "QListView QScrollBar::sub-page:vertical{background:#FFFFFF;}")
         # Перебиваем глобальное правило QAbstractScrollArea>QWidget (тонирует вьюпорт)
         self.list_view.viewport().setStyleSheet("background:transparent;")
         self._list_sb_style = QStyleFactory.create("Fusion")
@@ -2655,8 +2704,24 @@ class PlotsWidget(QWidget):
         self._drawer.setStyleSheet(
             "QFrame#plotDrawer{background:transparent;border:none;"
             "border-left:1px solid #D5DCE4;}")
-        drawer_lyt = QVBoxLayout(self._drawer)
-        drawer_lyt.setContentsMargins(0, 0, 0, 0)
+        # Скролл-область на ВСЮ высоту drawer (контент, как и раньше,
+        # обрезается ровно по границе окна — никаких «белых полос» поверх
+        # него), а полоса прокрутки — ОТДЕЛЬНЫЙ standalone QScrollBar в своей
+        # колонке справа, с отступами сверху/снизу от скруглённых углов окна.
+        # Все попытки получить этот зазор на встроенном скроллбаре проваливались:
+        #  * QSS margin у QScrollBar — зона отступа красится «сырым» фоном
+        #    виджета (не стилем дорожки) и вылазит серым пятном;
+        #  * отступ у layout — сжимает саму видимую область прокрутки, и
+        #    контент начинает исчезать за постоянной белой полосой ДО границы;
+        #  * setMask на drawer — приём, от которого проект уже отказался
+        #    (см. _RoundedFrame в main.py: грязный антиалиасинг).
+        # Отдельный QScrollBar решает всё сразу: он не потомок
+        # QAbstractScrollArea (глобальный QSS-фикс вьюпорта #F0F3F9 его не
+        # перекрашивает — прозрачная дорожка честно показывает белый
+        # contentFrame), а отступ от углов — обычные layout-поля его колонки,
+        # т.е. по-настоящему пустое место, где рисовать нечему.
+        drawer_lyt = QHBoxLayout(self._drawer)
+        drawer_lyt.setContentsMargins(0, 0, 2, 0)
         drawer_lyt.setSpacing(0)
         self._drawer_scroll = QScrollArea()
         self._drawer_scroll.setWidgetResizable(True)
@@ -2664,13 +2729,44 @@ class PlotsWidget(QWidget):
         self._drawer_scroll.setStyleSheet(
             "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
         self._drawer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._drawer_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # Win11 overlay-scrollbar фикс (как в других скроллах проекта).
+        self._drawer_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        drawer_lyt.addWidget(self._drawer_scroll, stretch=1)
+
+        sb_col = QVBoxLayout()
+        # 14px — радиус скругления окна (QFrame#contentFrame{border-radius:14px})
+        sb_col.setContentsMargins(2, 14, 0, 14)
+        self._drawer_vsb = QScrollBar(Qt.Orientation.Vertical)
         self._drawer_sb_style = QStyleFactory.create("Fusion")
         if self._drawer_sb_style is not None:
-            self._drawer_scroll.setStyle(self._drawer_sb_style)
-            self._drawer_scroll.verticalScrollBar().setStyle(self._drawer_sb_style)
-        drawer_lyt.addWidget(self._drawer_scroll)
+            self._drawer_vsb.setStyle(self._drawer_sb_style)
+        self._drawer_vsb.setFixedWidth(8)
+        self._drawer_vsb.setStyleSheet("""
+            QScrollBar:vertical { background: transparent; width: 8px; border: none; }
+            QScrollBar::handle:vertical {
+                background: #C3CAD3; border-radius: 4px; min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover { background: #97A1AE; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+        """)
+        self._drawer_vsb.setVisible(False)
+        sb_col.addWidget(self._drawer_vsb)
+        drawer_lyt.addLayout(sb_col)
+
+        # Синхронизация с внутренним (скрытым) скроллбаром области: диапазон/
+        # шаг/видимость — от него к внешнему, значение — в обе стороны.
+        _inner = self._drawer_scroll.verticalScrollBar()
+
+        def _sync_range(lo: int, hi: int, inner=_inner):
+            self._drawer_vsb.setRange(lo, hi)
+            self._drawer_vsb.setPageStep(inner.pageStep())
+            self._drawer_vsb.setSingleStep(inner.singleStep())
+            self._drawer_vsb.setVisible(hi > lo)
+
+        _inner.rangeChanged.connect(_sync_range)
+        _inner.valueChanged.connect(self._drawer_vsb.setValue)
+        self._drawer_vsb.valueChanged.connect(_inner.setValue)
+
         self._drawer.setVisible(False)
         body.addWidget(self._drawer)
 
@@ -3000,10 +3096,11 @@ class PlotsWidget(QWidget):
         owner["person_id"] = person["id"]
         plot = {
             "num": num,
-            "area": area,
             "groups": [{"since": date.today().isoformat(), "until": None,
                        "owners": [owner]}],
         }
+        if area is not None:
+            plot["area"] = area
         self._plots.append(plot)
         self._save()
         self._recompute_debt()
@@ -3408,13 +3505,17 @@ class GroupEditDialog(QWidget):
                 scroll.setStyle(self._sb_style)
                 _vsb.setStyle(self._sb_style)
             _vsb.setFixedWidth(10)
+            # Сплошной белый вместо «transparent» — иначе сквозь дорожку
+            # просвечивает базовый фон QAbstractScrollArea (#F0F3F9 из
+            # глобального QSS-фикса вьюпорта) вместо истинного белого фона
+            # панели (см. подробности у _drawer_scroll в PlotsWidget).
             _vsb.setStyleSheet("""
-                QScrollBar:vertical { background:#E5E9ED; width:10px; margin:0; }
+                QScrollBar:vertical { background:#FFFFFF; width:10px; margin:0; }
                 QScrollBar::handle:vertical {
                     background:#9CA3AF; border-radius:4px; min-height:30px; margin:1px;
                 }
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:none; }
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:#FFFFFF; }
             """)
             scroll.setWidget(self._cards_container)
             scroll.setMinimumHeight(280)
@@ -4353,6 +4454,10 @@ class _GroupCardCtx:
         self.show_all_lbl = None
         self.show_all_arrow = None
         self.new_group_btn = None   # только у активной группы, см. _build_group_card
+        # Дата начала активной группы — всегда редактируемый date-пикер
+        # (см. _build_group_card, _on_since_changed). У архивных групп вместо
+        # него используется since_lbl (период, только для чтения).
+        self.since_date_edit = None
 
 
 # ============================================================================ #
@@ -4443,10 +4548,21 @@ class PlotEditDialog(QWidget):
         outer.addWidget(self._contacts_view)
 
         # -- Содержимое детали строится в _detail_view --
+        # lay сам без горизонтальных отступов — они переехали в content_top/
+        # content_bottom (см. ниже), чтобы разделитель перед «Предыдущими
+        # группами» мог быть добавлен НАПРЯМУЮ в lay и тянуться на всю
+        # ширину панели, а не только на ширину карточки/кнопки над ним
+        # (родителем виджета-разделителя должен быть сам self._detail_view,
+        # а не что-то уже вписанное в отступы).
         lay = QVBoxLayout(self._detail_view)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        content_top = QVBoxLayout()
         # Верх 26 — чтобы «Участок № X» встал вровень с заголовком списка (у колонки верх 24).
-        lay.setContentsMargins(24, 26, 24, 24)
-        lay.setSpacing(12)
+        content_top.setContentsMargins(24, 26, 24, 0)
+        content_top.setSpacing(12)
+        lay.addLayout(content_top)
 
         # -- Заголовок участка: «Участок № X» + площадь + одна кнопка правки --
         area_raw = self._plot_data.get("area")
@@ -4460,15 +4576,16 @@ class PlotEditDialog(QWidget):
         self._orig_area = area_text
         self._header_editing = False
 
-        def _icon_btn(cp: int, handler, tooltip: str = "") -> QPushButton:
+        def _icon_btn(cp: int, handler, tooltip: str = "", *,
+                      color: str = "#6B7280", hover_bg: str = "#F3F4F6") -> QPushButton:
             b = QPushButton()
             b.setFixedSize(28, 28)
             b.setIconSize(QSize(18, 18))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setStyleSheet(
                 "QPushButton{background:transparent;border:none;border-radius:4px;padding:2px;}"
-                "QPushButton:hover{background:#F3F4F6;}")
-            b.setIcon(_mat_icon(cp, 18, color="#6B7280"))
+                f"QPushButton:hover{{background:{hover_bg};}}")
+            b.setIcon(_mat_icon(cp, 18, color=color))
             b.clicked.connect(handler)
             if tooltip:
                 b.installEventFilter(_TooltipFilter(tooltip, b))
@@ -4494,17 +4611,23 @@ class PlotEditDialog(QWidget):
             # Карандаш — всегда виден; fill = режим правки активен
             self._edit_btn = _icon_btn(0xF88D, self._on_header_edit, "Редактировать участок")
             drow.addWidget(self._edit_btn)
+            # «Удалить участок» / «Закрыть» — справа от карандаша (были в футере).
+            del_btn = _icon_btn(0xE92B, self._on_delete_clicked, "Удалить участок",
+                               color="#DC2626", hover_bg="#FEF2F2")
+            drow.addWidget(del_btn)
+            close_btn = _icon_btn(0xE5CD, self._on_close, "Закрыть")
+            drow.addWidget(close_btn)
             dv.addLayout(drow)
             self._area_display = QLabel()
             self._area_display.setStyleSheet(
                 "font-size:13px; color:#6B7280; background:transparent;")
             dv.addWidget(self._area_display)
-            lay.addWidget(self._disp_w)
+            content_top.addWidget(self._disp_w)
         else:
             title_lbl = QLabel(self._title)
             title_lbl.setStyleSheet(
                 "font-size:16px; font-weight:700; color:#1F2937; background:transparent;")
-            lay.addWidget(title_lbl)
+            content_top.addWidget(title_lbl)
 
         # Блок редактирования номера/площади (в режиме правки; для нового — всегда)
         self._edit_block = QWidget()
@@ -4546,7 +4669,7 @@ class PlotEditDialog(QWidget):
         ) if "." in t else None)
         self.inp_area.textChanged.connect(lambda: self._on_field_changed("area"))
         eb.addWidget(self.inp_area)
-        lay.addWidget(self._edit_block)
+        content_top.addWidget(self._edit_block)
 
         if self._is_edit:
             self.inp_num.setReadOnly(True)
@@ -4555,74 +4678,65 @@ class PlotEditDialog(QWidget):
             self._refresh_displays()
 
         # -- Карточка активной группы (шапка + блок, билдер общий с архивными) --
-        self._build_group_card(self._active_ctx, lay, "Активная группа")
+        self._build_group_card(self._active_ctx, content_top, "Активная группа")
         self._refresh_group_card(self._active_ctx)
 
-        # -- Предыдущие группы --
+        # -- Разделитель перед «Предыдущими группами» --
+        # QFrame(HLine) рисует рамку с фаской (градиент светлого/тёмного) —
+        # background/color в QSS её не перекрывают, из-за чего линия выходит
+        # заметно толще и «внутрь» от краёв, чем остальные тонкие бордеры в
+        # панели. Обычный QWidget с залитым фоном — тот же приём, что и у
+        # разделителя внутри карточки группы. ВАЖНО: добавлен НАПРЯМУЮ в lay
+        # (без горизонтальных отступов — см. lay.setContentsMargins(0,0,0,0)
+        # выше), а не внутрь content_top/content_bottom — так линия занимает
+        # ровно всю ширину self._detail_view, а не только ширину карточки/
+        # кнопки над ней (попытка сделать то же самое отрицательными полями
+        # у обёртки внутри уже отцентрованного по отступам виджета эффекта
+        # не давала).
+        self._prev_sep_line = QWidget()
+        self._prev_sep_line.setFixedHeight(1)
+        self._prev_sep_line.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._prev_sep_line.setStyleSheet("background:#E5E7EB;")
+        lay.addSpacing(12)
+        lay.addWidget(self._prev_sep_line)
+        lay.addSpacing(12)
+
+        content_bottom = QVBoxLayout()
+        content_bottom.setContentsMargins(24, 0, 24, 24)
+        content_bottom.setSpacing(12)
+        lay.addLayout(content_bottom)
+
+        # -- Предыдущие группы -- без подписи и без вложенной scroll-области:
+        # разделитель над этим блоком — теперь единственная граница секции;
+        # архивные карточки просто идут одна под другой и скроллятся вместе
+        # со всей панелью (см. _drawer_scroll в PlotsWidget), а не в отдельном
+        # обособленном «белом поле» с собственной рамкой/пиком следующей карточки.
         self._prev_section = QWidget()
         self._prev_section.setStyleSheet("background:transparent;")
-        prev_lyt = QVBoxLayout(self._prev_section)
-        prev_lyt.setContentsMargins(0, 0, 0, 0)
-        prev_lyt.setSpacing(6)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
-        prev_lyt.addWidget(sep)
-
-        lbl_prev = QLabel("Предыдущие группы")
-        lbl_prev.setStyleSheet(
-            "font-size:12px; font-weight:600; color:#6B7280; background:transparent;")
-        prev_lyt.addWidget(lbl_prev)
-
-        self._prev_card_container = QWidget()
-        self._prev_card_container.setStyleSheet("background:transparent;")
-        self._prev_card_lyt = QVBoxLayout(self._prev_card_container)
+        self._prev_card_lyt = QVBoxLayout(self._prev_section)
         self._prev_card_lyt.setContentsMargins(0, 0, 0, 0)
         self._prev_card_lyt.setSpacing(8)
 
-        # Скролл-область: видно ~одну предыдущую группу, остальные — под скролл,
-        # чтобы окно не росло по вертикали при множестве архивных групп.
-        self._prev_scroll = QScrollArea()
-        self._prev_scroll.setWidgetResizable(True)
-        self._prev_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._prev_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._prev_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # Win11 overlay-scrollbar фикс (как в GroupEditDialog): Fusion на области и
-        # на самом скроллбаре, иначе место под скроллбар не резервируется и QSS игнорируется.
-        self._prev_sb_style = QStyleFactory.create("Fusion")
-        _pvsb = self._prev_scroll.verticalScrollBar()
-        if self._prev_sb_style is not None:
-            self._prev_scroll.setStyle(self._prev_sb_style)
-            _pvsb.setStyle(self._prev_sb_style)
-        _pvsb.setFixedWidth(10)
-        _pvsb.setStyleSheet("""
-            QScrollBar:vertical { background: #E5E9ED; width: 10px; margin: 0; }
-            QScrollBar::handle:vertical {
-                background: #9CA3AF; border-radius: 4px; min-height: 30px; margin: 1px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
-        """)
-        self._prev_scroll.setWidget(self._prev_card_container)
-        prev_lyt.addWidget(self._prev_scroll)
-
-        lay.addWidget(self._prev_section)
+        content_bottom.addWidget(self._prev_section)
         self._refresh_prev_section()
 
         lay.addStretch()  # свободное место уходит сюда — карточки прижаты к верху
 
-        # -- Footer --
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
-        lay.addWidget(sep2)
-
-        footer = QWidget()
-        f_lay = QHBoxLayout(footer)
-        f_lay.setContentsMargins(0, 0, 0, 0)
-        f_lay.setSpacing(8)
+        # -- Footer -- «Удалить участок»/«Закрыть» переехали иконками в шапку
+        # (drow, рядом с карандашом правки) — для режима правки футер больше
+        # не нужен. Для создания нового участка (сейчас недостижимо — см.
+        # PlotsWidget._add_plot) футер с «Отмена» остаётся как был.
         if not self._is_edit:
+            sep2 = QWidget()
+            sep2.setFixedHeight(1)
+            sep2.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            sep2.setStyleSheet("background:#E5E7EB;")
+            lay.addWidget(sep2)
+
+            footer = QWidget()
+            f_lay = QHBoxLayout(footer)
+            f_lay.setContentsMargins(24, 12, 24, 24)
+            f_lay.setSpacing(8)
             f_lay.addStretch()
             btn_cancel = QPushButton("Отмена")
             btn_cancel.setObjectName("btnFooterCancel")
@@ -4630,23 +4744,10 @@ class PlotEditDialog(QWidget):
             btn_cancel.clicked.connect(lambda: self._finish(False))
             f_lay.addWidget(btn_cancel)
             # «Сохранить» — иконка-галочка в шапке (cap_row), не в футере
+            lay.addWidget(footer)
+            self._footer_view = footer
         else:
-            btn_del = QPushButton("Удалить участок")
-            btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_del.setStyleSheet(
-                "QPushButton{background:transparent;color:#DC2626;border:1px solid #FCA5A5;"
-                "border-radius:6px;padding:8px 14px;font-size:13px;}"
-                "QPushButton:hover{background:#FEF2F2;}")
-            btn_del.clicked.connect(self._on_delete_clicked)
-            f_lay.addWidget(btn_del)
-            f_lay.addStretch()
-            btn_close = QPushButton("Закрыть")
-            btn_close.setObjectName("btnFooterClose")
-            btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_close.clicked.connect(self._on_close)
-            f_lay.addWidget(btn_close)
-        lay.addWidget(footer)
-        self._footer_view = footer
+            self._footer_view = None
         self._footer_edit = None
 
         if not self._is_edit:
@@ -4669,10 +4770,33 @@ class PlotEditDialog(QWidget):
         ctx.docs_badge_lay = QHBoxLayout(ctx.docs_badge_box)
         ctx.docs_badge_lay.setContentsMargins(0, 0, 0, 0)
         hdr.addWidget(ctx.docs_badge_box)
-        ctx.since_lbl = QLabel()
-        ctx.since_lbl.setStyleSheet(
-            "font-size:12px; color:#6B7280; background:transparent;")
-        hdr.addWidget(ctx.since_lbl)
+        if ctx.is_active:
+            # Дата начала активной группы — ВСЕГДА редактируемый date-пикер
+            # (без отдельного режима «включить правку» — правится напрямую).
+            since_prefix = QLabel("Активна с:")
+            since_prefix.setStyleSheet(
+                "font-size:12px; color:#6B7280; background:transparent;")
+            hdr.addWidget(since_prefix)
+
+            ctx.since_date_edit = QDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
+            ctx.since_date_edit.setFixedWidth(110)
+            ctx.since_date_edit.setStyleSheet(
+                "QDateEdit{background:#FFFFFF;border:1px solid #C9D8E2;"
+                "border-radius:6px;padding:2px 4px 2px 6px;font-size:12px;color:#1F2937;}"
+                "QDateEdit::drop-down{subcontrol-origin:padding;subcontrol-position:right;"
+                "width:18px;border:none;border-left:1px solid #C9D8E2;background:transparent;"
+                "border-top-right-radius:6px;border-bottom-right-radius:6px;}"
+                "QDateEdit::drop-down:hover{background:#DCE7EC;}"
+                "QDateEdit::down-arrow{width:8px;height:8px;}")
+            ctx.since_date_edit.dateChanged.connect(
+                lambda _, c=ctx: self._on_since_changed(c))
+            hdr.addWidget(ctx.since_date_edit)
+        else:
+            ctx.since_lbl = QLabel()
+            ctx.since_lbl.setStyleSheet(
+                "font-size:12px; color:#6B7280; background:transparent;")
+            hdr.addWidget(ctx.since_lbl)
+
         target_lay.addLayout(hdr)
 
         # -- Карточка группы (одна колонка, по макету) --
@@ -5061,8 +5185,17 @@ class PlotEditDialog(QWidget):
             ctx.new_group_btn.setToolTip(
                 "" if owners else "Добавьте хотя бы один контакт, чтобы создать новую группу")
 
-        # Дата начала / период (в заголовке)
-        ctx.since_lbl.setText(self._group_period_text(ctx))
+        # Дата начала (активная — date-пикер) / период (архивная — лейбл)
+        if ctx.is_active:
+            since = ownership.group_since(ctx.group)
+            ctx.since_date_edit.blockSignals(True)
+            ctx.since_date_edit.setDate(
+                QDate(since.year, since.month, since.day) if since
+                else QDate.currentDate())
+            ctx.since_date_edit.setMinimumDate(self._since_min_date())
+            ctx.since_date_edit.blockSignals(False)
+        else:
+            ctx.since_lbl.setText(self._group_period_text(ctx))
 
         # Бейдж «не хватает документов» по всей группе (в заголовке)
         while ctx.docs_badge_lay.count():
@@ -5090,15 +5223,44 @@ class PlotEditDialog(QWidget):
 
     @staticmethod
     def _group_period_text(ctx: "_GroupCardCtx") -> str:
-        """Текст справа в шапке блока: дата начала (активная) или период
-        начало–окончание (архивная)."""
+        """Текст справа в шапке архивной группы: период начало–окончание.
+        У активной группы дата показывается в самом date-пикере (см.
+        _build_group_card/_refresh_group_card), этот метод для неё не
+        вызывается."""
         since = ownership.group_since(ctx.group)
-        if ctx.is_active:
-            return f"Активна с: {since.strftime('%d.%m.%Y')}" if since else "Активна с: —"
         until = ownership.group_until(ctx.group)
         since_txt = since.strftime("%d.%m.%Y") if since else "начало"
         until_txt = until.strftime("%d.%m.%Y") if until else "—"
         return f"{since_txt} – {until_txt}"
+
+    def _since_min_date(self) -> QDate:
+        """Минимально допустимая дата начала активной группы — не раньше
+        начала самой свежей архивной группы (иначе периоды групп
+        пересекутся по датам). Виджет сам не даёт выбрать более раннюю дату."""
+        if self._archived_cards:
+            prev_since = ownership.group_since(self._archived_cards[0].group)
+            if prev_since is not None:
+                return QDate(prev_since.year, prev_since.month, prev_since.day).addDays(1)
+        return QDate(1900, 1, 1)
+
+    def _on_since_changed(self, ctx: "_GroupCardCtx"):
+        """Дата начала активной группы изменена в date-пикере (поле всегда
+        редактируемо — без отдельного режима правки). Если есть архивная
+        группа — синхронно сдвигает её дату окончания (и пересчитывает
+        замороженный долг на эту дату), чтобы периоды групп не пересекались
+        и не оставляли разрыв. Программные обновления значения (см.
+        _refresh_group_card) сигнал не порождают — blockSignals там же."""
+        qd = ctx.since_date_edit.date()
+        new_since = date(qd.year(), qd.month(), qd.day())
+        ctx.group["since"] = new_since.isoformat()
+        if self._archived_cards:
+            prev = self._archived_cards[0]
+            prev.group["until"] = new_since.isoformat()
+            prev.group["debt_at_close"] = self._compute_group_debt(new_since, prev.group)
+            self._refresh_group_card(prev)
+        self._group_dirty = True
+        self._refresh_group_card(ctx)
+        self._update_save_state()
 
     @staticmethod
     def _group_docs_progress(owners) -> tuple[int, int]:
@@ -6140,18 +6302,17 @@ class PlotEditDialog(QWidget):
         полноценный блок тем же билдером, что и активная группа."""
         archived = ownership.archived_groups({"groups": self._groups})
         self._prev_section.setVisible(bool(archived))
-        # Очищаем и перестраиваем все карточки предыдущих групп
+        self._prev_sep_line.setVisible(bool(archived))
+        # Очищаем и перестраиваем все карточки предыдущих групп. Своей
+        # scroll-области больше нет — карточки просто идут одна под другой
+        # и скроллятся вместе со всей панелью (см. _drawer_scroll в
+        # PlotsWidget), поэтому фиксировать/подгонять высоту не нужно.
         while self._prev_card_lyt.count():
             item = self._prev_card_lyt.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._archived_cards = []
-        if not archived:
-            self._prev_scroll.setMinimumHeight(0)
-            self._prev_scroll.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX — без лимита
-            return
-        first_block = None
-        for i, g in enumerate(archived):
+        for g in archived:
             copy = dict(g)
             copy["owners"] = list(g.get("owners", []) or [])
             ctx = _GroupCardCtx(copy, is_active=False, orig=g)
@@ -6164,33 +6325,6 @@ class PlotEditDialog(QWidget):
             self._refresh_group_card(ctx)
             self._prev_card_lyt.addWidget(block)
             self._archived_cards.append(ctx)
-            if i == 0:
-                first_block = block
-        # Фиксируем высоту области под одну карточку (+ «peek», если групп несколько),
-        # чтобы минимальный размер окна резервировал место на полную предыдущую группу,
-        # а лишние группы уходили под скролл. Сначала синхронно по sizeHint (чтобы окно
-        # открылось нужной высоты), затем уточняем по фактической высоте после раскладки.
-        self._apply_prev_height(first_block.sizeHint().height(), len(archived))
-        QTimer.singleShot(
-            0, lambda b=first_block, n=len(archived): self._refine_prev_height(b, n))
-
-    def _apply_prev_height(self, one_h: int, count: int):
-        target = max(int(one_h), 130)  # «пол» на случай заниженного sizeHint до показа
-        if count > 1:
-            target += self._prev_card_lyt.spacing() + 20  # видно немного следующей карточки
-        self._prev_scroll.setMinimumHeight(target)
-        self._prev_scroll.setMaximumHeight(target)
-
-    def _refine_prev_height(self, first_block, count: int):
-        try:
-            one_h = max(first_block.sizeHint().height(), first_block.height())
-        except RuntimeError:
-            return  # карточка уже удалена (повторный refresh)
-        self._apply_prev_height(one_h, count)
-        # При добавлении группы в открытом окне — подрастить высоту под новый минимум.
-        need = self.minimumSizeHint().height()
-        if self.height() < need:
-            self.resize(self.width(), need)
 
     def _on_edit_active_group(self):
         """Открывает редактор контактов (под-панель)."""
@@ -6219,19 +6353,21 @@ class PlotEditDialog(QWidget):
         рассинхронизации состояния кнопки, без модального предупреждения."""
         if not ownership.group_owners(self._active_group):
             return
-        confirmed, contact_name = _NewGroupDialog.ask(
+        confirmed, contact_name, since = _NewGroupDialog.ask(
             self, "Создать новую группу?",
             "Текущая активная группа будет перемещена в архив (с долгом на "
-            "сегодняшний день). Укажите ФИО первого контакта новой группы.",
-            self._people)
+            "дату начала новой группы). Укажите дату начала и ФИО первого "
+            "контакта новой группы.",
+            self._people, min_since=ownership.group_since(self._active_group))
         if not confirmed:
             return
-        # Дата закрытия текущей = дата начала новой (сегодня). contact_name
-        # гарантированно не пуст — кнопка «Создать» неактивна при пустом ФИО
-        # (см. _NewGroupDialog), поэтому владелец здесь есть всегда.
+        # Дата закрытия текущей = дата начала новой (выбранная в диалоге).
+        # contact_name гарантированно не пуст — кнопка «Создать» неактивна
+        # при пустом ФИО (см. _NewGroupDialog), поэтому владелец здесь есть
+        # всегда.
         owner = _make_owner(contact_name, is_owner=False)
         owner["person_id"] = self._link_or_create_person(contact_name)
-        new_active = {"since": date.today().isoformat(), "until": None, "owners": [owner]}
+        new_active = {"since": since.isoformat(), "until": None, "owners": [owner]}
         self._apply_replace(new_active)
 
     def _link_or_create_person(self, name: str) -> str:
@@ -6317,12 +6453,15 @@ class PlotEditDialog(QWidget):
         self._refresh_prev_section()
         self._update_save_state()
 
-    def _compute_group_debt(self, as_of) -> dict:
+    def _compute_group_debt(self, as_of, group: dict | None = None) -> dict:
+        """Долг по группе на дату as_of. group по умолчанию — активная
+        (для случая архивации); при сдвиге даты уже архивной группы (см.
+        _on_since_changed) вызывается явно с этой архивной группой."""
         result = {"vznosy": 0.0, "energy": 0.0}
         plot_num = str(self._plot_data.get("num", ""))
         if not plot_num:
             return result
-        since = ownership.group_since(self._active_group)
+        since = ownership.group_since(group if group is not None else self._active_group)
         try:
             from core import vznosy as vzn
             rates = vzn.load_rates()
