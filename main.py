@@ -1048,21 +1048,31 @@ class MainWindow(QMainWindow):
             /* ── Viewport backgrounds (Qt QSS quirk fix) ────── */
             QAbstractScrollArea { background: #F0F3F9; }
             QAbstractScrollArea > QWidget { background: #F0F3F9; }
+            /* QScrollBar тоже QWidget и прямой потомок QAbstractScrollArea —
+               правило выше красит и его сплошным фоном поверх прозрачного
+               QScrollBar:vertical{background:transparent} ниже (это же
+               заливка самого виджета, а не «дорожки» скроллбара), отсюда и
+               сплошная «дорожка». Явно исключаем скроллбар из этой заливки. */
+            QAbstractScrollArea > QScrollBar { background: transparent; }
 
             /* ── Scrollbars ──────────────────────────────────── */
+            /* Трек прозрачный (без «дорожки»/тени под бегунком) — меньше
+               визуального шума, виден только сам бегунок. */
             QScrollBar:vertical {
-                background: #E6E9EE; width: 8px; border-radius: 4px; border: none;
+                background: transparent; width: 8px; border: none;
             }
             QScrollBar::handle:vertical {
                 background: #C3CAD3; border-radius: 4px; min-height: 30px;
             }
             QScrollBar::handle:vertical:hover { background: #97A1AE; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
             QScrollBar:horizontal {
-                background: #E6E9EE; height: 8px; border: none;
+                background: transparent; height: 8px; border: none;
             }
             QScrollBar::handle:horizontal { background: #C3CAD3; border-radius: 4px; }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
 
             /* ── Status / summary labels ─────────────────────── */
             QLabel#statusLabel  { color: #9AA3AE; background: transparent; font-size: 12px; }
