@@ -2378,6 +2378,7 @@ class PlotsListModel(QAbstractListModel):
         self._rows: list = []
         self._debt: dict = {"vznosy": {}, "energy": {}}
         self._selected: set[str] = set()   # num → selected
+        self._show_overpay = True          # False — переплата (долг < 0) отображается как 0,00
 
     def set_plots(self, plots: list):
         self.beginResetModel()
@@ -2386,6 +2387,11 @@ class PlotsListModel(QAbstractListModel):
 
     def set_debt_cache(self, debt: dict):
         self._debt = debt or {"vznosy": {}, "energy": {}}
+        if self._rows:
+            self.dataChanged.emit(self.index(0), self.index(len(self._rows) - 1))
+
+    def set_show_overpay(self, show: bool):
+        self._show_overpay = show
         if self._rows:
             self.dataChanged.emit(self.index(0), self.index(len(self._rows) - 1))
 
@@ -2405,6 +2411,8 @@ class PlotsListModel(QAbstractListModel):
         v = self._debt.get(key, {}).get(str(plot.get("num", "")))
         if v is None or abs(v) < 0.005:
             return "—"
+        if v < 0 and not self._show_overpay:
+            return fmt_money(0)
         return fmt_money(v)
 
     def vznosy_debt_text(self, plot: dict) -> str:
@@ -2610,6 +2618,9 @@ class PlotsWidget(QWidget):
         self._plots: list = self._load()
         self._df = None                       # выписка — нужна для долга в списке/детали
         self._search_text = ""
+        self._filter_mode = "all"             # all | debtors | debtors_vznosy | debtors_energy
+        self._sort_col: str | None = None     # num | name | vznosy | energy
+        self._sort_asc = True
         self._debt_cache: dict = {}           # {"vznosy": {num: float}, "energy": {num: float}}
         self._setup_ui()
         self._rebuild_table()
@@ -2620,10 +2631,7 @@ class PlotsWidget(QWidget):
         """Принимает загруженную выписку: пересчёт долга и обновление списка."""
         self._df = df
         self._recompute_debt()
-        self.list_model.set_debt_cache(self._debt_cache)
-        self.list_view.viewport().update()
-        self._refresh_master_cb()
-        self._refresh_toolbar()
+        self._rebuild_table()
 
     def _load(self) -> list:
         try:
@@ -2681,29 +2689,15 @@ class PlotsWidget(QWidget):
         layout.setSpacing(0)
 
         # ── Чистый список участков (вариант А: список, не таблица) ───────────
-        # Шапка списка: заголовок + счётчик слева, действия списка — справа.
+        # Шапка списка: заголовок слева, действия списка — справа.
+        # Счётчик и поиск переехали в панель групповых операций (см. ниже).
         list_hdr = QHBoxLayout()
         list_hdr.setSpacing(8)
         lbl_plots = QLabel("Участки")
         lbl_plots.setStyleSheet(
             "font-size:14px; font-weight:700; color:#1F2937; background:transparent;")
         list_hdr.addWidget(lbl_plots)
-        self._count_lbl = QLabel("")
-        self._count_lbl.setStyleSheet("font-size:12px; color:#9CA3AF; background:transparent;")
-        list_hdr.addWidget(self._count_lbl)
-
-        # Поиск — в той же строке, между счётчиком и кнопками (экономит место).
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("Поиск по номеру или ФИО")
-        self._search.setClearButtonEnabled(True)
-        # Свой стиль вместо нативного: «подбородок» (нижняя линия), на фокусе —
-        # бирюзовый вместо системно-синего. Толщина одинаковая, чтобы текст не прыгал.
-        self._search.setStyleSheet(
-            "QLineEdit{background:transparent;border:none;border-bottom:2px solid #D1D5DB;"
-            "border-radius:0;padding:6px 2px;font-size:13px;color:#1F2937;}"
-            "QLineEdit:focus{border-bottom:2px solid #07414F;}")
-        self._search.textChanged.connect(self._on_search_text)
-        list_hdr.addWidget(self._search, stretch=1)
+        list_hdr.addStretch()
 
         def _hdr_icon_btn(tooltip: str, handler) -> QPushButton:
             b = QPushButton()
@@ -2723,34 +2717,116 @@ class PlotsWidget(QWidget):
         list_hdr.addWidget(self._btn_add)
         QTimer.singleShot(0, self._refresh_icons)
 
-        # ── Панель групповых операций ──────────────────────────────────────
+        # ── Вкладки-фильтры: Все / Должники / Должники ЧВ / Должники Эл ──────
+        tabs_row = QHBoxLayout()
+        tabs_row.setContentsMargins(0, 4, 0, 0)
+        tabs_row.setSpacing(20)
+        self._tab_group = QButtonGroup(self)
+        self._tab_group.setExclusive(True)
+        self._tab_buttons: dict[str, QPushButton] = {}
+        self._TAB_LABELS = {
+            "all":            "Все",
+            "debtors":        "Должники",
+            "debtors_vznosy": "Должники ЧВ",
+            "debtors_energy": "Должники Эл",
+        }
+        for mode, label in self._TAB_LABELS.items():
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton{background:transparent;border:none;"
+                "border-bottom:2px solid transparent;padding:4px 2px 8px 2px;"
+                "font-size:13px;color:#6B7280;}"
+                "QPushButton:hover:!checked{color:#374151;}"
+                "QPushButton:checked{color:#07414F;font-weight:700;"
+                "border-bottom:2px solid #07414F;}")
+            btn.clicked.connect(lambda checked, m=mode: self._on_filter_tab(m))
+            self._tab_group.addButton(btn)
+            self._tab_buttons[mode] = btn
+            tabs_row.addWidget(btn)
+        tabs_row.addStretch()
+        self._tab_buttons["all"].setChecked(True)
+
+        # ── Панель групповых операций (всегда видима) ────────────────────────
         toolbar = QWidget()
         toolbar.setStyleSheet("background:transparent;")
         tb_l = QHBoxLayout(toolbar)
         tb_l.setContentsMargins(0, 4, 0, 4)
         tb_l.setSpacing(8)
-        self._selected_lbl = QLabel("")
-        self._selected_lbl.setStyleSheet(
-            "font-size:12px; color:#07414F; background:transparent; font-weight:600;")
-        tb_l.addWidget(self._selected_lbl)
-        tb_l.addStretch()
-        self._btn_bulk_delete = QPushButton()
-        self._btn_bulk_delete.setFixedSize(28, 28)
-        self._btn_bulk_delete.setIconSize(QSize(18, 18))
+        _SS_TB_ICON_BTN = (
+            "QPushButton{background:transparent;border:none;border-radius:6px;}"
+            "QPushButton:hover{background:#EBF4F6;}"
+            "QPushButton:disabled{background:transparent;}")
+
+        # Заглушка — массовое сохранение выбранных участков (пока не реализовано).
+        self._btn_bulk_save = QPushButton()
+        self._btn_bulk_save.setFixedSize(28, 28)
+        self._btn_bulk_save.setIconSize(QSize(18, 18))
+        self._btn_bulk_save.setIcon(_mat_icon(0xE161, 18, color="#07414F"))  # save
+        self._btn_bulk_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_bulk_save.setEnabled(False)
+        self._btn_bulk_save.clicked.connect(self._on_bulk_save_stub)
+        self._btn_bulk_save.installEventFilter(
+            _TooltipFilter("Сохранить выбранные", self._btn_bulk_save))
+        self._btn_bulk_save.setStyleSheet(_SS_TB_ICON_BTN)
+        tb_l.addWidget(self._btn_bulk_save)
+
+        self._btn_bulk_delete = QPushButton("Удалить")
         self._btn_bulk_delete.setIcon(_mat_icon(0xE92B, 18, color="#DC2626"))  # delete
+        self._btn_bulk_delete.setIconSize(QSize(18, 18))
         self._btn_bulk_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_bulk_delete.setEnabled(False)
         self._btn_bulk_delete.clicked.connect(self._bulk_delete)
         self._btn_bulk_delete.installEventFilter(
             _TooltipFilter("Удалить выбранные", self._btn_bulk_delete))
-        _SS_TB_BTN = (
-            "QPushButton{background:transparent;border:none;border-radius:6px;}"
+        self._btn_bulk_delete.setStyleSheet(
+            "QPushButton{background:transparent;border:none;border-radius:6px;"
+            "padding:4px 10px 4px 6px;font-size:12px;color:#DC2626;}"
             "QPushButton:hover{background:#FEF2F2;}"
-            "QPushButton:disabled{background:transparent;}")
-        self._btn_bulk_delete.setStyleSheet(_SS_TB_BTN)
+            "QPushButton:disabled{color:#FCA5A5;background:transparent;}")
         tb_l.addWidget(self._btn_bulk_delete)
+
+        # Переключатель «Показывать переплату» — включён по умолчанию; при
+        # выключении отрицательный долг (переплата) в таблице заменяется на 0,00.
+        self._chk_overpay = QPushButton(" Показывать переплату")
+        self._chk_overpay.setCheckable(True)
+        self._chk_overpay.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._chk_overpay.setIconSize(QSize(18, 18))
+        self._chk_overpay.setStyleSheet(
+            "QPushButton{background:transparent;border:none;border-radius:6px;"
+            "padding:4px 8px;font-size:12px;color:#374151;}"
+            "QPushButton:hover{background:#F3F4F6;}")
+        self._chk_overpay.setChecked(True)
+        self._refresh_overpay_icon()
+        self._chk_overpay.toggled.connect(self._on_toggle_overpay)
+        tb_l.addWidget(self._chk_overpay)
+
+        self._selected_lbl = QLabel("")
+        self._selected_lbl.setStyleSheet(
+            "font-size:12px; color:#07414F; background:transparent; font-weight:600;")
+        tb_l.addWidget(self._selected_lbl)
+        tb_l.addStretch()
+
+        self._count_lbl = QLabel("")
+        self._count_lbl.setStyleSheet("font-size:12px; color:#9CA3AF; background:transparent;")
+        tb_l.addWidget(self._count_lbl)
+
+        # Поиск — справа, после «Удалить».
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Поиск по номеру или ФИО")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(220)
+        # Свой стиль вместо нативного: «подбородок» (нижняя линия), на фокусе —
+        # бирюзовый вместо системно-синего. Толщина одинаковая, чтобы текст не прыгал.
+        self._search.setStyleSheet(
+            "QLineEdit{background:transparent;border:none;border-bottom:2px solid #D1D5DB;"
+            "border-radius:0;padding:6px 2px;font-size:13px;color:#1F2937;}"
+            "QLineEdit:focus{border-bottom:2px solid #07414F;}")
+        self._search.textChanged.connect(self._on_search_text)
+        tb_l.addWidget(self._search)
+
         self._toolbar = toolbar
-        self._toolbar.setVisible(False)
 
         # Капшен колонок (геометрия ~ как в делегате)
         cap = QWidget()
@@ -2775,8 +2851,15 @@ class PlotsWidget(QWidget):
         cap_vz.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         cap_en = QLabel("Электроэнергия"); cap_en.setFixedWidth(_PlotRowDelegate._EN_W)
         cap_en.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        for c in (cap_num, cap_name, cap_vz, cap_en):
-            c.setStyleSheet("font-size:11px; color:#9CA3AF; background:transparent;")
+        # Заголовки кликабельны — сортировка по столбцу (как в примере-таблице).
+        self._CAP_BASE = {"num": "№", "name": "Контакт",
+                           "vznosy": "Член. взносы", "energy": "Электроэнергия"}
+        self._cap_labels = {"num": cap_num, "name": cap_name,
+                             "vznosy": cap_vz, "energy": cap_en}
+        for key, c in self._cap_labels.items():
+            c.setCursor(Qt.CursorShape.PointingHandCursor)
+            c.mousePressEvent = lambda e, k=key: self._on_header_click(k)
+        self._refresh_sort_headers()
         cap_l.addWidget(cap_num)
         cap_l.addWidget(cap_name, stretch=1)
         cap_l.addWidget(cap_vz)
@@ -2835,6 +2918,7 @@ class PlotsWidget(QWidget):
         # справа 8 — небольшой зазор скроллбара до разделителя.
         table_vbox.setContentsMargins(24, 24, 8, 24)
         table_vbox.addLayout(list_hdr)
+        table_vbox.addLayout(tabs_row)
         table_vbox.addWidget(self._toolbar)
         table_vbox.addWidget(cap)
         table_vbox.addWidget(self.list_view, stretch=1)
@@ -3005,21 +3089,89 @@ class PlotsWidget(QWidget):
 
     def _refresh_toolbar(self):
         n = len(self.list_model.get_selected_nums())
-        self._toolbar.setVisible(n > 0)
-        self._selected_lbl.setText(f"Выбрано: {n}")
+        self._selected_lbl.setText(f"Выбрано: {n}" if n else "")
         self._btn_bulk_delete.setEnabled(n > 0)
+        self._btn_bulk_save.setEnabled(n > 0)
+
+    def _on_bulk_save_stub(self):
+        """Заглушка — массовое сохранение выбранных участков будет добавлено позже."""
+        pass
+
+    def _refresh_overpay_icon(self):
+        checked = self._chk_overpay.isChecked()
+        cp = 0xE834 if checked else 0xE835  # check_box / check_box_outline_blank
+        self._chk_overpay.setIcon(
+            _mat_icon(cp, 18, color="#07414F" if checked else "#9CA3AF"))
+
+    def _on_toggle_overpay(self, checked: bool):
+        self._refresh_overpay_icon()
+        self.list_model.set_show_overpay(checked)
+
+    def _is_debtor(self, plot: dict, key: str) -> bool:
+        v = self._debt_cache.get(key, {}).get(str(plot.get("num", "")))
+        return v is not None and v > 0.005
+
+    def _on_filter_tab(self, mode: str):
+        self._filter_mode = mode
+        self._rebuild_table()
+
+    def _refresh_tabs(self, base_plots: list):
+        counts = {
+            "all":            len(base_plots),
+            "debtors":        sum(1 for p in base_plots
+                                   if self._is_debtor(p, "vznosy") or self._is_debtor(p, "energy")),
+            "debtors_vznosy": sum(1 for p in base_plots if self._is_debtor(p, "vznosy")),
+            "debtors_energy": sum(1 for p in base_plots if self._is_debtor(p, "energy")),
+        }
+        for mode, btn in self._tab_buttons.items():
+            btn.setText(f"{self._TAB_LABELS[mode]} · {counts[mode]}")
+
+    def _on_header_click(self, col: str):
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+        self._refresh_sort_headers()
+        self._rebuild_table()
+
+    def _refresh_sort_headers(self):
+        for key, lbl in self._cap_labels.items():
+            base = self._CAP_BASE[key]
+            if key == self._sort_col:
+                arrow = " ↑" if self._sort_asc else " ↓"
+                lbl.setText(base + arrow)
+                lbl.setStyleSheet(
+                    "font-size:11px; color:#07414F; font-weight:700; background:transparent;")
+            else:
+                lbl.setText(base)
+                lbl.setStyleSheet("font-size:11px; color:#9CA3AF; background:transparent;")
+
+    def _sort_key_for(self, col: str):
+        if col == "num":
+            def key(p):
+                n = str(p.get("num", ""))
+                try:
+                    return (0, float(n))
+                except ValueError:
+                    return (1, n.lower())
+            return key
+        if col == "name":
+            return lambda p: _plot_primary_name(p).lower()
+        if col in ("vznosy", "energy"):
+            return lambda p: self._debt_cache.get(col, {}).get(str(p.get("num", ""))) or 0.0
+        return None
 
     def _bulk_delete(self):
         nums = self.list_model.get_selected_nums()
         if not nums:
             return
-        reply = QMessageBox.question(
-            self, "Удаление участков",
-            f"Удалить {len(nums)} участков безвозвратно?\n"
+        confirmed = _ConfirmDialog.confirm(
+            self, f"Удалить {len(nums)} участков?",
+            "Будет удалена вся информация участков, включая документы. "
             "Это действие нельзя отменить.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+            confirm_text="Да, удалить")
+        if not confirmed:
             return
         self._plots = [p for p in self._plots
                        if str(p.get("num", "")) not in nums]
@@ -3109,11 +3261,25 @@ class PlotsWidget(QWidget):
 
     def _rebuild_table(self):
         text = self._search_text
-        plots = self._plots
+        base = self._plots
         if text:
-            plots = [p for p in plots
-                     if text in str(p.get("num", "")).lower()
-                     or any(text in nm.lower() for nm in _plot_search_names(p))]
+            base = [p for p in base
+                    if text in str(p.get("num", "")).lower()
+                    or any(text in nm.lower() for nm in _plot_search_names(p))]
+        self._refresh_tabs(base)
+        mode = self._filter_mode
+        if mode == "debtors":
+            plots = [p for p in base
+                     if self._is_debtor(p, "vznosy") or self._is_debtor(p, "energy")]
+        elif mode == "debtors_vznosy":
+            plots = [p for p in base if self._is_debtor(p, "vznosy")]
+        elif mode == "debtors_energy":
+            plots = [p for p in base if self._is_debtor(p, "energy")]
+        else:
+            plots = base
+        if self._sort_col:
+            plots = sorted(plots, key=self._sort_key_for(self._sort_col),
+                            reverse=not self._sort_asc)
         self.list_model.set_plots(plots)
         self.list_model.set_debt_cache(self._debt_cache)
         self._refresh_master_cb()
@@ -3192,6 +3358,8 @@ class PlotsWidget(QWidget):
         col_num = None
         col_name = None
         col_area = None
+        col_phone = None
+        col_email = None
         for col in df.columns:
             col_lower = str(col).lower().strip()
             if col_num is None and ("участк" in col_lower or col_lower in ("№", "n", "номер")):
@@ -3200,6 +3368,10 @@ class PlotsWidget(QWidget):
                 col_name = col
             if col_area is None and ("площад" in col_lower or "кв.м" in col_lower or "м²" in col_lower or "м2" in col_lower):
                 col_area = col
+            if col_phone is None and ("телефон" in col_lower or "тел." in col_lower or col_lower == "тел" or "phone" in col_lower):
+                col_phone = col
+            if col_email is None and ("email" in col_lower or "e-mail" in col_lower or "почта" in col_lower):
+                col_email = col
 
         if col_num is None or col_name is None:
             QMessageBox.warning(
@@ -3210,16 +3382,55 @@ class PlotsWidget(QWidget):
             )
             return
 
+        people = people_reg.load_people()
+        people_dirty = False
+
+        def _clean_phone(raw: str) -> str:
+            raw = raw.strip()
+            # Excel часто хранит телефон как число — "89261234567.0".
+            if re.fullmatch(r"\+?\d+\.0", raw):
+                raw = raw[:-2]
+            return raw
+
+        def _get_or_create_person(name: str, phone: str = "", email: str = "") -> dict:
+            nonlocal people_dirty
+            person = people_reg.find_by_name(people, name)
+            if person is None:
+                person = people_reg.create_person(name, phone, email)
+                people.append(person)
+                people_dirty = True
+            else:
+                if phone and not person.get("phone"):
+                    person["phone"] = phone
+                    people_dirty = True
+                if email and not person.get("email"):
+                    person["email"] = email
+                    people_dirty = True
+            return person
+
         imported: dict[str, dict] = {}
         for _, row in df.iterrows():
             num = str(row[col_num]).strip()
             name = str(row[col_name]).strip()
             if not num or num.lower() in ("nan", "none", "") or not name or name.lower() in ("nan", "none", ""):
                 continue
+            phone = ""
+            if col_phone is not None:
+                raw_phone = str(row[col_phone]).strip()
+                if raw_phone and raw_phone.lower() not in ("nan", "none"):
+                    phone = _clean_phone(raw_phone)
+            email = ""
+            if col_email is not None:
+                raw_email = str(row[col_email]).strip()
+                if raw_email and raw_email.lower() not in ("nan", "none"):
+                    email = raw_email
             entry = imported.setdefault(num, {"owners": [], "area": None})
             existing_names = [_owner_name(o) for o in entry["owners"]]
             if name not in existing_names:
-                entry["owners"].append(_make_owner(name))
+                person = _get_or_create_person(name, phone, email)
+                owner = _make_owner(name, is_member=True, person_id=person["id"],
+                                     phone=phone, email=email)
+                entry["owners"].append(owner)
             if col_area is not None and entry["area"] is None:
                 raw = str(row[col_area]).strip().replace(",", ".")
                 if raw and raw.lower() not in ("nan", "none"):
@@ -3241,7 +3452,7 @@ class PlotsWidget(QWidget):
             "Как импортировать?"
         )
         btn_replace = msg.addButton("Заменить всё", QMessageBox.ButtonRole.DestructiveRole)
-        btn_merge   = msg.addButton("Объединить",   QMessageBox.ButtonRole.AcceptRole)
+        btn_merge   = msg.addButton("Добавить новые", QMessageBox.ButtonRole.AcceptRole)
         btn_cancel  = msg.addButton("Отмена",        QMessageBox.ButtonRole.RejectRole)
         msg.setDefaultButton(btn_merge)
         msg.exec()
@@ -3253,6 +3464,7 @@ class PlotsWidget(QWidget):
         if clicked is btn_replace:
             new_plots = []
             for num, entry in imported.items():
+                _ensure_single_primary(entry["owners"])
                 item = {"num": num, "owners": entry["owners"]}
                 if entry["area"] is not None:
                     item["area"] = entry["area"]
@@ -3270,14 +3482,22 @@ class PlotsWidget(QWidget):
                         if _owner_name(o) not in current_names:
                             current_owners.append(o)
                     existing[num]["owners"] = current_owners
+                    _ensure_single_primary(current_owners)
                     if area is not None and existing[num].get("area") in (None, "", 0):
                         existing[num]["area"] = area
                 else:
+                    _ensure_single_primary(owners)
                     item = {"num": num, "owners": owners}
                     if area is not None:
                         item["area"] = area
                     existing[num] = item
             self._plots = list(existing.values())
+
+        if people_dirty:
+            try:
+                people_reg.save_people(people)
+            except Exception:
+                pass
 
         self._save()
         self._rebuild_table()
