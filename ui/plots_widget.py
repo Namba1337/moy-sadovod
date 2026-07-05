@@ -2,7 +2,7 @@ import json
 import os
 import re
 import shutil
-from datetime import date, datetime
+from datetime import date
 
 import pandas as pd
 from PyQt6.QtCore import (
@@ -11,15 +11,15 @@ from PyQt6.QtCore import (
     QRegularExpression, QSize, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBitmap, QColor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen,
+    QBitmap, QColor, QFont, QFontMetrics, QIcon, QPainter, QPen,
     QPixmap, QPolygon, QRegion, QRegularExpressionValidator,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog,
-    QDialogButtonBox, QFileDialog, QFormLayout,
+    QAbstractItemView, QApplication, QButtonGroup, QDateEdit, QDialog,
+    QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QCompleter, QListView, QMessageBox, QPushButton, QScrollArea, QScrollBar, QSizePolicy, QStyle, QStyledItemDelegate,
-    QStyleFactory, QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTreeView,
+    QStyleFactory,
     QVBoxLayout, QWidget,
 )
 
@@ -53,13 +53,6 @@ _INPUT_ERROR_SS = (
 _FIELD_LABEL_SS = "font-size:10px; color:#9CA3AF; background:transparent;"
 
 
-def _plot_num_key(s: str):
-    try:
-        return (0, int(s), s)
-    except ValueError:
-        return (1, 0, s)
-
-
 # Базовые аксессоры — единый источник логики в core.ownership
 # (обратная совместимость со строками и старым полем relation внутри).
 _owner_name = ownership.owner_name
@@ -67,31 +60,10 @@ _is_owner = ownership.is_owner
 _owner_area = ownership.owner_area
 
 
-def _owner_share_str(owner) -> str:
-    """Доля в праве как строка (для поля ввода), напр. '1/2'. Иначе ''."""
-    if isinstance(owner, dict):
-        return str(owner.get("share", "") or "")
-    return ""
-
-
 def _is_visible(owner) -> bool:
     if isinstance(owner, dict):
         return bool(owner.get("is_visible", False))
     return False
-
-
-def _owner_member_doc(owner) -> str:
-    if isinstance(owner, dict):
-        return owner.get("member_doc", "")
-    return ""
-
-
-def _split_name(full_name: str) -> tuple:
-    """'Иванов Иван Иванович' → ('Иванов', 'Иван', 'Иванович')."""
-    parts = (full_name or "").strip().split(maxsplit=2)
-    return (parts[0] if parts else "",
-            parts[1] if len(parts) > 1 else "",
-            parts[2] if len(parts) > 2 else "")
 
 
 def _mat_font(pixel_size: int = 20, fill: int = 0) -> QFont:
@@ -337,24 +309,6 @@ def _make_docs_badge(parent, have: int, total: int) -> QWidget:
     return _make_warn_pill(
         parent, f"{have}/{total}",
         tooltip=f"Не хватает документов: {total - have} из {total}")
-
-
-def _owner_opd_doc(owner) -> str:
-    if isinstance(owner, dict):
-        return owner.get("opd_doc", "")
-    return ""
-
-
-def _owner_phone(owner) -> str:
-    if isinstance(owner, dict):
-        return owner.get("phone", "")
-    return ""
-
-
-def _owner_email(owner) -> str:
-    if isinstance(owner, dict):
-        return owner.get("email", "")
-    return ""
 
 
 def _make_owner(name: str, is_owner: bool = True, area: float | None = None,
@@ -868,910 +822,7 @@ class _QuickAddPlotDialog(_ConfirmDialog):
 
 
 # ============================================================================ #
-#  Узел дерева                                                                 #
-# ============================================================================ #
-
-class _PlotNode:
-    """Узел дерева. kind='plot' — строка участка, kind='owner' — строка владельца."""
-
-    __slots__ = ("kind", "plot_ref", "owner_idx", "parent", "children")
-
-    def __init__(self, kind: str, plot_ref: dict | None = None,
-                 owner_idx: int = -1, parent=None):
-        self.kind = kind
-        self.plot_ref = plot_ref
-        self.owner_idx = owner_idx
-        self.parent = parent
-        self.children: list["_PlotNode"] = []
-
-    def row(self) -> int:
-        if self.parent is not None:
-            return self.parent.children.index(self)
-        return 0
-
-
-# ============================================================================ #
-#  Модель дерева                                                               #
-# ============================================================================ #
-
-class PlotsTreeModel(QAbstractItemModel):
-    COLUMNS = ["№", "Площадь, м²", "Контакт",
-               "Контактный номер", "E-mail", "_edit", "_check"]
-
-    # Эмитится только из setData (inline-редактирование), чтобы автосохранять.
-    ownerDataEdited = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._root = _PlotNode("root")
-
-    def load(self, plots: list):
-        self.beginResetModel()
-        root = _PlotNode("root")
-        for plot in plots:
-            plot_node = _PlotNode("plot", plot_ref=plot, parent=root)
-            for i in range(len(plot.get("owners", []))):
-                owner_node = _PlotNode("owner", plot_ref=plot, owner_idx=i, parent=plot_node)
-                plot_node.children.append(owner_node)
-            root.children.append(plot_node)
-        self._root = root
-        self.endResetModel()
-
-    def top_nodes(self) -> list:
-        return self._root.children
-
-    # -- core tree ----------------------------------------------------------- #
-
-    def index(self, row, column, parent=QModelIndex()):
-        if not self.hasIndex(row, column, parent):
-            return QModelIndex()
-        parent_node = parent.internalPointer() if parent.isValid() else self._root
-        if 0 <= row < len(parent_node.children):
-            return self.createIndex(row, column, parent_node.children[row])
-        return QModelIndex()
-
-    def parent(self, index):
-        if not index.isValid():
-            return QModelIndex()
-        node = index.internalPointer()
-        p = node.parent
-        if p is None or p is self._root:
-            return QModelIndex()
-        return self.createIndex(p.row(), 0, p)
-
-    def rowCount(self, parent=QModelIndex()):
-        if parent.column() > 0:
-            return 0
-        node = parent.internalPointer() if parent.isValid() else self._root
-        return len(node.children)
-
-    def columnCount(self, parent=QModelIndex()):
-        return len(self.COLUMNS)
-
-    # -- read ---------------------------------------------------------------- #
-
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return None
-        node = index.internalPointer()
-        col = self.COLUMNS[index.column()]
-
-        if col in ("_edit", "_check"):
-            return "" if role == Qt.ItemDataRole.DisplayRole else None
-
-        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
-            if node.kind == "plot":
-                if col == "№":
-                    return str(node.plot_ref.get('num', '?'))
-                if col == "Контакт":
-                    owners = node.plot_ref.get("owners", []) or []
-                    if not owners:
-                        return "—"
-                    visible = next((o for o in owners if _is_visible(o)), None)
-                    if visible:
-                        return _owner_name(visible)
-                    main = next((o for o in owners if _is_owner(o)), owners[0])
-                    return _owner_name(main)
-                if col == "Площадь, м²":
-                    area = node.plot_ref.get("area")
-                    try:
-                        v = float(area) if area not in (None, "") else None
-                    except (TypeError, ValueError):
-                        v = None
-                    return f"{v:g}" if v is not None else "—"
-                if col in ("Контактный номер", "E-mail"):
-                    owners = node.plot_ref.get("owners", []) or []
-                    visible = next((o for o in owners if _is_visible(o)), None)
-                    owner = visible or (next((o for o in owners if _is_owner(o)), owners[0]) if owners else None)
-                    if owner is None:
-                        return "—"
-                    return (_owner_phone(owner) if col == "Контактный номер" else _owner_email(owner)) or "—"
-                return ""
-            elif node.kind == "owner":
-                owners = node.plot_ref.get("owners", [])
-                owner = owners[node.owner_idx] if 0 <= node.owner_idx < len(owners) else None
-                if col == "Контакт":
-                    return _owner_name(owner) if owner is not None else ""
-                if col == "Площадь, м²":
-                    if owner is None:
-                        return ""
-                    v = _owner_area(owner)
-                    if role == Qt.ItemDataRole.EditRole:
-                        return f"{v:g}" if v is not None else ""
-                    return f"{v:g}" if v is not None else "—"
-                if col == "Контактный номер":
-                    return _owner_phone(owner) if owner is not None else ""
-                if col == "E-mail":
-                    return _owner_email(owner) if owner is not None else ""
-                return ""
-
-        if role == Qt.ItemDataRole.ForegroundRole:
-            if node.kind == "plot":
-                if col == "№":
-                    return QColor("#07414F")
-                if col == "Площадь, м²":
-                    area = node.plot_ref.get("area")
-                    return QColor("#9CA3AF") if area in (None, "") else QColor("#374151")
-                return QColor("#374151")
-            elif node.kind == "owner":
-                return QColor("#555F6D")
-
-        if role == Qt.ItemDataRole.FontRole:
-            if node.kind == "plot" and col == "№":
-                f = QFont()
-                f.setBold(True)
-                return f
-
-        if role == Qt.ItemDataRole.TextAlignmentRole:
-            if col == "Площадь, м²":
-                return int(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-        return None
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            col = self.COLUMNS[section]
-            if col == "_edit":   return chr(0xE3C9)
-            if col == "_check":  return chr(0xE92B)
-            return col
-        return None
-
-    # -- edit ---------------------------------------------------------------- #
-
-    def flags(self, index):
-        if not index.isValid():
-            return Qt.ItemFlag.NoItemFlags
-        node = index.internalPointer()
-        col = self.COLUMNS[index.column()]
-        f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if node.kind == "owner" and col in ("Контакт", "Площадь, м²"):
-            f |= Qt.ItemFlag.ItemIsEditable
-        return f
-
-    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
-        if role != Qt.ItemDataRole.EditRole or not index.isValid():
-            return False
-        node = index.internalPointer()
-        col = self.COLUMNS[index.column()]
-        if node.kind == "owner" and col in ("Контакт", "Площадь, м²"):
-            text = str(value).strip()
-            owners = node.plot_ref.get("owners", [])
-            if not (0 <= node.owner_idx < len(owners)):
-                return False
-            old = owners[node.owner_idx]
-            # Сохраняем ВСЕ поля владельца (телефон, e-mail, документы,
-            # since/until/share), меняя только редактируемую ячейку.
-            new = dict(old) if isinstance(old, dict) else {"name": str(old), "is_owner": True}
-            if col == "Контакт":
-                if not text:
-                    return False
-                new["name"] = text
-                owners[node.owner_idx] = new
-                pn = node.parent
-                if pn is not None:
-                    fio_col = self.COLUMNS.index("Контакт")
-                    self.dataChanged.emit(self.createIndex(pn.row(), fio_col, pn),
-                                         self.createIndex(pn.row(), fio_col, pn))
-            else:  # Площадь, м²
-                if text in ("", "—"):
-                    new.pop("area", None)
-                else:
-                    try:
-                        area = float(text.replace(",", "."))
-                        if area <= 0:
-                            return False
-                    except ValueError:
-                        return False
-                    new["area"] = area
-                owners[node.owner_idx] = new
-            self.dataChanged.emit(index, index)
-            self.ownerDataEdited.emit()
-            return True
-        return False
-
-    # -- sort ---------------------------------------------------------------- #
-
-    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
-        if not (0 <= column < len(self.COLUMNS)):
-            return
-        col = self.COLUMNS[column]
-        self.beginResetModel()
-        reverse = order == Qt.SortOrder.DescendingOrder
-        if col == "№":
-            self._root.children.sort(
-                key=lambda n: _plot_num_key(str(n.plot_ref.get("num", ""))),
-                reverse=reverse,
-            )
-        elif col == "Контакт":
-            def _fio_key(n):
-                owners = n.plot_ref.get("owners") or []
-                main = next((o for o in owners if _is_owner(o)), owners[0] if owners else {})
-                return _owner_name(main).lower()
-            self._root.children.sort(key=_fio_key, reverse=reverse)
-        elif col == "Площадь, м²":
-            def _area_key(n):
-                try:
-                    v = n.plot_ref.get("area")
-                    if v in (None, ""):
-                        return float("inf")
-                    return float(v)
-                except (TypeError, ValueError):
-                    return float("inf")
-            self._root.children.sort(key=_area_key, reverse=reverse)
-        self.endResetModel()
-
-# ============================================================================ #
-#  Делегат столбца «Контакт»                                          #
-# ============================================================================ #
-
-class _FioDelegate(QStyledItemDelegate):
-    """Для строк-участков рисует имя + овальную кнопку «Показать/Свернуть (N)»."""
-
-    toggleRequested = pyqtSignal(QModelIndex)
-
-    _BG         = QColor("#FFFFFF")
-    _BG_ALT     = QColor("#F0F4F8")
-    _BG_HOVER   = QColor("#DDE4EE")
-    _BG_SEL     = QColor("#C9D8E2")
-    _BORDER     = QColor("#E3E8EF")
-    _TEXT_FG    = QColor("#1F2937")
-    _OWNER_FG   = QColor("#555F6D")
-    _BTN_BG     = QColor("#E8F0F5")
-    _BTN_BG_H   = QColor("#C9D8E2")
-    _BTN_FG     = QColor("#07414F")
-    _BTN_BORDER = QColor("#B5C8D5")
-    _BTN_H      = 22
-    _FIO_COL    = PlotsTreeModel.COLUMNS.index("Контакт")
-
-    def __init__(self, view):
-        super().__init__(view)
-        self._view = view
-        self._hover_btn_index = QModelIndex()
-        self._tooltip_index   = QModelIndex()
-        self._tooltip_text    = ""
-        self.compact = False  # лаконичный режим (открыт drawer): только имя
-        view.viewport().installEventFilter(self)
-
-    # -- hover tracking -------------------------------------------------------
-
-    def eventFilter(self, obj, event):
-        if obj is self._view.viewport():
-            if event.type() == QEvent.Type.MouseMove:
-                p = event.position().toPoint()
-                self._update_btn_hover(p)
-                self._update_icon_tooltip(p)
-            elif event.type() == QEvent.Type.Leave:
-                self._update_btn_hover(None)
-                self._tooltip_index = QModelIndex()
-                self._tooltip_text  = ""
-                _AppTooltip.hide()
-        return False
-
-    def _update_btn_hover(self, pos):
-        new_hover = QModelIndex()
-        if pos is not None:
-            idx = self._view.indexAt(pos)
-            if idx.isValid() and idx.column() == self._FIO_COL:
-                node = idx.internalPointer()
-                if node is not None and node.kind == "plot":
-                    n = len(node.plot_ref.get("owners", []) or [])
-                    if n > 1:
-                        rect = self._view.visualRect(idx)
-                        text = str(idx.data(Qt.ItemDataRole.DisplayRole) or "")
-                        if self._btn_rect(rect, n, text).contains(pos):
-                            new_hover = idx
-        if new_hover != self._hover_btn_index:
-            old = self._hover_btn_index
-            self._hover_btn_index = new_hover
-            if old.isValid():
-                self._view.update(old)
-            if new_hover.isValid():
-                self._view.update(new_hover)
-        if new_hover.isValid():
-            self._view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-            self._view.viewport().unsetCursor()
-
-    def _update_icon_tooltip(self, pos):
-        target     = QModelIndex()
-        target_tip = ""
-        idx = self._view.indexAt(pos)
-        if idx.isValid() and idx.column() == self._FIO_COL:
-            node = idx.internalPointer()
-            if node is not None:
-                owners = node.plot_ref.get("owners", [])
-                if node.kind == "owner":
-                    owner = owners[node.owner_idx] if 0 <= node.owner_idx < len(owners) else None
-                elif node.kind == "plot" and len(owners) == 1:
-                    owner = owners[0]
-                else:
-                    owner = None
-                # Агрегированные индикаторы на родительских строках (несколько владельцев)
-                if owner is None and node.kind == "plot" and len(owners) > 1:
-                    miss_m = sum(1 for o in owners if _is_owner(o) and not _owner_member_doc(o))
-                    miss_o = sum(1 for o in owners if _is_owner(o) and not _owner_opd_doc(o))
-                    miss_a = sum(1 for o in owners if _is_owner(o) and _owner_area(o) is None)
-                    indicators = []
-                    if miss_m > 0:
-                        indicators.append((18, str(miss_m), f"Нет заявления о вступлении: {miss_m}"))
-                    if miss_o > 0:
-                        indicators.append((18, str(miss_o), f"Нет заявления на ОПД: {miss_o}"))
-                    if miss_a > 0:
-                        f_m2 = QFont(); f_m2.setPixelSize(11); f_m2.setBold(True)
-                        lw_m2 = QFontMetrics(f_m2).horizontalAdvance("м²")
-                        indicators.append((lw_m2, str(miss_a), f"Площадь не заполнена: {miss_a}"))
-                    if indicators:
-                        f_cnt = QFont(); f_cnt.setPixelSize(11); f_cnt.setBold(True)
-                        fm    = QFontMetrics(f_cnt)
-                        cell_rect = self._view.visualRect(idx)
-                        cur_x = cell_rect.right() - 8
-                        for lw, cnt_str, tip in reversed(indicators):
-                            cw   = fm.horizontalAdvance(cnt_str)
-                            zone = QRect(cur_x - cw - 2 - lw, cell_rect.top(),
-                                         lw + 2 + cw, cell_rect.height())
-                            if zone.contains(pos):
-                                target, target_tip = idx, tip
-                                break
-                            cur_x -= lw + 2 + cw + 4
-                if owner is not None:
-                    cell_rect = self._view.visualRect(idx)
-                    has_area  = (_owner_area(owner) is not None)
-                    m2_w      = 22
-                    m2_off    = (m2_w + 2) if not has_area else 0
-                    if _is_owner(owner):
-                        # м² (самый правый, если площадь не заполнена)
-                        if not has_area:
-                            m2_zone = QRect(cell_rect.right() - 6 - m2_w, cell_rect.top(),
-                                            m2_w + 6, cell_rect.height())
-                            if m2_zone.contains(pos):
-                                target, target_tip = idx, "Площадь не заполнена"
-                        # OPD (левее м²)
-                        if not target.isValid():
-                            opd_zone = QRect(cell_rect.right() - 26 - m2_off, cell_rect.top(),
-                                             26, cell_rect.height())
-                            if opd_zone.contains(pos):
-                                has_opd = bool(_owner_opd_doc(owner))
-                                target, target_tip = idx, (
-                                    "Заявление на ОПД прикреплено" if has_opd
-                                    else "Заявление на ОПД не прикреплено"
-                                )
-                        # Член СНТ (левее OPD)
-                        if not target.isValid():
-                            pc_zone = QRect(cell_rect.right() - 48 - m2_off, cell_rect.top(),
-                                            22, cell_rect.height())
-                            if pc_zone.contains(pos):
-                                has_doc = bool(_owner_member_doc(owner))
-                                target, target_tip = idx, (
-                                    "Заявление о вступлении прикреплено" if has_doc
-                                    else "Заявление о вступлении не прикреплено"
-                                )
-                        # article_person (Собственник) — левее Член СНТ
-                        if not target.isValid():
-                            ic_zone = QRect(cell_rect.right() - 70 - m2_off, cell_rect.top(),
-                                            22, cell_rect.height())
-                            if ic_zone.contains(pos):
-                                target, target_tip = idx, "Собственник"
-                    # bookmark_star (Видимый) — самый левый из иконок
-                    if not target.isValid() and _is_visible(owner):
-                        vis_rect = QRect(cell_rect.right() - 92 - m2_off, cell_rect.top(),
-                                         22, cell_rect.height())
-                        if vis_rect.contains(pos):
-                            target, target_tip = idx, "Видимый"
-        if target == self._tooltip_index and target_tip == self._tooltip_text:
-            return
-        self._tooltip_index = target
-        self._tooltip_text  = target_tip
-        if target.isValid():
-            gp = self._view.viewport().mapToGlobal(pos)
-            _AppTooltip.show_at(target_tip, gp)
-        else:
-            _AppTooltip.hide()
-
-    # -- geometry -------------------------------------------------------------
-
-    def _btn_rect(self, cell_rect: QRect, n: int, text: str = "") -> QRect:
-        f_btn = QFont()
-        f_btn.setPixelSize(11)
-        f_btn.setBold(True)
-        w = QFontMetrics(f_btn).horizontalAdvance(f"Свернуть ({n})") + 20
-        y = cell_rect.top() + (cell_rect.height() - self._BTN_H) // 2
-        f_text = QFont()
-        f_text.setPixelSize(13)
-        text_w = QFontMetrics(f_text).horizontalAdvance(text) if text else 0
-        x = cell_rect.left() + 8 + text_w + 8
-        return QRect(x, y, w, self._BTN_H)
-
-    # -- painting -------------------------------------------------------------
-
-    def paint(self, painter, option, index):
-        painter.save()
-        node = index.internalPointer()
-
-        is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
-        if option.state & QStyle.StateFlag.State_Selected:
-            bg = self._BG_SEL
-        elif option.state & QStyle.StateFlag.State_MouseOver:
-            bg = self._BG_HOVER
-        else:
-            bg = self._BG_ALT if is_alt else self._BG
-        painter.fillRect(option.rect, bg)
-        if not self.compact:  # в лаконичном режиме без разделителей строк (вид списка)
-            painter.setPen(QPen(self._BORDER, 1))
-            painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
-
-        if node is None:
-            painter.restore()
-            return
-
-        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-        n = len(node.plot_ref.get("owners", []) or []) if node.kind == "plot" else 0
-
-        f_text = QFont()
-        f_text.setPixelSize(13)
-
-        if self.compact:
-            # Лаконичный режим (открыт drawer): только имя, без индикаторов и кнопки
-            indent = 20 if node.kind == "owner" else 0
-            fg = self._OWNER_FG if node.kind == "owner" else self._TEXT_FG
-            painter.setPen(fg)
-            painter.setFont(f_text)
-            painter.drawText(option.rect.adjusted(8 + indent, 0, -8, 0),
-                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                             text)
-            painter.restore()
-            return
-
-        if node.kind == "plot" and n > 1:
-            col0 = self._view.model().index(index.row(), 0,
-                                            self._view.model().parent(index))
-            is_expanded = self._view.isExpanded(col0)
-            label = f"Свернуть ({n})" if is_expanded else f"Показать ({n})"
-
-            btn = self._btn_rect(option.rect, n, text)
-
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            btn_bg = self._BTN_BG_H if self._hover_btn_index == index else self._BTN_BG
-            painter.setBrush(btn_bg)
-            painter.setPen(QPen(self._BTN_BORDER, 1))
-            # Полупиксельные координаты: 1px-перо ложится точно в пиксельную
-            # сетку, без них антиалиасинг размазывает бордер на два пикселя.
-            btn_f = QRectF(btn).adjusted(0.5, 0.5, -0.5, -0.5)
-            r = btn_f.height() / 2.0
-            painter.drawRoundedRect(btn_f, r, r)
-
-            f_btn = QFont()
-            f_btn.setPixelSize(11)
-            f_btn.setBold(True)
-            painter.setPen(self._BTN_FG)
-            painter.setFont(f_btn)
-            painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, label)
-
-            # Индикаторы пропущенных данных слева от кнопки
-            owners_list = node.plot_ref.get("owners", [])
-            miss_m = sum(1 for o in owners_list if _is_owner(o) and not _owner_member_doc(o))
-            miss_o = sum(1 for o in owners_list if _is_owner(o) and not _owner_opd_doc(o))
-            miss_a = sum(1 for o in owners_list if _is_owner(o) and _owner_area(o) is None)
-            # (label, count, is_icon) — порядок соответствует расположению left→right
-            indicators = []
-            if miss_m > 0:
-                indicators.append((chr(0xF567), miss_m, True))
-            if miss_o > 0:
-                indicators.append((chr(0xF0DC), miss_o, True))
-            if miss_a > 0:
-                indicators.append(("м²", miss_a, False))
-            f_ic2 = QFont("Material Symbols Rounded")
-            f_ic2.setPixelSize(15)
-            f_cnt = QFont()
-            f_cnt.setPixelSize(11)
-            f_cnt.setBold(True)
-            fm_cnt = QFontMetrics(f_cnt)
-            # Индикаторы — от правого края влево, независимо от кнопки
-            cur_x = option.rect.right() - 8
-            for lbl, cnt, is_icon in reversed(indicators):
-                cnt_str  = str(cnt)
-                cw       = fm_cnt.horizontalAdvance(cnt_str)
-                lw       = 18 if is_icon else fm_cnt.horizontalAdvance(lbl)
-                lbl_rect  = QRect(cur_x - cw - 2 - lw, option.rect.top(),
-                                  lw, option.rect.height())
-                cnt_rect2 = QRect(cur_x - cw, option.rect.top(),
-                                  cw, option.rect.height())
-                painter.setPen(QColor("#F59E0B"))
-                painter.setFont(f_ic2 if is_icon else f_cnt)
-                painter.drawText(lbl_rect, Qt.AlignmentFlag.AlignCenter, lbl)
-                painter.setFont(f_cnt)
-                painter.drawText(cnt_rect2, Qt.AlignmentFlag.AlignCenter, cnt_str)
-                cur_x -= lw + 2 + cw + 4
-            # Текст — от левого края до кнопки
-            text_rect = QRect(option.rect.left() + 8, option.rect.top(),
-                              btn.left() - option.rect.left() - 10, option.rect.height())
-            painter.setPen(self._TEXT_FG)
-            painter.setFont(f_text)
-            painter.drawText(text_rect,
-                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                             text)
-        else:
-            fg = self._OWNER_FG if node.kind == "owner" else self._TEXT_FG
-            if node.kind == "owner":
-                owners = node.plot_ref.get("owners", [])
-                owner = owners[node.owner_idx] if 0 <= node.owner_idx < len(owners) else None
-            elif node.kind == "plot" and n == 1:
-                owners = node.plot_ref.get("owners", [])
-                owner = owners[0] if owners else None
-            else:
-                owner = None
-            # Коннектор иерархии для строк-владельцев
-            if node.kind == "owner":
-                total   = len(node.plot_ref.get("owners", []))
-                is_last = (node.owner_idx == total - 1)
-                cx = option.rect.left() + 12
-                cy = option.rect.top() + option.rect.height() // 2
-                painter.save()
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-                painter.setPen(QPen(self._BTN_BORDER, 1))
-                painter.drawLine(cx, option.rect.top(), cx,
-                                 cy if is_last else option.rect.bottom())
-                painter.drawLine(cx, cy, cx + 10, cy)
-                painter.restore()
-                indent = 20
-            else:
-                indent = 0
-            if owner is not None and _is_owner(owner):
-                    pw   = 20
-                    ic_w = 20
-                    f_ic = QFont("Material Symbols Rounded")
-                    f_ic.setPixelSize(16)
-                    painter.setFont(f_ic)
-                    # м² будет самым правым — вычисляем смещение заранее
-                    m2_w     = 22
-                    has_area = (_owner_area(owner) is not None)
-                    m2_off   = (m2_w + 2) if not has_area else 0
-                    # OPD (левее м²)
-                    has_opd   = bool(_owner_opd_doc(owner))
-                    opd_char  = chr(0xE8E8) if has_opd else chr(0xF0DC)
-                    opd_color = QColor("#07414F") if has_opd else QColor("#F59E0B")
-                    opd_rect  = QRect(option.rect.right() - pw - 6 - m2_off, option.rect.top(),
-                                      pw, option.rect.height())
-                    painter.setPen(opd_color)
-                    painter.drawText(opd_rect, Qt.AlignmentFlag.AlignCenter, opd_char)
-                    # Член СНТ (левее OPD)
-                    pc_x     = option.rect.right() - pw - 6 - m2_off - pw - 2
-                    has_doc  = bool(_owner_member_doc(owner))
-                    pc_char  = chr(0xF565) if has_doc else chr(0xF567)
-                    pc_color = QColor("#07414F") if has_doc else QColor("#F59E0B")
-                    pc_rect  = QRect(pc_x, option.rect.top(), pw, option.rect.height())
-                    painter.setPen(pc_color)
-                    painter.drawText(pc_rect, Qt.AlignmentFlag.AlignCenter, pc_char)
-                    # article_person (левее Член СНТ)
-                    ic_x    = pc_x - ic_w - 2
-                    ic_rect = QRect(ic_x, option.rect.top(), ic_w, option.rect.height())
-                    painter.setPen(QColor("#07414F"))
-                    painter.drawText(ic_rect, Qt.AlignmentFlag.AlignCenter, "")
-                    right_margin = pw + pw + ic_w + m2_off + 14
-                    # м² (самый правый, только если площадь не заполнена)
-                    if not has_area:
-                        f_m2 = QFont()
-                        f_m2.setPixelSize(10)
-                        f_m2.setBold(True)
-                        m2_rect = QRect(option.rect.right() - 6 - m2_w, option.rect.top(),
-                                        m2_w, option.rect.height())
-                        painter.setPen(QColor("#F59E0B"))
-                        painter.setFont(f_m2)
-                        painter.drawText(m2_rect, Qt.AlignmentFlag.AlignCenter, "м²")
-                    if _is_visible(owner):
-                        vis_w    = 20
-                        vis_rect = QRect(ic_x - vis_w - 2, option.rect.top(),
-                                         vis_w, option.rect.height())
-                        painter.setFont(f_ic)
-                        painter.setPen(QColor("#07414F"))
-                        painter.drawText(vis_rect, Qt.AlignmentFlag.AlignCenter,
-                                         chr(0xF454))
-                        right_margin += vis_w + 2
-                    text_rect = option.rect.adjusted(8 + indent, 0, -right_margin, 0)
-            else:
-                text_rect = option.rect.adjusted(8 + indent, 0, -8, 0)
-            painter.setPen(fg)
-            painter.setFont(f_text)
-            painter.drawText(text_rect,
-                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                             text)
-
-        painter.restore()
-
-    # -- click ----------------------------------------------------------------
-
-    def editorEvent(self, event, model, option, index):
-        if (event.type() == QEvent.Type.MouseButtonRelease
-                and event.button() == Qt.MouseButton.LeftButton):
-            node = index.internalPointer()
-            if node is not None and node.kind == "plot":
-                n = len(node.plot_ref.get("owners", []) or [])
-                if n > 1:
-                    text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-                    btn = self._btn_rect(option.rect, n, text)
-                    if btn.contains(event.position().toPoint()):
-                        self.toggleRequested.emit(index)
-                        return True
-        return super().editorEvent(event, model, option, index)
-
-
-# ============================================================================ #
-#  Делегат столбца «_edit» — кнопка редактирования участка                    #
-# ============================================================================ #
-
-class _EditBtnDelegate(QStyledItemDelegate):
-    """Рисует иконку edit; на hover — filled-версия и курсор-рука."""
-
-    _IC_EDIT  = chr(0xE3C9)  # edit
-    _IC_FONT  = "Material Symbols Rounded"
-    _IC_COLOR = QColor("#07414F")
-
-    def __init__(self, view):
-        super().__init__(view)
-        self._view      = view
-        self._edit_col  = PlotsTreeModel.COLUMNS.index("_edit")
-        self._hover_idx = QModelIndex()
-        self._pointing  = False
-        self._fill_tag  = QFont.Tag.fromString("FILL")
-        view.viewport().installEventFilter(self)
-
-    def _is_btn(self, index: QModelIndex) -> bool:
-        node = index.internalPointer() if index.isValid() else None
-        return bool(node and node.kind == "plot" and index.column() == self._edit_col)
-
-    def paint(self, painter, option, index):
-        super().paint(painter, option, index)
-        node = index.internalPointer()
-        if node is None or node.kind != "plot":
-            return
-        painter.save()
-        f = QFont(self._IC_FONT)
-        f.setPixelSize(18)
-        f.setVariableAxis(self._fill_tag, 1.0 if self._hover_idx == index else 0.0)
-        painter.setFont(f)
-        painter.setPen(self._IC_COLOR)
-        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, self._IC_EDIT)
-        painter.restore()
-
-    def eventFilter(self, obj, event):
-        if obj is self._view.viewport():
-            if event.type() == QEvent.Type.MouseMove:
-                idx  = self._view.indexAt(event.position().toPoint())
-                on_btn = self._is_btn(idx)
-
-                # setOverrideCursor не сбрасывается внутренней обработкой Qt
-                if on_btn and not self._pointing:
-                    self._pointing = True
-                    QApplication.setOverrideCursor(Qt.CursorShape.PointingHandCursor)
-                elif not on_btn and self._pointing:
-                    self._pointing = False
-                    QApplication.restoreOverrideCursor()
-
-                # Hover-состояние для fill-эффекта
-                new_hover = idx if on_btn else QModelIndex()
-                if new_hover != self._hover_idx:
-                    old = self._hover_idx
-                    self._hover_idx = new_hover
-                    if old.isValid():
-                        self._view.viewport().update(self._view.visualRect(old))
-                    if new_hover.isValid():
-                        self._view.viewport().update(self._view.visualRect(new_hover))
-
-            elif event.type() == QEvent.Type.Leave:
-                if self._pointing:
-                    self._pointing = False
-                    QApplication.restoreOverrideCursor()
-                if self._hover_idx.isValid():
-                    old = self._hover_idx
-                    self._hover_idx = QModelIndex()
-                    self._view.viewport().update(self._view.visualRect(old))
-
-        return super().eventFilter(obj, event)
-
-
-# ============================================================================ #
-#  Делегат столбца «_check» — чекбоксы выбора для массовых операций           #
-# ============================================================================ #
-
-class _CheckDelegate(QStyledItemDelegate):
-    """Рисует чекбокс; на hover — filled-версия и курсор-рука. Управляет выбором участков."""
-
-    selectionChanged = pyqtSignal()
-
-    _IC_ON    = chr(0xE834)   # check_box
-    _IC_OFF   = chr(0xE835)   # check_box_outline_blank
-    _IC_FONT  = "Material Symbols Rounded"
-    _IC_COLOR = QColor("#07414F")
-
-    def __init__(self, view):
-        super().__init__(view)
-        self._view      = view
-        self._check_col = PlotsTreeModel.COLUMNS.index("_check")
-        self._hover_idx = QModelIndex()
-        self._pointing  = False
-        self._fill_tag  = QFont.Tag.fromString("FILL")
-        self._selected: set[str] = set()
-        view.viewport().installEventFilter(self)
-
-    def get_selected(self) -> set[str]:
-        return set(self._selected)
-
-    def clear_selection(self):
-        if self._selected:
-            self._selected.clear()
-            self.selectionChanged.emit()
-            self._view.viewport().update()
-
-    def remove_plot(self, plot_id: str):
-        if plot_id in self._selected:
-            self._selected.discard(plot_id)
-            self.selectionChanged.emit()
-
-    def _is_btn(self, index: QModelIndex) -> bool:
-        node = index.internalPointer() if index.isValid() else None
-        return bool(node and node.kind == "plot" and index.column() == self._check_col)
-
-    def _plot_id(self, index: QModelIndex) -> str:
-        node = index.internalPointer()
-        return str(node.plot_ref.get("num", id(node.plot_ref))) if node else ""
-
-    def paint(self, painter, option, index):
-        super().paint(painter, option, index)
-        node = index.internalPointer()
-        if node is None or node.kind != "plot":
-            return
-        pid   = self._plot_id(index)
-        hov   = self._hover_idx == index
-        icon  = self._IC_ON if pid in self._selected else self._IC_OFF
-        painter.save()
-        f = QFont(self._IC_FONT)
-        f.setPixelSize(18)
-        f.setVariableAxis(self._fill_tag, 1.0 if hov else 0.0)
-        painter.setFont(f)
-        painter.setPen(self._IC_COLOR)
-        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, icon)
-        painter.restore()
-
-    def editorEvent(self, event, model, option, index):
-        if (event.type() == QEvent.Type.MouseButtonRelease
-                and event.button() == Qt.MouseButton.LeftButton
-                and self._is_btn(index)):
-            pid = self._plot_id(index)
-            if pid:
-                if pid in self._selected:
-                    self._selected.discard(pid)
-                else:
-                    self._selected.add(pid)
-                self._view.viewport().update(self._view.visualRect(index))
-                self.selectionChanged.emit()
-            return True
-        return super().editorEvent(event, model, option, index)
-
-    def eventFilter(self, obj, event):
-        try:
-            view = self._view
-        except RuntimeError:
-            return False
-        if obj is view.viewport():
-            if event.type() == QEvent.Type.MouseMove:
-                idx    = self._view.indexAt(event.position().toPoint())
-                on_btn = self._is_btn(idx)
-
-                if on_btn and not self._pointing:
-                    self._pointing = True
-                    QApplication.setOverrideCursor(Qt.CursorShape.PointingHandCursor)
-                elif not on_btn and self._pointing:
-                    self._pointing = False
-                    QApplication.restoreOverrideCursor()
-
-                new_hover = idx if on_btn else QModelIndex()
-                if new_hover != self._hover_idx:
-                    old = self._hover_idx
-                    self._hover_idx = new_hover
-                    if old.isValid():
-                        self._view.viewport().update(self._view.visualRect(old))
-                    if new_hover.isValid():
-                        self._view.viewport().update(self._view.visualRect(new_hover))
-
-            elif event.type() == QEvent.Type.Leave:
-                if self._pointing:
-                    self._pointing = False
-                    QApplication.restoreOverrideCursor()
-                if self._hover_idx.isValid():
-                    old = self._hover_idx
-                    self._hover_idx = QModelIndex()
-                    self._view.viewport().update(self._view.visualRect(old))
-
-        return super().eventFilter(obj, event)
-
-
-# ============================================================================ #
-#  Делегат столбца «№» — индикатор отсутствия выписки ЕГРН                    #
-# ============================================================================ #
-
-class _PlotNumDelegate(QStyledItemDelegate):
-    """Для строк-участков рисует иконку real_estate_agent (оранжевую), если egrn_doc не загружен."""
-
-    _IC_MISSING = chr(0xE73A)  # real_estate_agent
-    _IC_COLOR   = QColor("#F59E0B")
-    _PLOT_COL   = PlotsTreeModel.COLUMNS.index("№")
-
-    def __init__(self, view):
-        super().__init__(view)
-        self._view         = view
-        self._tip_index    = QModelIndex()
-        self.compact = False  # лаконичный режим (открыт drawer): без иконки-индикатора
-        view.viewport().installEventFilter(self)
-
-    def _ic_rect(self, cell_rect: QRect) -> QRect:
-        return QRect(cell_rect.right() - 22, cell_rect.top(), 20, cell_rect.height())
-
-    def paint(self, painter, option, index):
-        super().paint(painter, option, index)
-        if self.compact:
-            return
-        node = index.internalPointer()
-        if node is None or node.kind != "plot":
-            return
-        if node.plot_ref.get("egrn_doc", ""):
-            return
-        painter.save()
-        f = QFont("Material Symbols Rounded")
-        f.setPixelSize(15)
-        painter.setFont(f)
-        painter.setPen(self._IC_COLOR)
-        painter.drawText(self._ic_rect(option.rect), Qt.AlignmentFlag.AlignCenter, self._IC_MISSING)
-        painter.restore()
-
-    def eventFilter(self, obj, event):
-        if obj is self._view.viewport():
-            if event.type() == QEvent.Type.MouseMove:
-                pos = event.position().toPoint()
-                idx = self._view.indexAt(pos)
-                tip = QModelIndex()
-                if idx.isValid() and idx.column() == self._PLOT_COL:
-                    node = idx.internalPointer()
-                    if node and node.kind == "plot" and not node.plot_ref.get("egrn_doc", ""):
-                        if self._ic_rect(self._view.visualRect(idx)).contains(pos):
-                            tip = idx
-                if tip != self._tip_index:
-                    self._tip_index = tip
-                    if tip.isValid():
-                        _AppTooltip.show_at(
-                            "Выписка ЕГРН не прикреплена",
-                            self._view.viewport().mapToGlobal(pos),
-                        )
-                    else:
-                        _AppTooltip.hide()
-            elif event.type() == QEvent.Type.Leave:
-                if self._tip_index.isValid():
-                    self._tip_index = QModelIndex()
-                    _AppTooltip.hide()
-        return super().eventFilter(obj, event)
-
-
-# ============================================================================ #
-#  Стиль дерева                                                                #
+#  Стиль дерева (используется QTreeView в energy_debt_widget/vznosy_debt_widget) #
 # ============================================================================ #
 
 _TREE_STYLE = """
@@ -2006,11 +1057,6 @@ class _SortHeaderView(QHeaderView):
 
     def set_delete_col(self, col: int):
         self._del_col = col
-
-    def set_col_indicators(self, col: int, indicators: list):
-        """indicators: [(lbl, count, tooltip_text), ...] — только с count > 0."""
-        self._col_indicators[col] = [i for i in indicators if i[1] > 0]
-        self.viewport().update()
 
     def _indicator_zones(self, logical_index: int, rect: QRect) -> list:
         """Возвращает [(QRect, tooltip)] для каждого индикатора, справа налево."""
@@ -2486,6 +1532,14 @@ class _PlotRowDelegate(QStyledItemDelegate):
         self._view = view
         self._hover_idx = QModelIndex()
         self._fill_tag = QFont.Tag.fromString("FILL")
+        # Шрифты переиспользуются между вызовами paint() — пересоздание QFont
+        # на каждую видимую строку при каждой перерисовке (скролл, hover)
+        # заметно нагружает большой список.
+        self._f_cb = QFont(self._IC_FONT_NAME)
+        self._f_cb.setPixelSize(18)
+        self._f_text = QFont()
+        self._f_text.setPixelSize(13)
+        self._fm_text = QFontMetrics(self._f_text)
         view.viewport().installEventFilter(self)
 
     def _cb_rect(self, cell_rect: QRect) -> QRect:
@@ -2558,8 +1612,7 @@ class _PlotRowDelegate(QStyledItemDelegate):
         # Чекбокс (слева)
         is_checked = model.is_selected(plot)
         cb_r = self._cb_rect(rect)
-        f_cb = QFont(self._IC_FONT_NAME)
-        f_cb.setPixelSize(18)
+        f_cb = self._f_cb
         f_cb.setVariableAxis(self._fill_tag, 1.0 if is_checked else 0.0)
         painter.setFont(f_cb)
         painter.setPen(self._FG_CB if is_checked else self._FG_CB_OFF)
@@ -2569,7 +1622,7 @@ class _PlotRowDelegate(QStyledItemDelegate):
         # Сдвигаем весь контент вправо на ширину чекбокса + зазор
         content_left = rect.left() + self._PAD + self._CB_W
 
-        f = QFont(); f.setPixelSize(13)
+        f = self._f_text
         painter.setFont(f)
         vtop = rect.top() - 1
         # №
@@ -2593,7 +1646,7 @@ class _PlotRowDelegate(QStyledItemDelegate):
         name_left = content_left + self._NUM_W + 8
         name_rect = QRect(name_left, vtop, vz_rect.left() - name_left - 8, rect.height())
         name = _short_name(_plot_primary_name(plot)) or "—"
-        elided = QFontMetrics(f).elidedText(name, Qt.TextElideMode.ElideRight, name_rect.width())
+        elided = self._fm_text.elidedText(name, Qt.TextElideMode.ElideRight, name_rect.width())
         painter.setPen(self._FG_NAME)
         painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          elided)
@@ -2616,6 +1669,10 @@ class PlotsWidget(QWidget):
         # Прозрачный фон страницы — чтобы проступал белый contentFrame (окно вкладки).
         self.setAutoFillBackground(False)
         self._plots: list = self._load()
+        # Реестр людей грузится один раз на время жизни виджета и передаётся
+        # по ссылке во все панели (PlotEditDialog/GroupEditDialog) — иначе
+        # каждое открытие карточки участка заново читало и парсило JSON с диска.
+        self._people_cache: list = people_reg.load_people()
         self._df = None                       # выписка — нужна для долга в списке/детали
         self._search_text = ""
         self._filter_mode = "all"             # all | debtors | debtors_vznosy | debtors_energy
@@ -3025,7 +2082,7 @@ class PlotsWidget(QWidget):
         else:
             existing = {str(p.get("num", "")) for p in self._plots}
         panel = PlotEditDialog(plot_data=plot, parent=self, df=self._df,
-                               existing_nums=existing)
+                               existing_nums=existing, people=self._people_cache)
         panel.closed.connect(self._on_detail_closed)
         panel.personDeleted.connect(self._on_person_deleted)
         if plot is not None:
@@ -3338,9 +2395,6 @@ class PlotsWidget(QWidget):
             self._rebuild_table()
         self._close_detail()
 
-    def _edit_plot(self, plot: dict):
-        self._open_detail(plot)
-
     def _import_from_excel(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Выберите файл Excel", "",
@@ -3382,7 +2436,7 @@ class PlotsWidget(QWidget):
             )
             return
 
-        people = people_reg.load_people()
+        people = self._people_cache
         people_dirty = False
 
         def _clean_phone(raw: str) -> str:
@@ -3510,7 +2564,7 @@ class PlotsWidget(QWidget):
         """Быстрое добавление участка через модальное окно (номер/площадь/
         ФИО) вместо панели справа — см. _QuickAddPlotDialog."""
         existing_nums = {str(p.get("num", "")) for p in self._plots}
-        people = people_reg.load_people()
+        people = self._people_cache
         result = _QuickAddPlotDialog.ask(self, people, existing_nums)
         if result is None:
             return
@@ -3537,51 +2591,6 @@ class PlotsWidget(QWidget):
         self._recompute_debt()
         self._rebuild_table()
 
-
-# ============================================================================ #
-#  Вспомогательный виджет чекбокса на иконках                                 #
-# ============================================================================ #
-
-class _IconCheckBox(QLabel):
-    """Кликабельный чекбокс через иконки Material Symbols Rounded."""
-
-    stateChanged = pyqtSignal(bool)
-
-    _FONT   = "Material Symbols Rounded"
-    _IC_ON  = ""   # check_box
-    _IC_OFF = ""   # check_box_outline_blank
-    _C_ON   = "#07414F"
-    _C_OFF  = "#9CA3AF"
-
-    def __init__(self, checked: bool = True, parent=None):
-        super().__init__(parent)
-        self._checked = checked
-        f = QFont(self._FONT)
-        f.setPixelSize(20)
-        self.setFont(f)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setFixedSize(32, 32)
-        self._refresh()
-
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def setChecked(self, val: bool):
-        self._checked = bool(val)
-        self._refresh()
-
-    def _refresh(self):
-        self.setText(self._IC_ON if self._checked else self._IC_OFF)
-        c = self._C_ON if self._checked else self._C_OFF
-        self.setStyleSheet(f"color:{c}; background:transparent;")
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._checked = not self._checked
-            self._refresh()
-            self.stateChanged.emit(self._checked)
-        super().mousePressEvent(event)
 
 
 # ============================================================================ #
@@ -3751,7 +2760,6 @@ class _DocFieldWidget(QFrame):
 
     def _refresh(self):
         has = bool(self._path)
-        err = False
 
         if has:
             self.setStyleSheet(
@@ -3857,9 +2865,6 @@ class _DocFieldWidget(QFrame):
         self._required = required
         self._refresh()
 
-    def set_error(self, msg: str) -> None:
-        pass
-
 
 # ============================================================================ #
 #  GroupEditDialog — редактор состава одной группы                            #
@@ -3875,7 +2880,7 @@ class GroupEditDialog(QWidget):
     closed = pyqtSignal(bool)  # saved? — True если состав группы сохранён
 
     def __init__(self, group: dict, is_new: bool = False, parent=None,
-                 inline: bool = False):
+                 inline: bool = False, people: list | None = None):
         super().__init__(parent)
         self._group = group
         self._is_new = is_new
@@ -3887,11 +2892,11 @@ class GroupEditDialog(QWidget):
         self._primary_idx = 0
         self._btn_save = None
         self._btn_create: QPushButton | None = None  # «Создать» (только для новой группы)
-        self._btn_switch_edit: QPushButton | None = None  # удалён, оставлен для совместимости
         self._footer_view: QWidget | None = None
-        self._footer_edit: QWidget | None = None
         # Реестр людей: источник для автодополнения ФИО и переиспользования контактов.
-        self._people: list = people_reg.load_people()
+        # Передаётся хостом (PlotEditDialog), чтобы не перечитывать JSON с диска
+        # на каждое открытие под-панели контактов; при отсутствии — грузим сами.
+        self._people: list = people if people is not None else people_reg.load_people()
         self._new_people: list = []  # созданные в этой сессии (сохраняются в _on_accept)
         self._setup_ui()
         self._apply_styles()
@@ -4009,7 +3014,6 @@ class GroupEditDialog(QWidget):
             fv_lay.addWidget(btn_close)
 
         lay.addWidget(self._footer_view)
-        self._footer_edit = None  # убран; сохранение — per-card
 
         # Для новой группы — сразу в режим редактирования
         if self._is_new:
@@ -4499,7 +3503,7 @@ class GroupEditDialog(QWidget):
         role = ("member" if cd["rb_member"].isChecked()
                 else "owner" if cd["rb_owner"].isChecked()
                 else "contact")
-        req = self._DOC_REQUIRED[role]
+        req = _DOC_REQUIRED[role]
         missing = (
             (req["opd"]    and not cd["opd_doc"].get_path())
             or (req["egrn"]   and not cd["egrn_doc"].get_path())
@@ -4507,18 +3511,11 @@ class GroupEditDialog(QWidget):
         )
         cd["tag_docs"].setVisible(missing)
 
-    # required=True → «Отсутствует», required=False → «Не требуется»
-    _DOC_REQUIRED = {
-        "contact": {"opd": True,  "egrn": False, "member": False},
-        "owner":   {"opd": True,  "egrn": True,  "member": False},
-        "member":  {"opd": True,  "egrn": True,  "member": True},
-    }
-
     def _update_doc_badges(self, cd: dict) -> None:
         role = ("member" if cd["rb_member"].isChecked()
                 else "owner" if cd["rb_owner"].isChecked()
                 else "contact")
-        req = self._DOC_REQUIRED[role]
+        req = _DOC_REQUIRED[role]
         cd["opd_doc"].set_required(req["opd"])
         cd["egrn_doc"].set_required(req["egrn"])
         cd["member_doc"].set_required(req["member"])
@@ -4664,13 +3661,6 @@ class GroupEditDialog(QWidget):
             "egrn":   cd["egrn_doc"]._path,
             "member": cd["member_doc"]._path,
         }
-
-    @staticmethod
-    def _is_card_dirty(cd: dict) -> bool:
-        snap = cd.get("_snap")
-        if snap is None:
-            return True  # новая карточка — сохранять можно сразу
-        return GroupEditDialog._card_snapshot(cd) != snap
 
     def _update_save_state(self):
         for cd in self._cards:
@@ -4911,7 +3901,7 @@ class PlotEditDialog(QWidget):
         # (этот диалог видит только свой участок).
 
     def __init__(self, plot_data: dict | None = None, parent=None, df=None,
-                 existing_nums: set | None = None):
+                 existing_nums: set | None = None, people: list | None = None):
         super().__init__(parent)
         self._is_edit = plot_data is not None
         self._plot_data = dict(plot_data or {})
@@ -4942,7 +3932,10 @@ class PlotEditDialog(QWidget):
         self._active_ctx = _GroupCardCtx(self._active_group, is_active=True)
         self._archived_cards: list[_GroupCardCtx] = []
         # Реестр людей: источник для автодополнения ФИО и переиспользования контактов.
-        self._people: list = people_reg.load_people()
+        # Передаётся хостом (PlotsWidget), чтобы не перечитывать JSON с диска
+        # на каждое открытие карточки участка; при отсутствии — грузим сами
+        # (например, при автономном использовании диалога вне PlotsWidget).
+        self._people: list = people if people is not None else people_reg.load_people()
         self._setup_ui()
         self._apply_styles()
 
@@ -5179,7 +4172,6 @@ class PlotEditDialog(QWidget):
             self._footer_view = footer
         else:
             self._footer_view = None
-        self._footer_edit = None
 
         if not self._is_edit:
             self._update_save_state()
@@ -6273,7 +5265,6 @@ class PlotEditDialog(QWidget):
                     lambda ow=o, n=inp_name, p=inp_phone, e=inp_email, odw=opd_w, mdw=mem_w:
                         self._on_inline_name_committed(ow, n, p, e, odw, mdw))
 
-                _lbl_ss = "font-size:12px; color:#6B7280; background:transparent;"
                 docs_box = QVBoxLayout()
                 docs_box.setContentsMargins(0, 0, 0, 0)
                 docs_box.setSpacing(4)
@@ -6757,10 +5748,6 @@ class PlotEditDialog(QWidget):
             self._prev_card_lyt.addWidget(block)
             self._archived_cards.append(ctx)
 
-    def _on_edit_active_group(self):
-        """Открывает редактор контактов (под-панель)."""
-        self._open_contacts(("active", None), self._active_group, is_new=False)
-
     def _on_toggle_contacts_full(self, ctx: "_GroupCardCtx"):
         """Переключает превью (3) ↔ полный список.
 
@@ -6820,7 +5807,7 @@ class PlotEditDialog(QWidget):
     def _open_contacts(self, ctx, group: dict, is_new: bool):
         """Показывает редактор состава группы как под-панель (вместо модалки)."""
         self._contacts_ctx = ctx
-        panel = GroupEditDialog(group, is_new=is_new, parent=self)
+        panel = GroupEditDialog(group, is_new=is_new, parent=self, people=self._people)
         panel.closed.connect(self._on_contacts_closed)
         self._contacts_panel = panel
         while self._contacts_slot.count():

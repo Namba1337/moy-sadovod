@@ -377,18 +377,3 @@ def group_owners(group: dict) -> list:
 
 def group_label(group: dict, *, empty: str = "—") -> str:
     return owners_label(group_owners(group), only_owners=True, empty=empty)
-
-
-def migrate_plot_to_groups(plot: dict) -> dict:
-    """Возвращает копию участка в формате groups (не меняет оригинал).
-
-    Если участок уже содержит поле 'groups' — возвращает без изменений.
-    Вызывать перед сохранением для персистирования миграции на диск.
-    """
-    if "groups" in plot:
-        return plot
-    groups = _groups_from_legacy(plot)
-    result = {k: v for k, v in plot.items()
-              if k not in ("owners", "ownership_form", "egrn_doc")}
-    result["groups"] = groups
-    return result
