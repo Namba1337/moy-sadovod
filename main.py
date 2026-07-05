@@ -556,9 +556,10 @@ class MainWindow(QMainWindow):
         self.vznosy_debt = VznosyDebtWidget()
         self.plots       = PlotsWidget()
         self.energy_debt = EnergyDebtWidget()
-        # plots — намеренно НЕ autoFill: страница прозрачная, чтобы проступал
-        # белый contentFrame («окно вкладки»). Остальные вкладки красят свой фон.
-        for tab in (self.home, self.detail, self.vznosy_debt, self.energy_debt):
+        # plots и detail — намеренно НЕ autoFill: страница прозрачная, чтобы
+        # проступал белый contentFrame («окно вкладки»). Остальные вкладки
+        # красят свой фон.
+        for tab in (self.home, self.vznosy_debt, self.energy_debt):
             tab.setAutoFillBackground(True)
         self.stack.addWidget(self.home)         # 0
         self.stack.addWidget(self.detail)       # 1

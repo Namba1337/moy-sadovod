@@ -7,11 +7,14 @@ import pandas as pd
 from PyQt6.QtCore import (
     Qt, QDate, QEvent, QPoint, QRect, QRectF, QModelIndex, QAbstractItemModel, pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygon
+from PyQt6.QtGui import (
+    QAction, QBitmap, QBrush, QColor, QFont, QFontMetrics, QPainter, QPen,
+    QPolygon, QRegion,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
     QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTreeView, QVBoxLayout, QWidget, QCompleter,
 )
@@ -22,7 +25,7 @@ from ui.categorization import (
     delete_user_category, PROTECTED_CATEGORIES,
 )
 from ui.plot_detection import apply_plot_column, _PLOTS_FILE, load_plot_numbers
-from ui.plots_widget import _ClipFrame
+from ui.plots_widget import _ClipFrame, _BasePromptDialog, _ConfirmDialog
 
 
 # =========================================================================== #
@@ -1500,28 +1503,119 @@ class _CatPillRow(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
-class CategoryEditorPanel(QDialog):
+# =========================================================================== #
+#  Каркас кастомных диалогов вкладки — без нативного чрома ОС                 #
+# =========================================================================== #
+
+class _FramelessDialog(QDialog):
+    """Базовый класс диалогов «Детализации» с собственной сложной формой
+    (в отличие от _BasePromptDialog в ui.plots_widget, который несёт фиксированную
+    раскладку «заголовок+сообщение+кнопки»). Даёт белую скруглённую карточку
+    без стандартной рамки/шапки Windows — тот же приём (маска по скруглённому
+    прямоугольнику), что и у _BasePromptDialog."""
+
+    _RADIUS = 12
+    _BORDER = "#D5DCE4"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("framelessDialog")
+
+    def _frame_qss(self) -> str:
+        return (
+            f"QDialog#framelessDialog{{background:#FFFFFF;"
+            f"border:1px solid {self._BORDER};border-radius:{self._RADIUS}px;}}"
+        )
+
+    def _apply_mask(self):
+        sz = self.size()
+        if sz.width() <= 0 or sz.height() <= 0:
+            return
+        bmp = QBitmap(sz)
+        bmp.fill(Qt.GlobalColor.color0)
+        p = QPainter(bmp)
+        p.setBrush(Qt.GlobalColor.color1)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(self.rect(), self._RADIUS, self._RADIUS)
+        p.end()
+        self.setMask(QRegion(bmp))
+
+    def resizeEvent(self, a0):
+        super().resizeEvent(a0)
+        self._apply_mask()
+
+    def showEvent(self, a0):
+        super().showEvent(a0)
+        self._apply_mask()
+
+
+def _exec_dialog(dlg: QDialog, parent) -> int:
+    """exec() с затемняющим оверлеем и центрированием поверх parent/host —
+    единая точка входа для модальных вызовов диалогов вкладки (см. _show_centered
+    в ui.plots_widget)."""
+    dlg.adjustSize()
+    overlay = _BasePromptDialog._show_centered(dlg, parent)
+    try:
+        return dlg.exec()
+    finally:
+        if overlay is not None:
+            overlay.hide()
+            overlay.deleteLater()
+
+
+class _AlertDialog(_BasePromptDialog):
+    """Однокнопочное информационное окно — замена QMessageBox.warning/
+    information/critical, но в едином визуальном языке приложения."""
+
+    def __init__(self, title: str, message: str, *, ok_text: str = "Понятно", parent=None):
+        super().__init__(title, message, parent=parent)
+        self._add_button(
+            ok_text,
+            "QPushButton{background:#07414F;color:#FFFFFF;border:none;"
+            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:#0B5A6E;}",
+            self.accept)
+        self._finalize()
+
+    @staticmethod
+    def show_alert(parent, title: str, message: str, *, ok_text: str = "Понятно"):
+        dlg = _AlertDialog(title, message, ok_text=ok_text, parent=parent)
+        overlay = _BasePromptDialog._show_centered(dlg, parent)
+        try:
+            dlg.exec()
+        finally:
+            if overlay is not None:
+                overlay.hide()
+                overlay.deleteLater()
+
+
+class CategoryEditorPanel(_FramelessDialog):
     """Диалог редактирования списка категорий."""
 
     categoriesChanged = pyqtSignal(list)
     categoryRenamed   = pyqtSignal(str, str)   # (old_name, new_name)
 
-    _PANEL_STYLE = """
-        QDialog {
-            background: #F0F3F9;
-        }
+    def _panel_style(self) -> str:
+        return self._frame_qss() + """
         QPushButton#addCatBtn {
             background: #07414F; color: white; border: none;
             border-radius: 6px; padding: 7px 14px; font-size: 12px; font-weight: 600;
         }
         QPushButton#addCatBtn:hover { background: #0A5A6B; }
         QLineEdit#newCatInput {
-            background: #FFFFFF; border: 1px solid #D5DCE4;
+            background: #F8F9FA; border: 1px solid #D5DCE4;
             border-radius: 6px; color: #1F2937; padding: 7px 10px; font-size: 12px;
         }
         QLineEdit#newCatInput:focus { border: 1px solid #07414F; }
         QScrollArea { background: transparent; border: none; }
         QWidget#scrollContents { background: transparent; }
+        QLabel#panelTitle { color: #111827; font-size: 15px; font-weight: 700; }
+        QPushButton#btnPanelClose {
+            background: transparent; border: none; color: #9CA3AF;
+            font-size: 15px; font-weight: 600; border-radius: 12px;
+        }
+        QPushButton#btnPanelClose:hover { background: #F3F4F6; color: #374151; }
     """
 
     def __init__(self, categories: list[str], parent=None):
@@ -1534,7 +1628,7 @@ class CategoryEditorPanel(QDialog):
         self._color_popup = _ColorPickerPopup()
         self._color_popup.colorSelected.connect(self._on_color_selected)
         self._setup_ui()
-        self.setStyleSheet(self._PANEL_STYLE)
+        self.setStyleSheet(self._panel_style())
 
     def set_categories(self, cats: list[str]):
         self._categories = list(cats)
@@ -1544,6 +1638,19 @@ class CategoryEditorPanel(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        title = QLabel("Категории", objectName="panelTitle")
+        header.addWidget(title)
+        header.addStretch()
+        btn_close = QPushButton("✕", objectName="btnPanelClose")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_close.clicked.connect(self.close)
+        header.addWidget(btn_close)
+        layout.addLayout(header)
 
         self._scroll_contents = QWidget(objectName="scrollContents")
         self._list_layout = QVBoxLayout(self._scroll_contents)
@@ -1596,17 +1703,16 @@ class CategoryEditorPanel(QDialog):
             return
         if new_name in self._categories:
             editor.setText(old_name)
-            reply = QMessageBox.question(
+            confirmed = _ConfirmDialog.confirm(
                 self,
                 "Объединить категории?",
                 f"Категория «{new_name}» уже существует.\n\n"
                 f"Объединить «{old_name}» с «{new_name}»?\n"
                 f"Все строки с категорией «{old_name}» получат категорию «{new_name}»,\n"
                 f"а «{old_name}» будет удалена из списка.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
+                confirm_text="Объединить", cancel_text="Отмена",
             )
-            if reply == QMessageBox.StandardButton.Yes:
+            if confirmed:
                 self._do_merge(old_name, new_name)
             return
         rename_user_category(old_name, new_name)
@@ -1661,18 +1767,18 @@ class CategoryEditorPanel(QDialog):
 #  Диалоги (без изменений)                                                    #
 # =========================================================================== #
 
-class LoadSettingsDialog(QDialog):
+class LoadSettingsDialog(_FramelessDialog):
     """Диалог настроек перед загрузкой файла выписки."""
 
-    _STYLE = """
-        QDialog { background: #FFFFFF; color: #374151; }
-        QLabel  { background: transparent; }
+    def _style(self) -> str:
+        return self._frame_qss() + """
+        QLabel  { background: transparent; color: #374151; }
         QLabel#sectionLabel {
             color: #9CA3AF; font-size: 11px; font-weight: 600;
             letter-spacing: 0.5px; text-transform: uppercase;
         }
         QPushButton#fmtActive {
-            background: #4F46E5; color: #ffffff; border: none;
+            background: #07414F; color: #ffffff; border: none;
             border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
         }
         QPushButton#fmtInactive {
@@ -1681,11 +1787,11 @@ class LoadSettingsDialog(QDialog):
         }
         QPushButton#fmtInactive:hover { background: #E5E7EB; color: #374151; }
         QPushButton#btnPrimary {
-            background: #4F46E5; color: white; border: none;
+            background: #07414F; color: white; border: none;
             border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
         }
-        QPushButton#btnPrimary:hover  { background: #6366F1; }
-        QPushButton#btnPrimary:pressed { background: #4338CA; }
+        QPushButton#btnPrimary:hover  { background: #0B5A6E; }
+        QPushButton#btnPrimary:pressed { background: #062F38; }
         QPushButton#btnSecondary {
             background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
             border-radius: 6px; padding: 7px 16px; font-size: 13px;
@@ -1699,10 +1805,10 @@ class LoadSettingsDialog(QDialog):
             border: 1px solid #D1D5DB; background: #F8F9FA;
         }
         QCheckBox::indicator:checked {
-            background: #4F46E5; border-color: #4F46E5;
+            background: #07414F; border-color: #07414F;
             image: url(none);
         }
-        QCheckBox::indicator:hover { border-color: #818CF8; }
+        QCheckBox::indicator:hover { border-color: #07414F; }
         QFrame#divider { background: #E5E7EB; max-height: 1px; }
     """
 
@@ -1714,7 +1820,7 @@ class LoadSettingsDialog(QDialog):
         self._fmt = "sber"
         self._has_existing = has_existing_data
         self._setup_ui()
-        self.setStyleSheet(self._STYLE)
+        self.setStyleSheet(self._style())
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
@@ -1980,7 +2086,7 @@ class _SplitRowWidget(QWidget):
         self.combo_plot.setCurrentText(str(data.get("Участок") or ""))
 
 
-class AddRowDialog(QDialog):
+class AddRowDialog(_FramelessDialog):
     """Диалог ручного добавления операции в таблицу Детализации."""
 
     def __init__(self, parent=None):
@@ -2200,24 +2306,23 @@ class AddRowDialog(QDialog):
         return result
 
     def _apply_styles(self):
-        self.setStyleSheet("""
-            QDialog { background: #FFFFFF; color: #374151; }
+        self.setStyleSheet(self._frame_qss() + """
             QLabel  { background: transparent; color: #374151; font-size: 13px; }
             QLineEdit, QComboBox, QDateEdit {
                 background: #F8F9FA; border: 1px solid #D1D5DB;
                 border-radius: 5px; color: #374151; padding: 7px 10px; font-size: 13px;
             }
-            QLineEdit:focus, QComboBox:focus, QDateEdit:focus { border: 1px solid #6366F1; }
+            QLineEdit:focus, QComboBox:focus, QDateEdit:focus { border: 1px solid #07414F; }
             QPushButton#btnSecondary {
                 background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
                 border-radius: 6px; padding: 7px 14px; font-size: 13px;
             }
             QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
             QDialogButtonBox QPushButton {
-                background: #4F46E5; color: white; border: none;
+                background: #07414F; color: white; border: none;
                 border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
             }
-            QDialogButtonBox QPushButton:hover { background: #6366F1; }
+            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
             QDialogButtonBox QPushButton[text='Отмена'] {
                 background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
             }
@@ -2307,7 +2412,7 @@ class _DetailEditDelegate(QStyledItemDelegate):
 #  Диалог редактирования операции                                             #
 # =========================================================================== #
 
-class EditOperationDialog(QDialog):
+class EditOperationDialog(_FramelessDialog):
     """Диалог редактирования существующей операции."""
 
     def __init__(self, data: dict, breakdown: list = None, parent=None):
@@ -2513,31 +2618,18 @@ class EditOperationDialog(QDialog):
         raw = (self.inp_summa.text().strip()
                .replace(",", ".").replace("\u2212", "-").replace("\u2013", "-").replace(" ", ""))
         if not raw:
-            QMessageBox.warning(self, "Ошибка", "Укажите сумму операции")
+            _AlertDialog.show_alert(self, "Ошибка", "Укажите сумму операции")
             return
         try:
             float(raw)
         except ValueError:
-            QMessageBox.warning(self, "Ошибка", "Некорректный формат суммы")
+            _AlertDialog.show_alert(self, "Ошибка", "Некорректный формат суммы")
             return
         self.accept()
 
     def get_result(self) -> dict:
         raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("\u2212", "-").replace("\u2013", "-").replace(" ", ""))
-        if not raw:
-            QMessageBox.warning(self, "Ошибка", "Укажите сумму операции")
-            return
-        try:
-            float(raw)
-        except ValueError:
-            QMessageBox.warning(self, "Ошибка", "Некорректный формат суммы")
-            return
-        self.accept()
-
-    def get_result(self) -> dict:
-        raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
+               .replace(",", ".").replace("−", "-").replace("–", "-").replace(" ", ""))
         d = self.date_edit.date()
         result = {
             "Дата":       pd.Timestamp(d.year(), d.month(), d.day()),
@@ -2558,8 +2650,7 @@ class EditOperationDialog(QDialog):
         return result
 
     def _apply_styles(self):
-        self.setStyleSheet("""
-            QDialog { background: #FFFFFF; color: #374151; }
+        self.setStyleSheet(self._frame_qss() + """
             QLabel  { background: transparent; color: #374151; font-size: 13px; }
             QLineEdit, QComboBox, QDateEdit {
                 background: #F8F9FA; border: 1px solid #D1D5DB;
@@ -3209,7 +3300,11 @@ class DetailWidget(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setAutoFillBackground(True)
+        # Прозрачный фон страницы — чтобы проступал белый contentFrame (окно
+        # вкладки), как у PlotsWidget. autoFill красил страницу сплошным
+        # палитровым цветом ПОВЕРХ скруглённого белого фрейма — отсюда были
+        # видны квадратные углы вместо скруглённых.
+        self.setAutoFillBackground(False)
         self.df_full = None
         self._manual_rows: set[int] = set()
         self._manual_cells: set[tuple[int, str]] = set()
@@ -3333,24 +3428,30 @@ class DetailWidget(QWidget):
         QTreeView#mainTable::branch:open:has-children:!has-siblings,
         QTreeView#mainTable::branch:open:has-children:has-siblings { image: none; }
         QTreeView#mainTable QScrollBar:vertical {
-            width: 12px; background: transparent; border: none;
+            width: 8px; background: #FFFFFF; border: none;
         }
         QTreeView#mainTable QScrollBar::handle:vertical {
-            background: #B5C8D5; border-radius: 5px; min-height: 24px;
-            margin: 2px 2px 2px 2px;
+            background: #C3CAD3; border-radius: 4px; min-height: 30px;
         }
+        QTreeView#mainTable QScrollBar::handle:vertical:hover { background: #97A1AE; }
         QTreeView#mainTable QScrollBar::add-line:vertical,
         QTreeView#mainTable QScrollBar::sub-line:vertical { height: 0; }
         QTreeView#mainTable QScrollBar::add-page:vertical,
-        QTreeView#mainTable QScrollBar::sub-page:vertical { background: none; }
+        QTreeView#mainTable QScrollBar::sub-page:vertical { background: #FFFFFF; }
     """
 
     # ------------------------------------------ редактор категорий ---------- #
     def _show_cat_editor(self):
         self._cat_editor_panel.set_categories(list(ALL_CATEGORIES))
-        self._cat_editor_panel.show()
-        self._cat_editor_panel.raise_()
-        self._cat_editor_panel.activateWindow()
+        panel = self._cat_editor_panel
+        panel.adjustSize()
+        host = self.window()
+        geo = host.geometry() if host is not None else self.geometry()
+        panel.move(geo.center().x() - panel.width() // 2,
+                   geo.center().y() - panel.height() // 2)
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
 
     def _on_categories_changed(self, new_cats: list[str]):
         import ui.categorization as _cat_mod
@@ -3529,12 +3630,12 @@ class DetailWidget(QWidget):
             breakdown = _parse_breakdown(self.df_full.at[node.df_idx, "_breakdown"]
                                          if "_breakdown" in self.df_full.columns else None)
         dlg = EditOperationDialog(node.data, breakdown, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        if _exec_dialog(dlg, self) != QDialog.DialogCode.Accepted:
             return
         try:
             result = dlg.get_result()
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось получить данные из формы:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось получить данные из формы:\n{e}")
             return
         df_idx = node.df_idx
         new_breakdown = result.pop("_breakdown", None)
@@ -3552,7 +3653,7 @@ class DetailWidget(QWidget):
         try:
             self.apply_filters()
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка обновления таблицы:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка обновления таблицы:\n{e}")
             return
         if new_breakdown:
             idx = self.model.index_for_df_idx(df_idx)
@@ -3561,17 +3662,17 @@ class DetailWidget(QWidget):
         try:
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка обновления вкладок:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка обновления вкладок:\n{e}")
 
     # ----------------------------------------------------- добавить строку -- #
     def _add_row(self):
         dlg = AddRowDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        if _exec_dialog(dlg, self) != QDialog.DialogCode.Accepted:
             return
         try:
             row_data = dlg.get_result()
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось получить данные из формы:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось получить данные из формы:\n{e}")
             return
         new_breakdown = row_data.pop("_breakdown", None)
 
@@ -3609,12 +3710,12 @@ class DetailWidget(QWidget):
         try:
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка обновления вкладок:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка обновления вкладок:\n{e}")
 
     # --------------------------------------------------------- загрузка --- #
     def load_file(self):
         settings_dlg = LoadSettingsDialog(self, has_existing_data=self.df_full is not None)
-        if settings_dlg.exec() != QDialog.DialogCode.Accepted:
+        if _exec_dialog(settings_dlg, self) != QDialog.DialogCode.Accepted:
             return
 
         fmt        = settings_dlg.fmt
@@ -3672,7 +3773,7 @@ class DetailWidget(QWidget):
             self.apply_filters()
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка загрузки", f"Не удалось загрузить файл:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка загрузки", f"Не удалось загрузить файл:\n{e}")
 
     def load_dataframe(self, df: "pd.DataFrame"):
         """Восстанавливает DataFrame из сохранённого проекта без диалога выбора файла."""
@@ -3691,7 +3792,7 @@ class DetailWidget(QWidget):
         try:
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка восстановления данных:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка восстановления данных:\n{e}")
 
     def get_manual_cells_data(self) -> list:
         """Сериализует _manual_cells для сохранения в проект."""
@@ -3772,15 +3873,12 @@ class DetailWidget(QWidget):
         indices = self._check_delegate.get_selected()
         if not indices:
             return
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Удаление строк")
-        msg.setText(f"Удалить {len(indices)} выбранных строк из детализации?")
-        msg.setIcon(QMessageBox.Icon.Warning)
-        btn_yes = msg.addButton("Да, удалить", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Нет", QMessageBox.ButtonRole.RejectRole)
-        msg.setDefaultButton(btn_yes)
-        msg.exec()
-        if msg.clickedButton() is not btn_yes:
+        confirmed = _ConfirmDialog.confirm(
+            self, "Удаление строк",
+            f"Удалить {len(indices)} выбранных строк из детализации?",
+            confirm_text="Да, удалить", cancel_text="Нет",
+        )
+        if not confirmed:
             return
         try:
             self.df_full = self.df_full.drop(list(indices)).reset_index(drop=True)
@@ -3788,17 +3886,17 @@ class DetailWidget(QWidget):
             self.apply_filters()
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка удаления строк:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка удаления строк:\n{e}")
 
     # ------------------------------------------------------------ экспорт -- #
     def _export_excel(self):
         if self.df_full is None:
-            QMessageBox.warning(self, "Нет данных", "Сначала загрузите файл выписки.")
+            _AlertDialog.show_alert(self, "Нет данных", "Сначала загрузите файл выписки.")
             return
 
         df = self._filtered_df()
         if df.empty:
-            QMessageBox.information(self, "Нет данных", "После применения фильтров нет строк для экспорта.")
+            _AlertDialog.show_alert(self, "Нет данных", "После применения фильтров нет строк для экспорта.")
             return
 
         path, _ = QFileDialog.getSaveFileName(
@@ -3853,9 +3951,9 @@ class DetailWidget(QWidget):
                 ws.column_dimensions[col_cells[0].column_letter].width = min(max_len + 4, 60)
 
             wb.save(path)
-            QMessageBox.information(self, "Экспорт завершён", f"Файл сохранён:\n{path}")
+            _AlertDialog.show_alert(self, "Экспорт завершён", f"Файл сохранён:\n{path}")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка экспорта", str(e))
+            _AlertDialog.show_alert(self, "Ошибка экспорта", str(e))
 
     # ------------------------------------------------------ редактирование -- #
     def _on_cell_edited(self, node: _Node, col: str):
@@ -3863,7 +3961,7 @@ class DetailWidget(QWidget):
         try:
             self._on_cell_edited_impl(node, col)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка сохранения ячейки:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка сохранения ячейки:\n{e}")
 
     def _on_cell_edited_impl(self, node: _Node, col: str):
         if self.df_full is None:
@@ -3910,7 +4008,7 @@ class DetailWidget(QWidget):
                 font-size: 13px; padding: 4px;
             }
             QMenu::item { padding: 8px 20px; border-radius: 4px; }
-            QMenu::item:selected { background: #EEF2FF; color: #6366F1; }
+            QMenu::item:selected { background: #E8F0F5; color: #07414F; }
             QMenu::separator { height: 1px; background: #E5E7EB; margin: 4px 8px; }
         """)
 
@@ -3944,15 +4042,14 @@ class DetailWidget(QWidget):
                 self.tree.setCurrentIndex(idx)
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка дублирования операции:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка дублирования операции:\n{e}")
 
     def _delete_op(self, op_node: _Node):
-        reply = QMessageBox.question(
+        confirmed = _ConfirmDialog.confirm(
             self, "Удаление строки", "Удалить выбранную операцию?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            confirm_text="Удалить", cancel_text="Отмена",
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if not confirmed:
             return
         try:
             if self.df_full is not None and op_node.df_idx in self.df_full.index:
@@ -3960,4 +4057,4 @@ class DetailWidget(QWidget):
             self.apply_filters()
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка удаления операции:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка удаления операции:\n{e}")
