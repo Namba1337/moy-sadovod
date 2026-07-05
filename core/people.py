@@ -54,12 +54,6 @@ def norm_name(name) -> str:
     return _norm_name(name)
 
 
-def people_index(people: list) -> dict:
-    """{id: person} — для быстрого резолва person_id → запись."""
-    return {p["id"]: p for p in (people or [])
-            if isinstance(p, dict) and p.get("id")}
-
-
 def get(people: list, pid: str) -> dict | None:
     if not pid:
         return None
