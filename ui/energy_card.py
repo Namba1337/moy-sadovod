@@ -9,12 +9,14 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from core import energy
 from core.utils import fmt_money
+from ui.detail_widget import _FramelessDialog, _exec_dialog, _AlertDialog
+from ui.plots_widget import _ConfirmDialog
 
 
 def _next_period_start(today: date | None = None) -> date:
@@ -23,7 +25,7 @@ def _next_period_start(today: date | None = None) -> date:
     return date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
 
 
-class _PdfPeriodDialog(QDialog):
+class _PdfPeriodDialog(_FramelessDialog):
     """Диалог выбора начала и конца периода для PDF-квитанции."""
 
     _MONTHS = ["янв", "фев", "мар", "апр", "май", "июн",
@@ -33,11 +35,18 @@ class _PdfPeriodDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Период квитанции")
         self.setMinimumWidth(340)
+        self.setModal(True)
 
         today = date.today()
         default_year = today.year - 3
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Период квитанции")
+        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
+        layout.addWidget(title)
 
         info = QLabel("Укажите период для квитанции.\n"
                       "Оставьте «Весь период» для полной истории.")
@@ -89,6 +98,25 @@ class _PdfPeriodDialog(QDialog):
 
         self._use_since = True
 
+        self.setStyleSheet(self._frame_qss() + """
+            QLabel { background: transparent; color: #374151; font-size: 13px; }
+            QComboBox, QSpinBox {
+                background: #F8F9FA; border: 1px solid #D1D5DB;
+                border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
+            }
+            QComboBox:focus, QSpinBox:focus { border: 1px solid #07414F; }
+            QCheckBox { color: #374151; background: transparent; font-size: 13px; }
+            QDialogButtonBox QPushButton {
+                background: #E5E7EB; color: #374151; border: 1px solid #D1D5DB;
+                border-radius: 6px; padding: 7px 16px; font-size: 13px;
+            }
+            QDialogButtonBox QPushButton:hover { background: #D1D5DB; }
+            QDialogButtonBox QPushButton[text='За период'] {
+                background: #07414F; color: white; border: none; font-weight: 600;
+            }
+            QDialogButtonBox QPushButton[text='За период']:hover { background: #0B5A6E; }
+        """)
+
     def _accept_all(self):
         self._use_since = False
         self.accept()
@@ -110,7 +138,7 @@ class _PdfPeriodDialog(QDialog):
         return self._zero_cb.isChecked()
 
 
-class MeterReplacementDialog(QDialog):
+class MeterReplacementDialog(_FramelessDialog):
     """Регистрация замены счётчика для участка."""
 
     def __init__(self, plot: str, parent=None,
@@ -163,19 +191,18 @@ class MeterReplacementDialog(QDialog):
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
-        self.setStyleSheet("""
-            QDialog { background: #FFFFFF; color: #374151; }
+        self.setStyleSheet(self._frame_qss() + """
             QLabel { background: transparent; color: #374151; font-size: 13px; }
             QLineEdit, QDateEdit {
                 background: #F8F9FA; border: 1px solid #D1D5DB;
                 border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
             }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #6366F1; }
+            QLineEdit:focus, QDateEdit:focus { border: 1px solid #07414F; }
             QDialogButtonBox QPushButton {
-                background: #4F46E5; color: white; border: none;
+                background: #07414F; color: white; border: none;
                 border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
             }
-            QDialogButtonBox QPushButton:hover { background: #6366F1; }
+            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
             QDialogButtonBox QPushButton[text='Отмена'] {
                 background: #E5E7EB; color: #6B7280;
             }
@@ -186,10 +213,10 @@ class MeterReplacementDialog(QDialog):
             old_v = float(self.inp_old.text().strip().replace(",", "."))
             new_v = float(self.inp_new.text().strip().replace(",", "."))
         except ValueError:
-            QMessageBox.warning(self, "Ошибка", "Показания должны быть числами")
+            _AlertDialog.show_alert(self, "Ошибка", "Показания должны быть числами")
             return
         if old_v < 0 or new_v < 0:
-            QMessageBox.warning(self, "Ошибка", "Показания не могут быть отрицательными")
+            _AlertDialog.show_alert(self, "Ошибка", "Показания не могут быть отрицательными")
             return
         self._result = {
             "date": self.inp_date.date().toString("yyyy-MM-dd"),
@@ -203,7 +230,7 @@ class MeterReplacementDialog(QDialog):
         return self._result
 
 
-class BillingTypeDialog(QDialog):
+class BillingTypeDialog(_FramelessDialog):
     """Редактирование типа расчёта за электроэнергию для участка.
 
     Изменения сохраняются прямо в snt_plots.json. Смена типа применяется
@@ -336,9 +363,9 @@ class BillingTypeDialog(QDialog):
             except ValueError:
                 nv = 0.0
             if nv <= 0:
-                QMessageBox.warning(self, "Расчётный метод",
-                                    "Для расчётного метода обязательно укажите "
-                                    "норматив мощности (положительное число, кВт).")
+                _AlertDialog.show_alert(self, "Расчётный метод",
+                                        "Для расчётного метода обязательно укажите "
+                                        "норматив мощности (положительное число, кВт).")
                 return
             rec["norm_kw"] = nv
             rec["norm_start_date"] = self.de_norm_start.date().toString("yyyy-MM-dd")
@@ -358,12 +385,11 @@ class BillingTypeDialog(QDialog):
             if bt == energy.BILLING_DIRECT:
                 msg += ("\n\nВнимание: имеющаяся задолженность по СНТ остаётся "
                         "за участком и закрывается вручную.")
-            reply = QMessageBox.question(
+            confirmed = _ConfirmDialog.confirm(
                 self, "Смена типа расчёта", msg,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                confirm_text="Сменить",
             )
-            if reply != QMessageBox.StandardButton.Yes:
+            if not confirmed:
                 return
             try:
                 user = getpass.getuser()
@@ -384,14 +410,13 @@ class BillingTypeDialog(QDialog):
         self.accept()
 
     def _apply_styles(self):
-        self.setStyleSheet("""
-            QDialog { background: #FFFFFF; color: #374151; }
+        self.setStyleSheet(self._frame_qss() + """
             QLabel  { background: transparent; color: #374151; font-size: 13px; }
             QLineEdit, QDateEdit {
                 background: #F8F9FA; border: 1px solid #D1D5DB;
                 border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
             }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #6366F1; }
+            QLineEdit:focus, QDateEdit:focus { border: 1px solid #07414F; }
             QComboBox {
                 background: #F8F9FA; border: 1px solid #D1D5DB; border-radius: 5px;
                 padding: 7px 10px; font-size: 13px; color: #374151;
@@ -399,18 +424,18 @@ class BillingTypeDialog(QDialog):
             QComboBox::drop-down { border: none; width: 20px; }
             QComboBox QAbstractItemView {
                 background: #FFFFFF; border: 1px solid #D1D5DB;
-                color: #374151; selection-background-color: #EEF2FF;
+                color: #374151; selection-background-color: #E8F0F5;
             }
             QDialogButtonBox QPushButton {
-                background: #4F46E5; color: white; border: none;
+                background: #07414F; color: white; border: none;
                 border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
             }
-            QDialogButtonBox QPushButton:hover { background: #6366F1; }
+            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
             QDialogButtonBox QPushButton[text='Отмена'] { background: #E5E7EB; color: #6B7280; }
         """)
 
 
-class PlotCardDialog(QDialog):
+class PlotCardDialog(_FramelessDialog):
     """Карточка участка: сводка показаний/начислений/платежей + ввод и правка показаний."""
 
     MONTH_NAMES = ["янв", "фев", "мар", "апр", "май", "июн",
@@ -512,7 +537,7 @@ class PlotCardDialog(QDialog):
         # ── Разбивка по группам/собственникам (видна при истории) ──
         self.owners_lbl = QLabel("По группам / собственникам")
         self.owners_lbl.setStyleSheet(
-            "color:#6366F1;background:transparent;font-size:12px;margin-top:8px;")
+            "color:#07414F;background:transparent;font-size:12px;margin-top:8px;")
         lay.addWidget(self.owners_lbl)
         self.owners_table = QTableWidget(objectName="summaryTable")
         self.owners_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -535,7 +560,7 @@ class PlotCardDialog(QDialog):
         hint.setSpacing(16)
         for color, text in [
             ("#DC2626", "■  показание < предыдущего"),
-            ("#ffd54f", "■  аномально большой расход / замена счётчика"),
+            ("#B45309", "■  аномально большой расход / замена счётчика"),
         ]:
             lb = QLabel(text)
             lb.setStyleSheet(f"color:{color};background:transparent;font-size:11px;")
@@ -568,17 +593,16 @@ class PlotCardDialog(QDialog):
         bottom.addWidget(btn_close)
         lay.addLayout(bottom)
 
-        self.setStyleSheet("""
-            QDialog { background: #FFFFFF; color: #374151; }
-            QLabel  { background: transparent; }
+        self.setStyleSheet(self._frame_qss() + """
+            QLabel  { background: transparent; color: #374151; }
             QFrame#entryBox {
                 background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
             }
             QPushButton#btnPrimary {
-                background: #4F46E5; color: white; border: none; border-radius: 6px;
+                background: #07414F; color: white; border: none; border-radius: 6px;
                 padding: 8px 18px; font-size: 13px; font-weight: 600;
             }
-            QPushButton#btnPrimary:hover  { background: #6366F1; }
+            QPushButton#btnPrimary:hover  { background: #0B5A6E; }
             QPushButton#btnSecondary {
                 background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
                 border-radius: 6px; padding: 7px 14px; font-size: 13px;
@@ -588,20 +612,20 @@ class PlotCardDialog(QDialog):
                 background: #F8F9FA; border: 1px solid #D1D5DB; border-radius: 6px;
                 color: #374151; padding: 6px 10px; font-size: 13px;
             }
-            QLineEdit#searchInput:focus { border: 1px solid #6366F1; }
+            QLineEdit#searchInput:focus { border: 1px solid #07414F; }
             QComboBox#filterCombo::drop-down { border: none; width: 18px; }
             QComboBox QAbstractItemView {
                 background: #F8F9FA; border: 1px solid #D1D5DB;
-                color: #374151; selection-background-color: #EEF2FF;
+                color: #374151; selection-background-color: #E8F0F5;
             }
             QTableWidget#summaryTable {
                 background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
                 gridline-color: #F3F4F6; color: #374151; font-size: 12px;
-                selection-background-color: #EEF2FF; selection-color: #111827;
+                selection-background-color: #E8F0F5; selection-color: #07414F;
             }
             QTableWidget#summaryTable QHeaderView::section {
-                background: #F9FAFB; color: #6366F1; border: none;
-                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #6366F1;
+                background: #F9FAFB; color: #07414F; border: none;
+                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #07414F;
                 padding: 6px 8px; font-size: 12px; font-weight: 600;
             }
         """)
@@ -681,7 +705,7 @@ class PlotCardDialog(QDialog):
                 mbal_text = fmt_money(amount) if amount else "0 ₽"
                 is_calc = bool(c.get("calculated"))
                 # Тип 2: показание не вводится — вместо редактора пометка «расчётный метод»
-                value_cell = (f"расч. · {c.get('days', 0)} дн", "#6366F1") if is_calc else None
+                value_cell = (f"расч. · {c.get('days', 0)} дн", "#07414F") if is_calc else None
                 self._set_row(r, [
                     (label, None),
                     value_cell,                        # «Показание» — редактируемое поле (тип 1)
@@ -729,8 +753,8 @@ class PlotCardDialog(QDialog):
                     if old_f is not None and new_i is not None else "—"
                 )
                 self._set_row(r, [
-                    (f"[замена] {evdate.strftime('%d.%m.%Y')}", "#ffd54f"),
-                    (reading_text, "#ffd54f"),
+                    (f"[замена] {evdate.strftime('%d.%m.%Y')}", "#B45309"),
+                    (reading_text, "#B45309"),
                     ("—", None), ("—", None), ("—", None), ("—", None), ("—", None),
                     (fmt_money(cum), self._debt_color(cum)),
                     None,
@@ -924,10 +948,11 @@ class PlotCardDialog(QDialog):
         btn = QPushButton("✕")
         btn.setFixedSize(26, 22)
         btn.setToolTip(f"Удалить показание за {month:02d}.{year}")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(
-            "QPushButton{background:#2a1318;color:#DC2626;border:1px solid #6e2a30;"
+            "QPushButton{background:transparent;color:#9CA3AF;border:none;"
             "border-radius:4px;font-size:12px;font-weight:bold;}"
-            "QPushButton:hover{background:#4a1a22;color:#ffcccc;}"
+            "QPushButton:hover{background:#FEE2E2;color:#B91C1C;}"
         )
         btn.clicked.connect(lambda _, y=year, m=month: self._on_delete_reading(y, m))
         self.table.setCellWidget(r, 8, btn)
@@ -936,22 +961,22 @@ class PlotCardDialog(QDialog):
         btn = QPushButton("✕")
         btn.setFixedSize(26, 22)
         btn.setToolTip(f"Удалить запись о замене счётчика от {repl_date}")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(
-            "QPushButton{background:#2a2200;color:#ffd54f;border:1px solid #7a6000;"
+            "QPushButton{background:transparent;color:#B45309;border:none;"
             "border-radius:4px;font-size:12px;font-weight:bold;}"
-            "QPushButton:hover{background:#4a3c00;color:#ffe57f;}"
+            "QPushButton:hover{background:#FEF3C7;color:#92400E;}"
         )
         btn.clicked.connect(lambda _, d=repl_date: self._on_delete_replacement(d))
         self.table.setCellWidget(r, 8, btn)
 
     def _on_delete_replacement(self, repl_date: str):
-        reply = QMessageBox.question(
+        confirmed = _ConfirmDialog.confirm(
             self, "Удалить замену счётчика",
             f"Удалить запись о замене счётчика от {repl_date} на уч. {self._plot}?\n"
             "Расчёт расхода электроэнергии будет пересчитан.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if not confirmed:
             return
         repls = energy.load_replacements()
         plot_repls = repls.get(self._plot, [])
@@ -964,11 +989,11 @@ class PlotCardDialog(QDialog):
     @staticmethod
     def _value_edit_style(anomaly: str | None) -> str:
         if anomaly == "drop":
-            return ("background:#2a0d0d;border:1px solid #DC2626;border-radius:3px;"
+            return ("background:#FEF2F2;border:1px solid #DC2626;border-radius:3px;"
                     "color:#DC2626;font-size:12px;font-weight:700;padding:3px 6px;")
         if anomaly == "spike":
-            return ("background:#2a1f0d;border:1px solid #f9a825;border-radius:3px;"
-                    "color:#ffd54f;font-size:12px;padding:3px 6px;")
+            return ("background:#FFF7ED;border:1px solid #f9a825;border-radius:3px;"
+                    "color:#B45309;font-size:12px;padding:3px 6px;")
         return ("background:#F0F2F5;border:1px solid #D1D5DB;border-radius:3px;"
                 "color:#374151;font-size:12px;padding:3px 6px;")
 
@@ -982,10 +1007,10 @@ class PlotCardDialog(QDialog):
         try:
             num = float(val)
         except ValueError:
-            QMessageBox.warning(self, "Показание", "Значение должно быть числом.")
+            _AlertDialog.show_alert(self, "Показание", "Значение должно быть числом.")
             return
         if num < 0:
-            QMessageBox.warning(self, "Показание", "Значение не может быть отрицательным.")
+            _AlertDialog.show_alert(self, "Показание", "Значение не может быть отрицательным.")
             return
         self._store_reading(year, month, num)
         self.le_value.clear()
@@ -1012,11 +1037,11 @@ class PlotCardDialog(QDialog):
         try:
             num = float(text)
         except ValueError:
-            QMessageBox.warning(self, "Показание", "Значение должно быть числом.")
+            _AlertDialog.show_alert(self, "Показание", "Значение должно быть числом.")
             self._rebuild()
             return
         if num < 0:
-            QMessageBox.warning(self, "Показание", "Значение не может быть отрицательным.")
+            _AlertDialog.show_alert(self, "Показание", "Значение не может быть отрицательным.")
             self._rebuild()
             return
         self._store_reading(year, month, num)
@@ -1038,12 +1063,10 @@ class PlotCardDialog(QDialog):
         self._rebuild()
 
     def _confirm_delete(self, year: int, month: int) -> bool:
-        reply = QMessageBox.question(
+        return _ConfirmDialog.confirm(
             self, "Удалить показание",
             f"Удалить показание за {month:02d}.{year} на уч. {self._plot}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        return reply == QMessageBox.StandardButton.Yes
 
     # ── Прочее ───────────────────────────────────────────────────────────
     @staticmethod
@@ -1056,9 +1079,9 @@ class PlotCardDialog(QDialog):
 
     def _on_billing_type(self):
         dlg = BillingTypeDialog(self._plot, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted and getattr(dlg, "_saved", False):
+        if _exec_dialog(dlg, self) == QDialog.DialogCode.Accepted and getattr(dlg, "_saved", False):
             self._rebuild()
-            QMessageBox.information(self, "Тип расчёта",
+            _AlertDialog.show_alert(self, "Тип расчёта",
                                     "Тип расчёта сохранён. Расчёт пересчитан.")
 
     def _on_replace(self):
@@ -1066,7 +1089,7 @@ class PlotCardDialog(QDialog):
         readings = energy.plot_readings(self._plot, meters)
         last_val = readings[-1][2] if readings else None
         dlg = MeterReplacementDialog(self._plot, self, prev_value=last_val)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        if _exec_dialog(dlg, self) != QDialog.DialogCode.Accepted:
             return
         result = dlg.get_result()
         if not result:
@@ -1076,26 +1099,26 @@ class PlotCardDialog(QDialog):
         repls[self._plot].sort(key=lambda r: r.get("date", ""))
         energy.save_replacements(repls)
         self._rebuild()
-        QMessageBox.information(self, "Замена счётчика",
+        _AlertDialog.show_alert(self, "Замена счётчика",
                                 "Замена сохранена. Расчёт пересчитан.")
 
     def _on_pdf(self):
         try:
             from core import receipt
         except ImportError:
-            QMessageBox.information(self, "Квитанции",
+            _AlertDialog.show_alert(self, "Квитанции",
                                     "Модуль квитанций ещё не подключён.")
             return
 
         dlg = _PdfPeriodDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        if _exec_dialog(dlg, self) != QDialog.DialogCode.Accepted:
             return
         since = dlg.since_date()
         as_of = dlg.as_of_date()
         zero_opening = dlg.zero_opening
 
         if since and since > as_of:
-            QMessageBox.warning(self, "Период", "Начало периода позже конца.")
+            _AlertDialog.show_alert(self, "Период", "Начало периода позже конца.")
             return
 
         default_name = (
@@ -1111,6 +1134,6 @@ class PlotCardDialog(QDialog):
             receipt.save_plot_receipt_pdf(self._plot, self._df, path,
                                           as_of=as_of, since=since,
                                           zero_opening=zero_opening)
-            QMessageBox.information(self, "Квитанция", f"Сохранено:\n{path}")
+            _AlertDialog.show_alert(self, "Квитанция", f"Сохранено:\n{path}")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось сохранить:\n{e}")
