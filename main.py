@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QDateEdit, QFrame, QFileDialog, QMessageBox,
     QScrollArea, QStyleOption, QStyle,
 )
-from PyQt6.QtCore import (Qt, QPoint, QRectF, QTimer, pyqtSignal,
+from PyQt6.QtCore import (Qt, QPoint, QRect, QRectF, QTimer, pyqtSignal,
                            QPropertyAnimation, QParallelAnimationGroup,
                            QEasingCurve)
 from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPainter, QPixmap, QFontDatabase, QPalette, QBitmap, QPainterPath
@@ -55,6 +55,14 @@ class _TitleBar(QWidget):
         lyt.setSpacing(0)
 
         lyt.addStretch()
+
+        self._version_btn = QPushButton(APP_VERSION, objectName="btnVersionPill")
+        self._version_btn.setFixedHeight(24)
+        self._version_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._version_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._version_btn.clicked.connect(window._on_update_pill_clicked)
+        lyt.addWidget(self._version_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        lyt.addSpacing(10)
 
         icon_font = QFont("Segoe MDL2 Assets")
         icon_font.setPixelSize(10)
@@ -428,6 +436,14 @@ class MainWindow(QMainWindow):
                 if py < tb_h:
                     if px >= w - btn_w:
                         return True, HTCLIENT
+                    # Пилюля версии — тоже кликабельный виджет, а не часть
+                    # перетаскиваемой рамки (иначе WM_NCHITTEST перехватывает
+                    # клик как HTCAPTION раньше, чем он доходит до Qt).
+                    pill = getattr(self._title_bar, "_version_btn", None)
+                    if pill is not None:
+                        pill_rect = QRect(pill.mapTo(self, QPoint(0, 0)), pill.size())
+                        if pill_rect.contains(px, py):
+                            return True, HTCLIENT
                     return True, HTCAPTION
 
         return False, 0
@@ -534,18 +550,12 @@ class MainWindow(QMainWindow):
         btn_load_proj.clicked.connect(self._load_project)
         btn_container_lyt.addWidget(btn_load_proj)
 
-        # Кнопка ручной проверки обновлений
-        btn_update = _ActionButton(chr(0xe627), "Проверить обновления")
-        btn_update.clicked.connect(lambda: self._check_for_updates(manual=True))
-        btn_container_lyt.addWidget(btn_update)
-
         side_lyt.addWidget(btn_container, stretch=1)
 
         self._sidebar = sidebar
         self._sidebar_expanded = True
         self._btn_save = btn_save_proj
         self._btn_load = btn_load_proj
-        self._btn_update = btn_update
 
         body_lyt.addWidget(sidebar)
 
@@ -556,11 +566,9 @@ class MainWindow(QMainWindow):
         self.vznosy_debt = VznosyDebtWidget()
         self.plots       = PlotsWidget()
         self.energy_debt = EnergyDebtWidget()
-        # plots и detail — намеренно НЕ autoFill: страница прозрачная, чтобы
-        # проступал белый contentFrame («окно вкладки»). Остальные вкладки
-        # красят свой фон.
-        for tab in (self.home, self.vznosy_debt, self.energy_debt):
-            tab.setAutoFillBackground(True)
+        # Все вкладки намеренно НЕ autoFill: страница прозрачная, чтобы
+        # проступал белый contentFrame («окно вкладки») со скруглёнными
+        # углами. Каждая вкладка сама красит свои внутренние элементы.
         self.stack.addWidget(self.home)         # 0
         self.stack.addWidget(self.detail)       # 1
         self.stack.addWidget(self.vznosy_debt)  # 2
@@ -627,7 +635,7 @@ class MainWindow(QMainWindow):
             for btn in self._nav_buttons:
                 btn._lbl.setVisible(False)
                 btn.set_collapsed(True)
-            for b in (self._btn_save, self._btn_load, self._btn_update):
+            for b in (self._btn_save, self._btn_load):
                 b._lbl.setVisible(False)
                 b.set_collapsed(True)
             self._btn_container_lyt.setContentsMargins(0, 0, 0, 16)
@@ -654,7 +662,7 @@ class MainWindow(QMainWindow):
                 for btn in self._nav_buttons:
                     btn.set_collapsed(False)
                     btn._lbl.setVisible(True)
-                for b in (self._btn_save, self._btn_load, self._btn_update):
+                for b in (self._btn_save, self._btn_load):
                     b.set_collapsed(False)
                     b._lbl.setVisible(True)
 
@@ -670,7 +678,7 @@ class MainWindow(QMainWindow):
         "snt_map_plots.json", "snt_map_image.json",
         "snt_meters.json", "snt_meters_years.json",
         "snt_meter_replacements.json", "snt_energy_baseline.json",
-        "snt_common_meter.json",
+        "snt_common_meter.json", "snt_categories.json", "snt_people.json",
     ]
 
     def _save_project(self):
@@ -803,10 +811,19 @@ class MainWindow(QMainWindow):
         else:
             self.energy_debt.refresh(self.detail.df_full)
             self.vznosy_debt.refresh(self.detail.df_full)
+            self.home.refresh(self.detail.df_full)
 
         QMessageBox.information(self, "Загружено", "Проект успешно загружен.")
 
     # ── Облачные обновления ─────────────────────────────────────────────
+
+    def _on_update_pill_clicked(self) -> None:
+        """Клик по пилюле версии в шапке: проверка обновлений + история релизов."""
+        self._check_for_updates(manual=True)
+        from ui.update_history_dialog import UpdateHistoryDialog
+        from ui.detail_widget import _exec_dialog
+        dlg = UpdateHistoryDialog(self)
+        _exec_dialog(dlg, self)
 
     def _check_for_updates(self, *, manual: bool) -> None:
         """Запросить latest-release с GitHub.
@@ -835,14 +852,16 @@ class MainWindow(QMainWindow):
         # Импортируем здесь — чтобы избежать ненужной зависимости UI от ядра
         # на этапе импорта main.py (PyInstaller-frozen инициализация и т.п.).
         from ui.update_dialog import UpdateDialog
+        from ui.detail_widget import _exec_dialog
         dlg = UpdateDialog(info, self)
-        dlg.exec()
+        _exec_dialog(dlg, self)
 
     def _on_no_update(self) -> None:
         manual = self._update_manual
         self._release_checker()
         if manual:
-            QMessageBox.information(
+            from ui.detail_widget import _AlertDialog
+            _AlertDialog.show_alert(
                 self, "Обновления",
                 f"У вас актуальная версия ({APP_VERSION}).",
             )
@@ -851,7 +870,8 @@ class MainWindow(QMainWindow):
         manual = self._update_manual
         self._release_checker()
         if manual:
-            QMessageBox.warning(
+            from ui.detail_widget import _AlertDialog
+            _AlertDialog.show_alert(
                 self, "Не удалось проверить обновления",
                 f"Не удалось связаться с сервером обновлений:\n{msg}",
             )
@@ -866,6 +886,13 @@ class MainWindow(QMainWindow):
             QWidget#titleBar {
                 background: #E9EDF3;
             }
+            QPushButton#btnVersionPill {
+                background: rgba(7,65,79,0.1); border: 1px solid rgba(7,65,79,0.35);
+                border-radius: 12px; color: #07414F; font-size: 12px; font-weight: 600;
+                padding: 2px 14px;
+            }
+            QPushButton#btnVersionPill:hover   { background: rgba(7,65,79,0.18); }
+            QPushButton#btnVersionPill:pressed { background: rgba(7,65,79,0.24); }
             QPushButton#btnWinMin, QPushButton#btnWinMax {
                 background: transparent; border: none;
                 color: #1A1A1A;
@@ -925,10 +952,10 @@ class MainWindow(QMainWindow):
             }
 
             /* ── Dashboard «Главная» ──────────────────────────── */
-            QScrollArea#homeScroll { background: #F0F3F9; border: none; }
-            QWidget#homeContent { background: #F0F3F9; }
+            QScrollArea#homeScroll { background: transparent; border: none; }
+            QWidget#homeContent { background: transparent; }
             QFrame#dashCard {
-                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 14px;
+                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 14px;
             }
             QLabel#cardTitleGreen {
                 color: #57A05C; background: transparent;

@@ -4,8 +4,8 @@ import re
 from PyQt6.QtCore import Qt, QDate, QModelIndex
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QDateEdit, QDialog, QFileDialog,
-    QFrame, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
+    QAbstractItemView, QDateEdit, QFileDialog,
+    QFrame, QHBoxLayout, QHeaderView, QLabel,
     QPushButton, QTreeView, QVBoxLayout, QWidget,
 )
 
@@ -17,6 +17,7 @@ from ui.plots_widget import (
 )
 from ui.vznosy_card import VznosyCardDialog
 from ui.rates_widget import VznosyRatesWidget
+from ui.detail_widget import _FramelessDialog, _exec_dialog, _AlertDialog
 
 
 # ============================================================================ #
@@ -33,6 +34,89 @@ class _VznosyModel(_FlatTableModel):
 
 
 # ============================================================================ #
+#  Обёртка диалога «Периоды членских взносов»                                  #
+# ============================================================================ #
+
+class _RatesDialog(_FramelessDialog):
+    """Кастомная (без нативного чрома) карточка для VznosyRatesWidget —
+    единственная точка стилизации служебных objectName-ов виджета
+    (pageTitle/filterFrame/btnPrimary и т.п.), которые вне контекста
+    QMainWindow не получают глобальный QSS приложения."""
+
+    def __init__(self, rates_widget: VznosyRatesWidget, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Периоды членских взносов")
+        self.setModal(True)
+        self.setMinimumSize(900, 560)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(12, 10, 12, 0)
+        header.addStretch()
+        btn_close = QPushButton("✕", objectName="btnPanelClose")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_close.clicked.connect(self.reject)
+        header.addWidget(btn_close)
+        lay.addLayout(header)
+
+        lay.addWidget(rates_widget, stretch=1)
+        self.setStyleSheet(self._frame_qss() + """
+            QLabel { background: transparent; color: #374151; }
+            QLabel#pageTitle { font-size: 18px; font-weight: 700; color: #1F2937; }
+            QLabel#filterLabel { color: #9AA3AE; font-size: 13px; }
+            QLabel#statusLabel { color: #6B7280; font-size: 12px; }
+            QFrame#filterFrame {
+                background: #F8F9FA; border: 1px solid #E3E8EE; border-radius: 8px;
+            }
+            QLineEdit#searchInput {
+                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
+                color: #1F2937; padding: 7px 12px; font-size: 13px;
+            }
+            QLineEdit#searchInput:focus { border: 1px solid #07414F; }
+            QDateEdit#datePicker {
+                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
+                color: #1F2937; padding: 7px 10px; font-size: 13px;
+            }
+            QDateEdit#datePicker::drop-down { border: none; width: 18px; }
+            QPushButton#btnPrimary {
+                background: #07414F; color: #FFFFFF; border: none; border-radius: 6px;
+                padding: 8px 18px; font-size: 13px; font-weight: 600;
+            }
+            QPushButton#btnPrimary:hover   { background: #0B5A6E; }
+            QPushButton#btnPrimary:pressed { background: #062F38; }
+            QPushButton#btnSecondary {
+                background: #FFFFFF; color: #3C4654;
+                border: 1px solid #D5DCE4; border-radius: 6px;
+                padding: 7px 12px; font-size: 13px;
+            }
+            QPushButton#btnSecondary:hover { background: #F0F3F7; color: #1F2937; }
+            QPushButton#btnPanelClose {
+                background: transparent; border: none; color: #9CA3AF;
+                font-size: 15px; font-weight: 600; border-radius: 12px;
+            }
+            QPushButton#btnPanelClose:hover { background: #F3F4F6; color: #374151; }
+            QTableWidget#summaryTable {
+                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 8px;
+                gridline-color: #EAEDF1; color: #1F2937; font-size: 12px;
+                selection-background-color: #E8F0F5; selection-color: #07414F;
+            }
+            QTableWidget#summaryTable QHeaderView::section {
+                background: #EEF1F5; color: #6B7280; border: none;
+                border-right: 1px solid #E3E8EE; border-bottom: 2px solid #E3E8EE;
+                padding: 8px 10px; font-size: 12px; font-weight: 600;
+            }
+            QTableWidget#summaryTable::item {
+                padding: 4px 10px; border-bottom: 1px solid #EAEDF1;
+            }
+        """)
+
+
+# ============================================================================ #
 #  Виджет вкладки «Членские взносы»                                             #
 # ============================================================================ #
 
@@ -41,7 +125,7 @@ class VznosyDebtWidget(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setAutoFillBackground(True)
+        self.setAutoFillBackground(False)
         self._df = None
         self._last_debts: dict = {}
         self._col_syncing = False
@@ -197,14 +281,9 @@ class VznosyDebtWidget(QWidget):
     # -- публичный API ------------------------------------------------------- #
 
     def _open_rates_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Периоды членских взносов")
-        dlg.resize(720, 500)
-        dlg_lay = QVBoxLayout(dlg)
-        dlg_lay.setContentsMargins(0, 0, 0, 0)
-        dlg_lay.addWidget(self.rates)
-        dlg.exec()
-        dlg_lay.removeWidget(self.rates)
+        dlg = _RatesDialog(self.rates, self)
+        _exec_dialog(dlg, self)
+        dlg.layout().removeWidget(self.rates)
         self.rates.setParent(self)  # type: ignore[arg-type]
         self._rebuild()
 
@@ -286,11 +365,11 @@ class VznosyDebtWidget(QWidget):
 
                 "_text_Начислено": fmt_money(bal.charged),
                 "_sort_Начислено": bal.charged,
-                "_fg_Начислено": "#f9a825" if bal.charged else "#3a5a7a",
+                "_fg_Начислено": "#f9a825" if bal.charged else "#9CA3AF",
 
                 "_text_Оплачено": fmt_money(bal.paid),
                 "_sort_Оплачено": bal.paid,
-                "_fg_Оплачено": "#059669" if bal.paid else "#3a5a7a",
+                "_fg_Оплачено": "#059669" if bal.paid else "#9CA3AF",
 
                 "_text_Долг / Аванс": fmt_money(bal.debt),
                 "_sort_Долг / Аванс": bal.debt,
@@ -353,12 +432,12 @@ class VznosyDebtWidget(QWidget):
             return
         as_of = self.date_as_of.date().toPyDate()
         dlg = VznosyCardDialog(plot_text, self._df, self, as_of=as_of)
-        dlg.exec()
+        _exec_dialog(dlg, self)
         self._rebuild()
 
     def _export_debtor_receipts(self):
         if self._df is None or len(self._df) == 0:
-            QMessageBox.information(self, "Квитанции", "Сначала загрузите выписку.")
+            _AlertDialog.show_alert(self, "Квитанции", "Сначала загрузите выписку.")
             return
         from core import vznosy
         rates = vznosy.load_rates()
@@ -382,7 +461,7 @@ class VznosyDebtWidget(QWidget):
                 debtors.append((plot, cur_name))
 
         if not debtors:
-            QMessageBox.information(self, "Квитанции", "Должников нет — квитанции не нужны.")
+            _AlertDialog.show_alert(self, "Квитанции", "Должников нет — квитанции не нужны.")
             return
         folder = QFileDialog.getExistingDirectory(self, "Папка для квитанций")
         if not folder:
@@ -390,7 +469,7 @@ class VznosyDebtWidget(QWidget):
         try:
             from core import receipt
         except ImportError as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось импортировать модуль квитанций:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось импортировать модуль квитанций:\n{e}")
             return
 
         ok = 0
@@ -410,12 +489,12 @@ class VznosyDebtWidget(QWidget):
             except Exception as e:
                 errors.append(f"уч. {plot}: {e}")
         if errors:
-            QMessageBox.warning(
+            _AlertDialog.show_alert(
                 self, "Квитанции",
                 f"Создано: {ok}\nОшибки ({len(errors)}):\n" + "\n".join(errors[:10])
             )
         else:
-            QMessageBox.information(
+            _AlertDialog.show_alert(
                 self, "Квитанции",
                 f"✅  Сформировано {ok} квитанций в:\n{folder}"
             )
@@ -453,6 +532,6 @@ class VznosyDebtWidget(QWidget):
             for row in rows:
                 ws.append(row)
             wb.save(path)
-            QMessageBox.information(self, "Экспорт завершён", f"Файл сохранён:\n{path}")
+            _AlertDialog.show_alert(self, "Экспорт завершён", f"Файл сохранён:\n{path}")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка экспорта", str(e))
+            _AlertDialog.show_alert(self, "Ошибка экспорта", str(e))

@@ -8,15 +8,17 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QTableWidget, QTabWidget, QTableWidgetItem,
+    QPushButton, QTableWidget, QTabWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from core import energy
 from core.utils import fmt_money
+from ui.detail_widget import _FramelessDialog, _exec_dialog, _AlertDialog
+from ui.plots_widget import _ConfirmDialog
 
 
-class VznosyAdjustmentDialog(QDialog):
+class VznosyAdjustmentDialog(_FramelessDialog):
     """Диалог добавления ручного платежа или переопределения начисления ЧВ."""
 
     KIND_LABELS = {
@@ -86,19 +88,18 @@ class VznosyAdjustmentDialog(QDialog):
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
-        self.setStyleSheet("""
-            QDialog { background: #FFFFFF; color: #374151; }
+        self.setStyleSheet(self._frame_qss() + """
             QLabel { background: transparent; color: #374151; font-size: 13px; }
             QLineEdit, QDateEdit, QComboBox, QSpinBox {
                 background: #F8F9FA; border: 1px solid #D1D5DB;
                 border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
             }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #6366F1; }
+            QLineEdit:focus, QDateEdit:focus { border: 1px solid #07414F; }
             QDialogButtonBox QPushButton {
-                background: #4F46E5; color: white; border: none;
+                background: #07414F; color: white; border: none;
                 border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
             }
-            QDialogButtonBox QPushButton:hover { background: #6366F1; }
+            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
             QDialogButtonBox QPushButton[text='Отмена'] {
                 background: #E5E7EB; color: #6B7280;
             }
@@ -153,8 +154,8 @@ class VznosyAdjustmentDialog(QDialog):
                 if v < 0:
                     raise ValueError
             except ValueError:
-                QMessageBox.warning(self, "Ошибка",
-                                    "Сумма должна быть неотрицательным числом")
+                _AlertDialog.show_alert(self, "Ошибка",
+                                        "Сумма должна быть неотрицательным числом")
                 return
             result["amount"] = f"{v:g}"
 
@@ -165,7 +166,7 @@ class VznosyAdjustmentDialog(QDialog):
         return self._result
 
 
-class VznosyCardDialog(QDialog):
+class VznosyCardDialog(_FramelessDialog):
     """Карточка участка по членским взносам: годы, начисления, платежи, корректировки."""
 
     def __init__(self, plot: str, df, parent=None, as_of: date | None = None):
@@ -203,7 +204,7 @@ class VznosyCardDialog(QDialog):
 
         self.warning_lbl = QLabel("")
         self.warning_lbl.setStyleSheet(
-            "color:#DC2626;background:#2a1318;border:1px solid #6e2a30;"
+            "color:#B91C1C;background:#FEF2F2;border:1px solid #FCA5A5;"
             "border-radius:6px;padding:8px 12px;font-size:12px;"
         )
         self.warning_lbl.setVisible(False)
@@ -294,14 +295,13 @@ class VznosyCardDialog(QDialog):
         bottom.addWidget(btn_close)
         lay.addLayout(bottom)
 
-        self.setStyleSheet("""
-            QDialog { background: #FFFFFF; color: #374151; }
-            QLabel  { background: transparent; }
+        self.setStyleSheet(self._frame_qss() + """
+            QLabel  { background: transparent; color: #374151; }
             QPushButton#btnPrimary {
-                background: #4F46E5; color: white; border: none; border-radius: 6px;
+                background: #07414F; color: white; border: none; border-radius: 6px;
                 padding: 8px 18px; font-size: 13px; font-weight: 600;
             }
-            QPushButton#btnPrimary:hover  { background: #6366F1; }
+            QPushButton#btnPrimary:hover  { background: #0B5A6E; }
             QPushButton#btnSecondary {
                 background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
                 border-radius: 6px; padding: 7px 14px; font-size: 13px;
@@ -310,11 +310,11 @@ class VznosyCardDialog(QDialog):
             QTableWidget#summaryTable {
                 background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
                 gridline-color: #F3F4F6; color: #374151; font-size: 12px;
-                selection-background-color: #EEF2FF; selection-color: #111827;
+                selection-background-color: #E8F0F5; selection-color: #07414F;
             }
             QTableWidget#summaryTable QHeaderView::section {
-                background: #F9FAFB; color: #6366F1; border: none;
-                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #6366F1;
+                background: #F9FAFB; color: #07414F; border: none;
+                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #07414F;
                 padding: 6px 8px; font-size: 12px; font-weight: 600;
             }
             QTabWidget#vznosyTabs::pane {
@@ -327,8 +327,8 @@ class VznosyCardDialog(QDialog):
                 font-size: 12px; font-weight: 500; margin-right: 2px;
             }
             QTabBar::tab:selected {
-                background: #FFFFFF; color: #4F46E5; font-weight: 700;
-                border-bottom: 2px solid #4F46E5;
+                background: #FFFFFF; color: #07414F; font-weight: 700;
+                border-bottom: 2px solid #07414F;
             }
             QTabBar::tab:hover:!selected { background: #E5E7EB; color: #374151; }
         """)
@@ -410,7 +410,7 @@ class VznosyCardDialog(QDialog):
                 note_color = "#9CA3AF"
                 if y.ignored:
                     note_text = "не учитывается"
-                    note_color = "#546e7a"
+                    note_color = "#9CA3AF"
                 elif y.overridden:
                     ov = vznosy._period_override(self._plot, period_key,
                                                  y.period_from.year, adj)
@@ -420,7 +420,7 @@ class VznosyCardDialog(QDialog):
                         note_text = f"{kind_label}: {ov['note']}"
                     else:
                         note_text = kind_label
-                    note_color = "#ffd54f"
+                    note_color = "#B45309"
 
                 # Накопительный баланс
                 if not y.ignored:
@@ -487,10 +487,11 @@ class VznosyCardDialog(QDialog):
             btn = QPushButton("✕")
             btn.setFixedSize(26, 22)
             btn.setToolTip("Удалить корректировку")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(
-                "QPushButton{background:#2a1318;color:#DC2626;border:1px solid #6e2a30;"
+                "QPushButton{background:transparent;color:#9CA3AF;border:none;"
                 "border-radius:4px;font-size:12px;font-weight:bold;}"
-                "QPushButton:hover{background:#4a1a22;color:#ffcccc;}"
+                "QPushButton:hover{background:#FEE2E2;color:#B91C1C;}"
             )
             btn.clicked.connect(lambda _, i=orig_idx: self._delete_adjustment(i))
             self.adj_table.setCellWidget(r, 5, btn)
@@ -604,7 +605,7 @@ class VznosyCardDialog(QDialog):
         return "—"
 
     def _set_year_row(self, r: int, cells: list, *, ignored: bool = False):
-        dim_color = QColor("#3a4a56")   # приглушённый цвет для игнорируемых строк
+        dim_color = QColor("#9CA3AF")   # приглушённый цвет для игнорируемых строк
         for c, (text, color) in enumerate(cells):
             it = QTableWidgetItem(text)
             it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
@@ -618,7 +619,7 @@ class VznosyCardDialog(QDialog):
 
     def _add_adjustment(self, kind: str):
         dlg = VznosyAdjustmentDialog(self._plot, self, default_kind=kind)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        if _exec_dialog(dlg, self) != QDialog.DialogCode.Accepted:
             return
         result = dlg.get_result()
         if not result:
@@ -634,12 +635,10 @@ class VznosyCardDialog(QDialog):
         adj = vznosy.load_adjustments()
         items = adj.get(self._plot, [])
         if 0 <= idx < len(items):
-            reply = QMessageBox.question(
+            if not _ConfirmDialog.confirm(
                 self, "Удалить корректировку",
                 "Удалить эту корректировку?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
+            ):
                 return
             items.pop(idx)
             if items:
@@ -653,7 +652,7 @@ class VznosyCardDialog(QDialog):
         try:
             from core import receipt
         except ImportError:
-            QMessageBox.information(self, "Квитанции",
+            _AlertDialog.show_alert(self, "Квитанции",
                                     "Модуль квитанций ещё не подключён.")
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -666,7 +665,7 @@ class VznosyCardDialog(QDialog):
         try:
             receipt.save_vznosy_receipt_pdf(self._plot, self._df, path,
                                             as_of=self._as_of)
-            QMessageBox.information(self, "Квитанция", f"Сохранено:\n{path}")
+            _AlertDialog.show_alert(self, "Квитанция", f"Сохранено:\n{path}")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось сохранить:\n{e}")
 

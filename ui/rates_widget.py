@@ -8,11 +8,12 @@ from PyQt6.QtCore import Qt, QDate, QPoint
 from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtWidgets import (
     QCheckBox, QDateEdit, QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMenu, QMessageBox, QPushButton, QTableWidget,
+    QLineEdit, QMenu, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from core.utils import DATA_DIR
+from ui.plots_widget import _ConfirmDialog
 
 
 class RatesWidget(QWidget):
@@ -153,12 +154,12 @@ class RatesWidget(QWidget):
 
             # Цвет: первая строка (самый актуальный тариф) — выделена
             is_current = (r_idx == 0)
-            bg = "#0d2a0d" if is_current else "#F9FAFB"
+            bg = "#E6F4EA" if is_current else "#F9FAFB"
             fg_date = "#059669" if is_current else "#374151"
 
             for c_idx, (text, fg) in enumerate([
                 (display_date,           fg_date),
-                (entry.get("rate", ""), "#6366F1" if is_current else "#374151"),
+                (entry.get("rate", ""), "#07414F" if is_current else "#374151"),
                 (entry.get("note", ""), "#9CA3AF"),
             ]):
                 it = QTableWidgetItem(text)
@@ -252,13 +253,11 @@ class RatesWidget(QWidget):
         if row >= len(rates_sorted):
             return
         entry = rates_sorted[row]
-        reply = QMessageBox.question(
+        confirmed = _ConfirmDialog.confirm(
             self, "Удаление тарифа",
             f"Удалить запись от {entry.get('date', '')} ({entry.get('rate', '')} ₽/кВт·ч)?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.StandardButton.Yes:
+        if confirmed:
             self._rates = [e for e in self._rates if e is not entry]
             self._save()
             self._rebuild_table()
@@ -464,9 +463,9 @@ class VznosyRatesWidget(QWidget):
             date_to = entry.get("date_to", "")
             is_current = (r_idx == 0)
             is_per_sqm = bool(entry.get("per_sqm"))
-            bg = "#0d2a0d" if is_current else "#F9FAFB"
+            bg = "#E6F4EA" if is_current else "#F9FAFB"
             fg_date = "#059669" if is_current else "#374151"
-            fg_value = "#6366F1" if is_current else "#374151"
+            fg_value = "#07414F" if is_current else "#374151"
 
             amount_text = "—" if is_per_sqm else str(entry.get("amount", ""))
             rate_sqm_text = str(entry.get("rate_sqm", "")) if is_per_sqm else "—"
@@ -607,13 +606,11 @@ class VznosyRatesWidget(QWidget):
             desc = f"{entry.get('rate_sqm', '')} ₽/м²"
         else:
             desc = f"{entry.get('amount', '')} ₽"
-        reply = QMessageBox.question(
+        confirmed = _ConfirmDialog.confirm(
             self, "Удаление периода",
             f"Удалить период {period_str} ({desc})?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.StandardButton.Yes:
+        if confirmed:
             self._rates = [e for e in self._rates if e is not entry]
             self._save()
             self._rebuild_table()

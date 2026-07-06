@@ -36,6 +36,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -61,6 +62,12 @@ NETWORK_TIMEOUT = 15
 
 #: User-Agent для HTTP-запросов.
 USER_AGENT = f"MoySadovod/{APP_VERSION}"
+
+#: Публичный репозиторий на GitHub — источник истории релизов (Releases API).
+#: Основной репозиторий приватный; установщики и релизы публикуются в
+#: отдельном публичном репозитории (см. download_url в манифесте обновлений).
+GITHUB_REPO = "Namba1337/snt_helper_app_public_releases"
+GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -119,9 +126,13 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
-def _http_get(url: str, *, timeout: int = NETWORK_TIMEOUT) -> bytes:
+def _http_get(url: str, *, timeout: int = NETWORK_TIMEOUT,
+              headers: Optional[dict] = None) -> bytes:
     """Простой GET-запрос по HTTPS. Без авторизации — только публичные URL."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    hdrs = {"User-Agent": USER_AGENT}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, headers=hdrs)
     opener = urllib.request.build_opener(
         urllib.request.HTTPSHandler(context=_ssl_context())
     )
@@ -211,6 +222,83 @@ class UpdateChecker(QObject):
             self.noUpdate.emit()
         else:
             self.updateAvailable.emit(info)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  История релизов (GitHub Releases API)
+# ──────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ReleaseHistoryEntry:
+    """Одна запись в истории обновлений (один GitHub Release)."""
+    version: str        # '1.2.3' (без ведущей 'v')
+    notes: str           # тело релиза (release notes), как есть
+    published: str        # 'дд.мм.гггг' либо '' если дата не распознана
+
+
+class _HistoryWorker(QThread):
+    finished_ok = pyqtSignal(list)   # list[ReleaseHistoryEntry]
+    failed = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            raw = _http_get(
+                GITHUB_RELEASES_API,
+                headers={"Accept": "application/vnd.github+json"},
+            )
+            data = json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            self.failed.emit(f"HTTP {e.code}: {e.reason}")
+            return
+        except Exception as e:
+            self.failed.emit(str(e))
+            return
+
+        if not isinstance(data, list):
+            self.failed.emit("Неожиданный формат ответа GitHub API.")
+            return
+
+        entries: list[ReleaseHistoryEntry] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            tag = str(item.get("tag_name", "")).strip()
+            version = tag.lstrip("vV") or tag
+            if not version:
+                continue
+            notes = str(item.get("body", "") or "").strip()
+            published_raw = str(item.get("published_at", "") or "")
+            published = ""
+            if published_raw:
+                try:
+                    published = datetime.strptime(
+                        published_raw[:10], "%Y-%m-%d").strftime("%d.%m.%Y")
+                except Exception:
+                    published = published_raw[:10]
+            entries.append(ReleaseHistoryEntry(
+                version=version, notes=notes, published=published))
+        self.finished_ok.emit(entries)
+
+
+class ReleaseHistoryFetcher(QObject):
+    """Фасад для получения истории релизов с GitHub (публичный REST API,
+    без авторизации — подходит только для публичных репозиториев)."""
+
+    historyReady = pyqtSignal(list)   # list[ReleaseHistoryEntry]
+    errorOccurred = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._worker: Optional[_HistoryWorker] = None
+
+    def fetch(self) -> None:
+        if self._worker and self._worker.isRunning():
+            return
+        w = _HistoryWorker(self)
+        w.finished_ok.connect(self.historyReady.emit)
+        w.failed.connect(self.errorOccurred.emit)
+        self._worker = w
+        w.start()
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -12,13 +12,14 @@ from typing import Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QTextBrowser,
+    QHBoxLayout, QLabel, QProgressBar, QPushButton, QTextBrowser,
     QVBoxLayout, QWidget,
 )
 
 from core.updater import (
     APP_VERSION, ReleaseInfo, UpdateDownloader, human_size, run_installer,
 )
+from ui.detail_widget import _FramelessDialog
 
 
 def _markdown_to_plain(text: str) -> str:
@@ -46,7 +47,7 @@ def _markdown_to_plain(text: str) -> str:
     return out.strip()
 
 
-class UpdateDialog(QDialog):
+class UpdateDialog(_FramelessDialog):
     """Окно «Доступно обновление».
 
     Состояния:
@@ -58,6 +59,7 @@ class UpdateDialog(QDialog):
 
     def __init__(self, info: ReleaseInfo, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self.setModal(True)
         self._info = info
         self._downloader = UpdateDownloader(self)
         self._downloader.downloadProgress.connect(self._on_progress)
@@ -152,17 +154,15 @@ class UpdateDialog(QDialog):
         root.addLayout(btn_row)
 
     def _apply_styles(self) -> None:
-        self.setStyleSheet("""
-            QDialog {
-                background: #F4F6FA;
-            }
+        self.setStyleSheet(self._frame_qss() + """
+            QLabel { background: transparent; }
             QLabel#updateTitle { color: #1F2937; }
             QLabel#updateSubtitle { color: #6B7280; font-size: 12px; }
             QLabel#updateNotesLabel { color: #1F2937; font-size: 13px; }
             QLabel#updateStatus { color: #3C4654; font-size: 13px; }
             QLabel#updateWarn { color: #8A6D3B; font-size: 12px; }
             QTextBrowser#updateNotes {
-                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 8px;
+                background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
                 color: #1F2937; padding: 10px;
             }
             QProgressBar#updateProgress {
@@ -170,21 +170,21 @@ class UpdateDialog(QDialog):
                 color: #1F2937; text-align: center; height: 20px;
             }
             QProgressBar#updateProgress::chunk {
-                background: #2F7D55; border-radius: 5px;
+                background: #07414F; border-radius: 5px;
             }
             QPushButton#btnPrimary {
-                background: #2F7D55; color: #FFFFFF; border: none; border-radius: 6px;
+                background: #07414F; color: #FFFFFF; border: none; border-radius: 6px;
                 padding: 6px 18px; font-size: 13px; font-weight: 600;
             }
-            QPushButton#btnPrimary:hover   { background: #379061; }
-            QPushButton#btnPrimary:pressed { background: #266645; }
-            QPushButton#btnPrimary:disabled { background: #A3B8AD; color: #EEF2F0; }
+            QPushButton#btnPrimary:hover   { background: #0B5A6E; }
+            QPushButton#btnPrimary:pressed { background: #062F38; }
+            QPushButton#btnPrimary:disabled { background: #A9BFC5; color: #EEF2F0; }
             QPushButton#btnSecondary {
-                background: #FFFFFF; color: #3C4654;
-                border: 1px solid #D5DCE4; border-radius: 6px;
+                background: #E5E7EB; color: #6B7280;
+                border: 1px solid #D1D5DB; border-radius: 6px;
                 padding: 6px 14px; font-size: 13px;
             }
-            QPushButton#btnSecondary:hover { background: #F0F3F7; color: #1F2937; }
+            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
         """)
 
     # ── Состояния ─────────────────────────────────────────────────────

@@ -162,9 +162,6 @@ _DEFAULT_ROW_COLOR = QColor(55, 55, 60)
 _MULTI_OP_LABEL = "Мультиоперация"
 _MULTI_CAT_LABEL = "Несколько категорий"
 _MULTI_PLOT_LABEL = "Несколько участков"
-_MULTI_OP_COLOR = QColor(110, 110, 118)   # приглушённый серый
-# Служебный столбец управления (стрелка/＋/корзина). Хранится первым в модели.
-_CTRL_COL = "\x00ctrl"
 # Служебный столбец кнопки редактирования. Хранится последним в модели.
 _EDIT_COL = "\x00edit"
 # Служебный столбец чекбокса выбора строк.
@@ -276,7 +273,7 @@ class OperationsTreeModel(QAbstractItemModel):
         col = self._columns[index.column()]
 
         # Служебные столбцы — всё рисует делегат, модель данных не отдаёт.
-        if col in (_CTRL_COL, _EDIT_COL, _CHECK_COL):
+        if col in (_EDIT_COL, _CHECK_COL):
             return None
 
         if role == MANUAL_ROLE:
@@ -347,7 +344,6 @@ class OperationsTreeModel(QAbstractItemModel):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             if 0 <= section < len(self._columns):
                 name = self._columns[section]
-                if name == _CTRL_COL:   return ""
                 if name == _EDIT_COL:   return chr(0xE3C9)
                 return name
         return None
@@ -359,7 +355,7 @@ class OperationsTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         col = self._columns[index.column()]
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if col in (_CTRL_COL, _EDIT_COL, _CHECK_COL):
+        if col in (_EDIT_COL, _CHECK_COL):
             return f
         if node.kind == "op":
             # Категория и Участок недоступны для редактирования у строк с дочерними
@@ -399,7 +395,7 @@ class OperationsTreeModel(QAbstractItemModel):
 
     # -- сортировка --------------------------------------------------------- #
     def sort(self, column, order=Qt.SortOrder.AscendingOrder):
-        if 0 <= column < len(self._columns) and self._columns[column] in (_CTRL_COL, _EDIT_COL, _CHECK_COL):
+        if 0 <= column < len(self._columns) and self._columns[column] in (_EDIT_COL, _CHECK_COL):
             return
         self._sort_col = column
         self._sort_order = order
@@ -411,7 +407,7 @@ class OperationsTreeModel(QAbstractItemModel):
         if self._sort_col is None or not (0 <= self._sort_col < len(self._columns)):
             return
         col = self._columns[self._sort_col]
-        if col in (_CTRL_COL, _EDIT_COL):
+        if col == _EDIT_COL:
             return
         reverse = self._sort_order == Qt.SortOrder.DescendingOrder
 

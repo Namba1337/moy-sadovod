@@ -59,8 +59,8 @@ _CAT_SHORT = {
 }
 
 _HOME_QSS = """
-QScrollArea#homeScroll { background: #F0F3F9; border: none; }
-QWidget#homeContent    { background: #F0F3F9; }
+QScrollArea#homeScroll { background: transparent; border: none; }
+QWidget#homeContent    { background: transparent; }
 
 QLabel#cardSubtitle { color: #9AA3AE; background: transparent; font-size: 12px; }
 
@@ -718,7 +718,7 @@ class HomeWidget(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setAutoFillBackground(True)
+        self.setAutoFillBackground(False)
         self.setStyleSheet(_HOME_QSS)
 
         self._data: dashboard.DashboardData | None = None
@@ -746,10 +746,17 @@ class HomeWidget(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Локальный override поверх глобального QSS-фикса вьюпорта (см.
+        # main.py: "QAbstractScrollArea > QWidget {background:#F0F3F9}") —
+        # без него скроллящийся контент красится непрозрачным серым и
+        # перекрывает белый скруглённый contentFrame (тот же приём, что и
+        # у _drawer_scroll в ui/plots_widget.py).
+        scroll.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
         outer.addWidget(scroll)
 
         content = QWidget(objectName="homeContent")
-        content.setAutoFillBackground(True)
+        content.setAutoFillBackground(False)
         scroll.setWidget(content)
 
         lyt = QVBoxLayout(content)
