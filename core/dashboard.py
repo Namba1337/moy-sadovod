@@ -306,8 +306,11 @@ def monthly_category_breakdown(df: Optional[pd.DataFrame],
     """Помесячный поток по категориям за 12 месяцев периода.
 
     kind: 'income' — положительные операции, 'expense' — отрицательные.
-    Смешанная категория делится поровну между членскими взносами и
-    электроэнергией (как в остальных расчётах программы)."""
+    Операция с ручной разбивкой (см. energy.parse_breakdown) учитывается
+    по разбивке, построчно по её собственным категориям/суммам. Операция
+    без разбивки, но со смешанной авто-категорией — делится поровну между
+    членскими взносами и электроэнергией (как в остальных расчётах
+    программы)."""
     if period is None:
         return []
     months = _month_iter(period.date_from, 12)
@@ -317,7 +320,32 @@ def monthly_category_breakdown(df: Optional[pd.DataFrame],
     g = df[_window_mask(df, period.date_from, period.date_to)].copy()
     g["_s"] = pd.to_numeric(g["Сумма"], errors="coerce").fillna(0.0)
 
-    # Разворачиваем смешанную категорию
+    # Разворачиваем строки с ЗАВЕРШЁННОЙ ручной разбивкой (сумма строк
+    # разбивки == Сумма операции, см. energy.parse_breakdown — иначе,
+    # например, только что начатая через контекстное меню разбивка без
+    # введённых сумм молча "съела" бы деньги операции) — каждая подстрока
+    # становится отдельной строкой со своей Категорией/Суммой (Дата — от
+    # родительской операции, нужна для группировки по месяцу ниже).
+    has_breakdown = (
+        g.apply(lambda r: bool(energy.parse_breakdown(r.get("_breakdown"), total=r.get("Сумма"))), axis=1)
+        if "_breakdown" in g.columns else pd.Series(False, index=g.index))
+    if has_breakdown.any():
+        exploded_rows = []
+        for _, row in g[has_breakdown].iterrows():
+            for item in energy.parse_breakdown(row.get("_breakdown"), total=row.get("Сумма")):
+                item_amt = energy._to_float(item.get("Сумма"))
+                if item_amt is None or item_amt <= 0:
+                    continue
+                r = row.copy()
+                r["Категория"] = str(item.get("Категория", "")).strip() or "Прочее"
+                r["_s"] = item_amt if row["_s"] >= 0 else -item_amt
+                exploded_rows.append(r)
+        exploded = (pd.DataFrame(exploded_rows) if exploded_rows
+                    else g.iloc[0:0].copy())
+        g = pd.concat([g[~has_breakdown], exploded], ignore_index=True)
+
+    # Разворачиваем смешанную авто-категорию (только у строк БЕЗ разбивки —
+    # они уже обработаны выше и больше не несут CAT_MIXED).
     mixed_mask = g["Категория"] == CAT_MIXED
     if mixed_mask.any():
         half_s = g.loc[mixed_mask, "_s"] / 2.0
@@ -371,9 +399,12 @@ def category_breakdown(df: Optional[pd.DataFrame], d0: date, d1: date,
     """Суммы по категориям выписки в окне [d0, d1].
 
     kind: 'income' — положительные операции, 'expense' — отрицательные.
-    Смешанная категория «Членские взносы + Электроэнергия» делится 50/50
-    между членскими взносами и электроэнергией — так же, как в остальных
-    расчётах программы."""
+    Операция с ручной разбивкой (см. energy.parse_breakdown — пользователь
+    разделил её через «Добавить распределение») учитывается ПО РАЗБИВКЕ,
+    построчно по её собственным категориям/суммам. Операция без разбивки,
+    но с авто-категорией «Членские взносы + Электроэнергия» (CAT_MIXED,
+    это лишь подсказка «раздели вручную») делится 50/50 между членскими
+    взносами и электроэнергией — так же, как в остальных расчётах программы."""
     if df is None:
         return []
     g = df[_window_mask(df, d0, d1)].copy()
@@ -384,6 +415,15 @@ def category_breakdown(df: Optional[pd.DataFrame], d0: date, d1: date,
 
     totals: dict[str, float] = {}
     for _, row in g.iterrows():
+        breakdown = energy.parse_breakdown(row.get("_breakdown"), total=row.get("Сумма"))
+        if breakdown:
+            for item in breakdown:
+                item_amt = energy._to_float(item.get("Сумма"))
+                if item_amt is None or item_amt <= 0:
+                    continue
+                item_cat = str(item.get("Категория", "")).strip() or "Прочее"
+                totals[item_cat] = totals.get(item_cat, 0.0) + item_amt
+            continue
         cat = str(row.get("Категория", "")).strip() or "Прочее"
         amt = abs(float(row["_s"]))
         if cat == CAT_MIXED:

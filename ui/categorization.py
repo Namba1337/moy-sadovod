@@ -237,7 +237,7 @@ def categorize_row(row: dict) -> str:
         "общественные нужды", "обществен нужды", "жкх", "ежегодный взнос",
     ]):
         result = "Членские взносы"
-    elif re.search(r"долг|аванс|уч\.19;|2026\s*год|2025\s*год", text):
+    elif re.search(r"долг|аванс|уч\.?\s*\d+|\d{4}\s*год", text):
         result = "Членские взносы"
     elif ("контур" in text or "контур" in contragent
             or "программ" in text or "эвм" in text

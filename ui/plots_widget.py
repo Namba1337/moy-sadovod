@@ -698,11 +698,14 @@ class _NewGroupDialog(_ConfirmDialog):
 
 class _QuickAddPlotDialog(_ConfirmDialog):
     """Быстрое добавление участка — модальное окно вместо панели справа
-    (см. PlotsWidget._add_plot): номер и площадь необязательны, обязательно
-    только ФИО первого контакта. Кнопка «Создать» активна только при
-    заполненном ФИО; указанный номер, совпадающий с уже существующим
+    (см. PlotsWidget._add_plot): номер участка и ФИО первого контакта
+    обязательны, площадь — нет. Кнопка «Создать» активна только когда оба
+    обязательных поля заполнены; номер, совпадающий с уже существующим
     участком, блокирует создание (пилюля «номер занят» — рядом с подписью
-    поля, как и у дубля ФИО в карточке контакта)."""
+    поля, как и у дубля ФИО в карточке контакта). Номер обязателен, потому
+    что весь остальной код использует его как ключ идентичности участка
+    (выбор, кэш долга, массовое удаление) — участок без номера был бы
+    неотличим от другого такого же."""
 
     def __init__(self, title: str, message: str, people: list,
                 existing_nums: set, *, parent=None):
@@ -795,7 +798,8 @@ class _QuickAddPlotDialog(_ConfirmDialog):
                 area_ok = False
 
         name_ok = bool(self.inp_name.text().strip())
-        self._confirm_btn.setEnabled(area_ok and name_ok and not num_dup)
+        num_ok = bool(num)
+        self._confirm_btn.setEnabled(area_ok and name_ok and num_ok and not num_dup)
 
     @staticmethod
     def ask(parent, people: list, existing_nums: set):
@@ -803,7 +807,7 @@ class _QuickAddPlotDialog(_ConfirmDialog):
         area — None, если поле оставлено пустым (необязательное)."""
         dlg = _QuickAddPlotDialog(
             "Новый участок",
-            "Обязательно только ФИО собственника — номер и площадь можно "
+            "Номер участка и ФИО собственника обязательны — площадь можно "
             "уточнить позже.",
             people, existing_nums, parent=parent)
         overlay = _BasePromptDialog._show_centered(dlg, parent)
@@ -1556,7 +1560,14 @@ class _PlotRowDelegate(QStyledItemDelegate):
         return self._cb_rect(self._view.visualRect(idx)).contains(pos)
 
     def eventFilter(self, obj, event):
-        if obj is self._view.viewport():
+        try:
+            viewport = self._view.viewport()
+        except RuntimeError:
+            # self._view (C++-объект) уже удалён — обычно при закрытии
+            # приложения, когда события ещё летят по хвосту очереди после
+            # того, как сам QListView уничтожен. Просто игнорируем.
+            return False
+        if obj is viewport:
             if event.type() == QEvent.Type.MouseMove:
                 pos = event.position().toPoint()
                 new_hover = self._view.indexAt(pos)
@@ -3546,7 +3557,7 @@ class PlotEditDialog(QWidget):
         for k in ("billing_type", "meter_commission_date", "meter_act_number",
                   "meter_location", "norm_kw", "norm_start_date",
                   "direct_contract_date", "direct_contract_number",
-                  "billing_history", "ownership_history"):
+                  "billing_history"):
             if k in self._plot_data:
                 result[k] = self._plot_data[k]
         self._result = result

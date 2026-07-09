@@ -156,6 +156,8 @@ def _parse_date(text: str):
 
 # Роль, по которой делегат понимает, что ячейка была отредактирована вручную.
 MANUAL_ROLE = Qt.ItemDataRole.UserRole + 1
+# Роль: операция помечена как повторно импортированная (см. DetailWidget._dup_pending).
+DUP_ROLE = Qt.ItemDataRole.UserRole + 2
 
 _DEFAULT_ROW_COLOR = QColor(55, 55, 60)
 # Заглушка для родительской строки, у которой есть дочерние строки-распределения.
@@ -200,9 +202,10 @@ class OperationsTreeModel(QAbstractItemModel):
     # Эмитится при ручном редактировании ячейки: (узел, имя_колонки).
     cellEdited = pyqtSignal(object, str)
 
-    def __init__(self, manual_cells: set, parent=None):
+    def __init__(self, manual_cells: set, dup_pending: dict, parent=None):
         super().__init__(parent)
         self._manual = manual_cells
+        self._dup_pending = dup_pending
         self._columns: list[str] = []
         self._root = _Node("root", {})
         self._sort_col: int | None = None
@@ -279,6 +282,9 @@ class OperationsTreeModel(QAbstractItemModel):
         if role == MANUAL_ROLE:
             return node.kind == "op" and (node.df_idx, col) in self._manual
 
+        if role == DUP_ROLE:
+            return node.kind == "op" and node.df_idx in self._dup_pending
+
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             if node.kind == "split" and col not in _SPLIT_DISPLAY_COLS:
                 return ""
@@ -330,8 +336,16 @@ class OperationsTreeModel(QAbstractItemModel):
         if role == Qt.ItemDataRole.BackgroundRole:
             if node.kind == "split":
                 return None
+            if node.kind == "op" and node.df_idx in self._dup_pending:
+                return QColor("#FFF3CD")
             cat = str(node.data.get("Категория", ""))
             return CATEGORY_COLORS.get(cat, _DEFAULT_ROW_COLOR)
+
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if node.kind == "op" and node.df_idx in self._dup_pending:
+                return ("Эта операция встретилась ещё раз при повторном импорте.\n"
+                        "ПКМ по строке — восстановить исходные данные или "
+                        "оставить как есть.")
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if col == "Сумма":
@@ -539,7 +553,12 @@ class _DetailCheckDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
     def eventFilter(self, obj, event):
-        if obj is self._view.viewport():
+        try:
+            viewport = self._view.viewport()
+        except RuntimeError:
+            # self._view уже удалён — хвост событий при закрытии приложения.
+            return False
+        if obj is viewport:
             if event.type() == QEvent.Type.MouseMove:
                 idx = self._view.indexAt(event.position().toPoint())
                 on_btn = self._is_btn(idx)
@@ -1109,7 +1128,12 @@ class _BranchColumnDelegate(_CellDelegate):
             self._view.viewport().unsetCursor()
 
     def eventFilter(self, obj, event):
-        if obj is self._view.viewport():
+        try:
+            viewport = self._view.viewport()
+        except RuntimeError:
+            # self._view уже удалён — хвост событий при закрытии приложения.
+            return False
+        if obj is viewport:
             if event.type() == QEvent.Type.MouseMove:
                 self._update_btn_hover(event.position().toPoint())
             elif event.type() == QEvent.Type.Leave:
@@ -1875,7 +1899,10 @@ class LoadSettingsDialog(_FramelessDialog):
             self.chk_merge.setChecked(True)
             self.chk_merge.setToolTip(
                 "Новые операции будут добавлены к уже загруженным.\n"
-                "Дубли будут помечены тегом «Дубль»."
+                "Операции, которые уже есть в списке, не задваиваются — "
+                "существующая строка подсвечивается жёлтым, правой кнопкой "
+                "мыши по ней можно восстановить исходные данные повтора "
+                "или оставить как есть."
             )
             lay.addWidget(self.chk_merge)
 
@@ -2283,7 +2310,20 @@ class AddRowDialog(_FramelessDialog):
 
     def _on_accept(self):
         raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("−", "-").replace("−", "-").replace(" ", ""))
+               .replace(",", ".").replace("−", "-").replace("–", "-").replace(" ", ""))
+        if not raw:
+            _AlertDialog.show_alert(self, "Ошибка", "Укажите сумму операции")
+            return
+        try:
+            float(raw)
+        except ValueError:
+            _AlertDialog.show_alert(self, "Ошибка", "Некорректный формат суммы")
+            return
+        self.accept()
+
+    def get_result(self) -> dict:
+        raw = (self.inp_summa.text().strip()
+               .replace(",", ".").replace("−", "-").replace("–", "-").replace(" ", ""))
         d = self.date_edit.date()
         result = {
             "Дата":        pd.Timestamp(d.year(), d.month(), d.day()),
@@ -2375,7 +2415,12 @@ class _DetailEditDelegate(QStyledItemDelegate):
         painter.restore()
 
     def eventFilter(self, obj, event):
-        if obj is self._view.viewport():
+        try:
+            viewport = self._view.viewport()
+        except RuntimeError:
+            # self._view уже удалён — хвост событий при закрытии приложения.
+            return False
+        if obj is viewport:
             if event.type() == QEvent.Type.MouseMove:
                 idx    = self._view.indexAt(event.position().toPoint())
                 on_btn = self._is_btn(idx)
@@ -3304,6 +3349,14 @@ class DetailWidget(QWidget):
         self.df_full = None
         self._manual_rows: set[int] = set()
         self._manual_cells: set[tuple[int, str]] = set()
+        # df_idx -> {"Дата","Сумма","Контрагент","Назначение"} — снимок
+        # СЫРЫХ данных повторного импорта, обнаруженного при загрузке в
+        # режиме "Добавить к существующим данным" (см. load_file). Строка
+        # НЕ дублируется — вместо этого существующая помечается, а
+        # пользователь решает через контекстное меню: восстановить исходные
+        # значения из повторного импорта или оставить как отредактировал.
+        # Не сохраняется в проект — живёт только в рамках сессии.
+        self._dup_pending: dict[int, dict] = {}
         self._cat_col: int | None = None
         self._cont_col: int | None = None
         self._plot_col: int | None = None
@@ -3339,7 +3392,7 @@ class DetailWidget(QWidget):
         layout.addLayout(top_bar)
 
         # --- дерево (Model-View) --------------------------------------- #
-        self.model = OperationsTreeModel(self._manual_cells, self)
+        self.model = OperationsTreeModel(self._manual_cells, self._dup_pending, self)
         self.model.cellEdited.connect(self._on_cell_edited)
 
         self.tree = QTreeView(objectName="mainTable")
@@ -3466,6 +3519,22 @@ class DetailWidget(QWidget):
         # Переименовываем во всех строках df_full
         if self.df_full is not None and "Категория" in self.df_full.columns:
             self.df_full.loc[self.df_full["Категория"] == old_name, "Категория"] = new_name
+            # ...и внутри разбивок (_breakdown) — иначе подстроки останутся
+            # со старым именем категории: не попадут в дашборд/долг под новым
+            # именем (расчёты матчат по точному совпадению строки), и не
+            # найдутся в выпадающем списке при повторном открытии разбивки.
+            if "_breakdown" in self.df_full.columns:
+                def _rename_in_breakdown(v):
+                    items = _parse_breakdown(v)
+                    if not items:
+                        return v
+                    changed = False
+                    for item in items:
+                        if isinstance(item, dict) and item.get("Категория") == old_name:
+                            item["Категория"] = new_name
+                            changed = True
+                    return _dump_breakdown(items) if changed else v
+                self.df_full["_breakdown"] = self.df_full["_breakdown"].apply(_rename_in_breakdown)
         # Делегат уже обновлён через rename_user_category → ALL_CATEGORIES
         self._category_delegate._items = list(_cat_mod.ALL_CATEGORIES)
         if old_name in self._hdr_cat_filter:
@@ -3570,26 +3639,6 @@ class DetailWidget(QWidget):
         elif self.df_full["_breakdown"].dtype != "object":
             self.df_full["_breakdown"] = self.df_full["_breakdown"].astype("object")
         self.df_full.at[df_idx, "_breakdown"] = _dump_breakdown(items)
-
-    def _add_split(self, op_node: _Node):
-        if self.df_full is None or op_node.df_idx not in self.df_full.index:
-            return
-        items = _parse_breakdown(self.df_full.loc[op_node.df_idx].get("_breakdown"))
-        # Правила ветки: «Контрагент» копируется из операции; «Назначение» не
-        # используется; «Сумма»/«Категория»/«Участок» заполняются вручную.
-        items.append({
-            "Контрагент": str(op_node.data.get("Контрагент") or ""),
-            "Сумма": 0.0,
-            "Категория": ALL_CATEGORIES[0],
-            "Участок": "",
-        })
-        self._set_breakdown(op_node.df_idx, items)
-        target = op_node.df_idx
-        self.apply_filters()
-        idx = self.model.index_for_df_idx(target)
-        if idx.isValid():
-            self.tree.expand(idx)
-        # Разбивка — аннотация, на суммы/долги не влияет: dataLoaded не эмитим.
 
     def _delete_split(self, split_node: _Node):
         parent = split_node.parent
@@ -3757,13 +3806,48 @@ class DetailWidget(QWidget):
 
             if merge_mode and self.df_full is not None:
                 existing = _ensure_meta_columns(self.df_full)
-                new_start = int(existing.index.max()) + 1 if len(existing) > 0 else 0
-                df = df.reset_index(drop=True)
-                df.index = df.index + new_start
-                self.df_full = pd.concat([existing, df])
+                hash_to_idx: dict[str, int] = {}
+                for idx, h in existing["_hash"].items():
+                    if h:
+                        hash_to_idx.setdefault(h, idx)
+
+                new_rows = []
+                dup_count = 0
+                for _, row in df.iterrows():
+                    match_idx = hash_to_idx.get(row["_hash"])
+                    if match_idx is not None:
+                        dt = row.get("Дата")
+                        self._dup_pending[match_idx] = {
+                            "Дата": dt.isoformat() if pd.notna(dt) else None,
+                            "Сумма": _to_num(row.get("Сумма")),
+                            "Контрагент": str(row.get("Контрагент") or ""),
+                            "Назначение": str(row.get("Назначение") or ""),
+                        }
+                        dup_count += 1
+                    else:
+                        new_rows.append(row)
+
+                if new_rows:
+                    new_df = pd.DataFrame(new_rows).reset_index(drop=True)
+                    new_start = int(existing.index.max()) + 1 if len(existing) > 0 else 0
+                    new_df.index = new_df.index + new_start
+                    self.df_full = pd.concat([existing, new_df])
+                else:
+                    self.df_full = existing
+
+                if dup_count:
+                    _AlertDialog.show_alert(
+                        self, "Импорт завершён",
+                        f"Добавлено новых операций: {len(new_rows)}.\n"
+                        f"Обнаружено повторов уже загруженных операций: {dup_count} "
+                        f"— они не задвоены, а помечены в списке (жёлтым цветом; "
+                        f"правой кнопкой мыши по строке — восстановить исходные "
+                        f"данные повтора или оставить как есть)."
+                    )
             else:
                 self._manual_rows.clear()
                 self._manual_cells.clear()
+                self._dup_pending.clear()
                 self.df_full = df
 
             self.apply_filters()
@@ -3775,6 +3859,7 @@ class DetailWidget(QWidget):
         """Восстанавливает DataFrame из сохранённого проекта без диалога выбора файла."""
         self._manual_rows.clear()
         self._manual_cells.clear()
+        self._dup_pending.clear()
         drop_cols = {"Номер", "Номер счёта", "Контрагент счёт", "Контрагент cчёт", "Теги"}
         df = df.drop(columns=[c for c in drop_cols if c in df.columns])
         df = _merge_to_summa(df)
@@ -4009,16 +4094,20 @@ class DetailWidget(QWidget):
         """)
 
         if node.kind == "op":
-            act_split = QAction("Добавить распределение", self)
-            act_split.triggered.connect(lambda: self._add_split(node))
-            menu.addAction(act_split)
-            menu.addSeparator()
             act_dup = QAction("Дублировать операцию", self)
             act_dup.triggered.connect(lambda: self._duplicate_op(node))
             menu.addAction(act_dup)
             act_del = QAction("Удалить операцию", self)
             act_del.triggered.connect(lambda: self._delete_op(node))
             menu.addAction(act_del)
+            if node.df_idx in self._dup_pending:
+                menu.addSeparator()
+                act_restore = QAction("⟲ Восстановить данные повторного импорта", self)
+                act_restore.triggered.connect(lambda: self._restore_dup_pending(node))
+                menu.addAction(act_restore)
+                act_dismiss = QAction("✓ Оставить как есть (это правка)", self)
+                act_dismiss.triggered.connect(lambda: self._dismiss_dup_pending(node))
+                menu.addAction(act_dismiss)
         else:
             act_del = QAction("Удалить распределение", self)
             act_del.triggered.connect(lambda: self._delete_split(node))
@@ -4039,6 +4128,33 @@ class DetailWidget(QWidget):
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
             _AlertDialog.show_alert(self, "Ошибка", f"Ошибка дублирования операции:\n{e}")
+
+    def _restore_dup_pending(self, op_node: _Node):
+        """Перезаписывает Дата/Сумма/Контрагент/Назначение строки значениями
+        из повторного импорта (см. load_file) — откатывает правки пользователя
+        к тому, что реально показывает банк."""
+        df_idx = op_node.df_idx
+        pending = self._dup_pending.get(df_idx)
+        if self.df_full is None or pending is None or df_idx not in self.df_full.index:
+            return
+        try:
+            if pending.get("Дата"):
+                self.df_full.at[df_idx, "Дата"] = pd.Timestamp(pending["Дата"])
+            self.df_full.at[df_idx, "Сумма"] = pending.get("Сумма")
+            self.df_full.at[df_idx, "Контрагент"] = pending.get("Контрагент", "")
+            self.df_full.at[df_idx, "Назначение"] = pending.get("Назначение", "")
+            for col in ("Дата", "Сумма", "Контрагент", "Назначение"):
+                self._manual_cells.discard((df_idx, col))
+            del self._dup_pending[df_idx]
+            self.apply_filters()
+            self.dataLoaded.emit(self.df_full)
+        except Exception as e:
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось восстановить данные:\n{e}")
+
+    def _dismiss_dup_pending(self, op_node: _Node):
+        """Снимает пометку «повторный импорт» — правки пользователя остаются."""
+        self._dup_pending.pop(op_node.df_idx, None)
+        self.apply_filters()
 
     def _delete_op(self, op_node: _Node):
         confirmed = _ConfirmDialog.confirm(
