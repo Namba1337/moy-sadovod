@@ -299,15 +299,18 @@ def payments_breakdown(plot: str, df, adjustments: Optional[dict] = None) -> lis
     out: list[dict] = []
     d = _ensure_df(df)
     if d is not None:
-        sub = d[d["Категория"].isin(CATS_VZNOSY_INCOME)].copy()
+        sub = energy._rows_matching_cats(d, CATS_VZNOSY_INCOME).copy()
         for _, row in sub.iterrows():
-            amount = energy._row_amount_for_plot(row, plot)
+            amount = energy._row_amount_for_plot(row, plot, cats=CATS_VZNOSY_INCOME)
             if amount <= 0:
                 continue
             out.append({
                 "date": row["Дата"].date() if pd.notna(row["Дата"]) else None,
                 "amount": amount,
-                "mixed": row.get("Категория") == CAT_MIXED,
+                # mixed=True — авто-категория, ещё не разделена вручную
+                # (см. energy.parse_breakdown) — подсказка UI «раздели точнее».
+                "mixed": (row.get("Категория") == CAT_MIXED
+                          and not energy.parse_breakdown(row.get("_breakdown"), total=row.get("Сумма"))),
                 "purpose": str(row.get("Назначение", "")),
                 "source": "csv",
             })
@@ -605,14 +608,23 @@ def balance_for_active_group(plot: str, area: Optional[float], as_of: date,
         and (since is None or y.period_from >= since)
     )
 
+    # Платежи, попавшие в период с пометкой «Не учитывать», исключаем — как
+    # и в balance_for_plot (иначе такой платёж превращается в фиктивный
+    # аванс: начисление за период не идёт в счёт, а платёж — идёт).
     paid = sum(
         p["amount"] for p in payments_breakdown(plot, df, adjustments)
         if p["date"] is not None
         and p["date"] <= as_of
         and (since is None or p["date"] >= since)
+        and not _period_at_date_is_ignored(p["date"], breakdown)
     )
 
     return GroupBalance(charged=charged, paid=paid, debt=charged - paid)
+
+
+def _period_at_date_is_ignored(d: date, breakdown: list[PeriodCharge]) -> bool:
+    pc = _find_period(d, breakdown)
+    return pc is not None and pc.ignored
 
 
 # ── палитра для UI ────────────────────────────────────────────────────
