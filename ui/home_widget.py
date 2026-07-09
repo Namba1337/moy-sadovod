@@ -33,8 +33,6 @@ _IC_DEBT     = chr(0xe002)
 _IC_BARS     = chr(0xe26b)
 _IC_DONUT    = chr(0xe917)
 
-_SNT_NAME = "Заря"
-
 _C_INCOME  = "#2E9E5B"
 _C_EXPENSE = "#E0524A"
 
@@ -844,7 +842,7 @@ class HomeWidget(QWidget):
         # Заголовок: название + «Период:» + «Сравнение:»
         header = QHBoxLayout()
         header.setSpacing(8)
-        header.addWidget(QLabel(f'Обзор СНТ «{_SNT_NAME}»',
+        header.addWidget(QLabel("Обзор СНТ",
                                 objectName="cardTitleGreen"))
         header.addStretch()
 
