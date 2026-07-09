@@ -15,9 +15,9 @@ from datetime import date
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QScrollArea,
     QSizePolicy, QToolTip, QComboBox, QPushButton, QCheckBox,
-    QWidgetAction, QMenu,
+    QWidgetAction, QMenu, QLayout,
 )
-from PyQt6.QtCore import Qt, QPointF, QRectF, QSize, QPoint, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, QRectF, QRect, QSize, QPoint, pyqtSignal
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QPen, QBrush, QPainterPath,
 )
@@ -192,6 +192,75 @@ def _unique_cats(*month_lists) -> list[tuple[str, str]]:
                     seen[cat] = _slice_color(cat, idx)
                     idx += 1
     return list(seen.items())
+
+
+# ── Layout с переносом строк (для легенды графиков) ────────────────────
+
+class _FlowLayout(QLayout):
+    """Раскладывает виджеты слева направо с переносом на новую строку,
+    когда не хватает ширины — как обёртка текста. Нужен для легенды
+    графиков: категорий может быть сколько угодно, а строка ограничена
+    шириной карточки."""
+
+    def __init__(self, parent=None, h_spacing: int = 12, v_spacing: int = 6):
+        super().__init__(parent)
+        self._h_spacing = h_spacing
+        self._v_spacing = v_spacing
+        self._items: list = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do_layout(self, rect, test_only: bool) -> int:
+        m = self.contentsMargins()
+        eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y = eff.x(), eff.y()
+        line_h = 0
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._h_spacing
+            if next_x - self._h_spacing > eff.right() and line_h > 0:
+                x = eff.x()
+                y += line_h + self._v_spacing
+                next_x = x + hint.width() + self._h_spacing
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y() + m.bottom()
 
 
 # ── Карточка-показатель ────────────────────────────────────────────────
@@ -903,53 +972,50 @@ class HomeWidget(QWidget):
     # ── легенда гистограммы ────────────────────────────────────────────
 
     @staticmethod
-    def _rebuild_chart_legend(box: QWidget,
+    def _legend_chip(dot_style: str, text: str) -> QWidget:
+        chip = QWidget()
+        chip.setStyleSheet("background:transparent;")
+        row = QHBoxLayout(chip)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(5)
+        dot = QLabel()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet(dot_style)
+        row.addWidget(dot, alignment=Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(QLabel(text, objectName="legendText"))
+        return chip
+
+    @classmethod
+    def _rebuild_chart_legend(cls, box: QWidget,
                                categories: list[tuple[str, str]],
                                cur_label: str, prev_label: str,
                                has_prev: bool):
         for child in box.findChildren(QWidget):
             child.setParent(None)
             child.deleteLater()
-        old_lyt = box.layout()
-        if old_lyt is not None:
-            while old_lyt.count():
-                old_lyt.takeAt(0)
+        lyt = box.layout()
+        if lyt is not None:
+            while lyt.count():
+                lyt.takeAt(0)
         else:
-            old_lyt = QHBoxLayout(box)
-        lyt = old_lyt
+            lyt = _FlowLayout(box, h_spacing=14, v_spacing=6)
         lyt.setContentsMargins(0, 4, 0, 0)
-        lyt.setSpacing(14)
 
         if has_prev and (cur_label or prev_label):
             for label, dot_style in (
                 (cur_label,  "background:#4B5563; border-radius:2px;"),
                 (prev_label, "background:#9CA3AF; border-radius:2px;"),
             ):
-                row = QHBoxLayout()
-                row.setSpacing(5)
-                dot = QLabel()
-                dot.setFixedSize(10, 10)
-                dot.setStyleSheet(dot_style)
-                row.addWidget(dot, alignment=Qt.AlignmentFlag.AlignVCenter)
-                row.addWidget(QLabel(label, objectName="legendText"))
-                lyt.addLayout(row)
+                lyt.addWidget(cls._legend_chip(dot_style, label))
             sep = QFrame()
             sep.setFixedSize(1, 14)
             sep.setStyleSheet("background:#D1D5DB;")
-            lyt.addWidget(sep, alignment=Qt.AlignmentFlag.AlignVCenter)
+            lyt.addWidget(sep)
 
-        for cat_name, color in categories[:8]:
-            row = QHBoxLayout()
-            row.setSpacing(5)
-            dot = QLabel()
-            dot.setFixedSize(10, 10)
-            dot.setStyleSheet(f"background:{color}; border-radius:2px;")
-            row.addWidget(dot, alignment=Qt.AlignmentFlag.AlignVCenter)
-            row.addWidget(QLabel(_CAT_SHORT.get(cat_name, cat_name),
-                                 objectName="legendText"))
-            lyt.addLayout(row)
-
-        lyt.addStretch()
+        for cat_name, color in categories:
+            lyt.addWidget(cls._legend_chip(
+                f"background:{color}; border-radius:2px;",
+                _CAT_SHORT.get(cat_name, cat_name)))
 
     # ── обновление отдельного графика ─────────────────────────────────
 
