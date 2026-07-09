@@ -437,7 +437,69 @@ def waiting_for_readings(plot: str, meters: dict,
 
 # ── платежи из выписки ────────────────────────────────────────────────
 
-def _row_amount_for_plot(row: pd.Series, plot: str) -> float:
+def parse_breakdown(value, *, total: Optional[float] = None) -> list:
+    """Читает ручную разбивку операции (см. ui/detail_widget.py::_parse_breakdown —
+    та же колонка `_breakdown`, тот же формат): список {Сумма, Категория, Участок}.
+    Пользователь получает эту разбивку через «Разделить операцию» — например,
+    у операции с авто-категорией CAT_MIXED («Членские взносы + Электроэнергия»,
+    сама по себе просто подсказка «раздели вручную»).
+
+    Если передан `total` (сумма родительской операции) — разбивка считается
+    ГОТОВОЙ (и возвращается), только если сумма её строк совпадает с `total`.
+    Иначе — [] (как будто разбивки нет вообще). Это защита от промежуточного
+    состояния: инлайн-добавление строки распределения через контекстное меню
+    (`DetailWidget._add_split`) сразу пишет в данные новую строку с Суммой=0,
+    БЕЗ проверки итога (в отличие от модального EditOperationDialog, где
+    кнопка «Сохранить» заблокирована при несовпадении сумм) — до тех пор,
+    пока пользователь не заполнит все строки разбивки на полную сумму,
+    расчёты (задолженность, дашборд) должны падать обратно на верхнеуровневую
+    категорию операции, а не терять часть денег на недописанной разбивке."""
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            data = json.loads(value)
+            items = data if isinstance(data, list) else []
+        except (ValueError, TypeError):
+            items = []
+    else:
+        items = []
+
+    if total is not None and items:
+        items_sum = sum(
+            (_to_float(i.get("Сумма")) or 0.0) for i in items if isinstance(i, dict))
+        if abs(items_sum - abs(total)) > 0.01:
+            return []
+    return items
+
+
+def _row_amount_for_plot(row: pd.Series, plot: str, cats: Optional[set] = None) -> float:
+    """Сумма строки, относящаяся к конкретному участку.
+
+    Если у строки есть ручная разбивка (`_breakdown`) и передан `cats` —
+    считаем ТОЛЬКО по разбивке (учитывая её собственные Категория/Сумма/
+    Участок построчно, без грубого «пополам» для CAT_MIXED — пользователь
+    уже сам точно указал суммы). Пустой «Участок» у строки разбивки —
+    наследует участок родительской операции. Без разбивки — прежнее
+    поведение (CAT_MIXED делится пополам)."""
+    breakdown = (parse_breakdown(row.get("_breakdown"), total=row.get("Сумма"))
+                 if cats is not None else [])
+    if breakdown:
+        parent_plot = str(row.get("Участок", "")).strip()
+        result = 0.0
+        for item in breakdown:
+            if str(item.get("Категория", "")) not in cats:
+                continue
+            item_plot_raw = str(item.get("Участок", "")).strip() or parent_plot
+            item_plots = [p.strip() for p in item_plot_raw.split(",") if p.strip()]
+            if plot not in item_plots:
+                continue
+            amt = _to_float(item.get("Сумма"))
+            if amt is None or amt <= 0:
+                continue
+            result += amt / len(item_plots)
+        return result
+
     plots = [p.strip() for p in str(row.get("Участок", "")).split(",") if p.strip()]
     if plot not in plots:
         return 0.0
@@ -450,13 +512,55 @@ def _row_amount_for_plot(row: pd.Series, plot: str) -> float:
     return amount
 
 
+def _row_amount_for_cats(row: pd.Series, cats: set) -> float:
+    """Сумма строки, релевантная набору категорий `cats`, БЕЗ привязки к
+    конкретному участку (для СНТ-суммарных отчётов, см. reconcile()).
+    С разбивкой — сумма её подходящих строк; без — прежнее «пополам»
+    для CAT_MIXED."""
+    breakdown = parse_breakdown(row.get("_breakdown"), total=row.get("Сумма"))
+    if breakdown:
+        result = 0.0
+        for item in breakdown:
+            if str(item.get("Категория", "")) not in cats:
+                continue
+            amt = _to_float(item.get("Сумма"))
+            if amt is not None and amt > 0:
+                result += amt
+        return result
+
+    amount = _to_float(row.get("Сумма"))
+    if amount is None or amount <= 0:
+        return 0.0
+    if row.get("Категория") == CAT_MIXED:
+        amount /= 2
+    return amount
+
+
+def _rows_matching_cats(df: pd.DataFrame, cats: set) -> pd.DataFrame:
+    """Строки, чья верхнеуровневая Категория входит в `cats`, ИЛИ у которых
+    есть ЗАВЕРШЁННАЯ ручная разбивка (сумма строк разбивки == Сумма
+    операции — см. parse_breakdown), содержащая хотя бы одну подходящую
+    категорию. Незавершённая разбивка (например, только что начатая через
+    контекстное меню «Добавить распределение», ещё без введённых сумм)
+    не в счёт — такая строка обрабатывается по своей верхнеуровневой
+    категории, как будто разбивки ещё нет (см. parse_breakdown)."""
+    mask = df["Категория"].isin(cats)
+    if "_breakdown" in df.columns:
+        def _has_relevant_breakdown(row) -> bool:
+            items = parse_breakdown(row.get("_breakdown"), total=row.get("Сумма"))
+            return any(str(i.get("Категория", "")) in cats
+                       for i in items if isinstance(i, dict))
+        mask = mask | df.apply(_has_relevant_breakdown, axis=1)
+    return df[mask]
+
+
 def payments_total(plot: str, df, date_from: Optional[date] = None,
                    date_to: Optional[date] = None) -> float:
     """Сумма платежей за электричество для участка в интервале [from, to]."""
     df = _ensure_df(df)
     if df is None:
         return 0.0
-    d = df[df["Категория"].isin(CATS_ELECTRO_INCOME)].copy()
+    d = _rows_matching_cats(df, CATS_ELECTRO_INCOME).copy()
     if d.empty:
         return 0.0
     dates = d["Дата"].dt.date
@@ -467,7 +571,7 @@ def payments_total(plot: str, df, date_from: Optional[date] = None,
         d = d[dates <= date_to]
     total = 0.0
     for _, row in d.iterrows():
-        total += _row_amount_for_plot(row, plot)
+        total += _row_amount_for_plot(row, plot, cats=CATS_ELECTRO_INCOME)
     return total
 
 
@@ -476,18 +580,22 @@ def payments_breakdown(plot: str, df) -> list[dict]:
     df = _ensure_df(df)
     if df is None:
         return []
-    d = df[df["Категория"].isin(CATS_ELECTRO_INCOME)].copy()
+    d = _rows_matching_cats(df, CATS_ELECTRO_INCOME).copy()
     if d.empty:
         return []
     out = []
     for _, row in d.iterrows():
-        amount = _row_amount_for_plot(row, plot)
+        amount = _row_amount_for_plot(row, plot, cats=CATS_ELECTRO_INCOME)
         if amount <= 0:
             continue
         out.append({
             "date": row["Дата"].date() if pd.notna(row["Дата"]) else None,
             "amount": amount,
-            "mixed": row.get("Категория") == CAT_MIXED,
+            # mixed=True — операция авто-помечена «Членские взносы +
+            # Электроэнергия», но ещё НЕ разделена пользователем вручную
+            # (см. parse_breakdown); это подсказка UI «раздели точнее».
+            "mixed": (row.get("Категория") == CAT_MIXED
+                      and not parse_breakdown(row.get("_breakdown"), total=row.get("Сумма"))),
             "purpose": str(row.get("Назначение", "")),
         })
     out.sort(key=lambda r: r["date"] or date.min)
@@ -794,17 +902,12 @@ def reconcile(date_from: date, date_to: date, plots: list[str],
     collected_total = 0.0
     d = _ensure_df(df)
     if d is not None:
-        sub = d[d["Категория"].isin(CATS_ELECTRO_INCOME)].copy()
+        sub = _rows_matching_cats(d, CATS_ELECTRO_INCOME).copy()
         if not sub.empty:
             dates = sub["Дата"].dt.date
             sub = sub[(dates >= date_from) & (dates <= date_to)]
             for _, row in sub.iterrows():
-                amount = _to_float(row.get("Сумма")) or 0.0
-                if amount <= 0:
-                    continue
-                if row.get("Категория") == CAT_MIXED:
-                    amount /= 2
-                collected_total += amount
+                collected_total += _row_amount_for_cats(row, CATS_ELECTRO_INCOME)
 
     # Уплачено в Пермэнергосбыт
     paid_to_supplier = 0.0

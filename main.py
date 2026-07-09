@@ -400,6 +400,35 @@ class MainWindow(QMainWindow):
             WM_NCHITTEST  = 0x0084
 
             if msg.message == WM_NCCALCSIZE and msg.wParam:
+                if self.isMaximized():
+                    # Windows сама увеличивает развёрнутое окно на толщину
+                    # невидимой resize-рамки (компенсация для WS_THICKFRAME) —
+                    # без встречной компенсации содержимое вылезает за
+                    # границы монитора на несколько пикселей. Сжимаем
+                    # предложенный client rect обратно внутрь.
+                    class _RECT(ctypes.Structure):
+                        _fields_ = [
+                            ("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long),
+                        ]
+
+                    class _NCCALCSIZE_PARAMS(ctypes.Structure):
+                        _fields_ = [("rgrc", _RECT * 3), ("lppos", ctypes.c_void_p)]
+
+                    try:
+                        params = ctypes.cast(
+                            msg.lParam, ctypes.POINTER(_NCCALCSIZE_PARAMS)).contents
+                        SM_CXSIZEFRAME, SM_CYSIZEFRAME, SM_CXPADDEDBORDER = 32, 33, 92
+                        bx = (ctypes.windll.user32.GetSystemMetrics(SM_CXSIZEFRAME)
+                              + ctypes.windll.user32.GetSystemMetrics(SM_CXPADDEDBORDER))
+                        by = (ctypes.windll.user32.GetSystemMetrics(SM_CYSIZEFRAME)
+                              + ctypes.windll.user32.GetSystemMetrics(SM_CXPADDEDBORDER))
+                        params.rgrc[0].left   += bx
+                        params.rgrc[0].top    += by
+                        params.rgrc[0].right  -= bx
+                        params.rgrc[0].bottom -= by
+                    except Exception:
+                        pass
                 # Collapse non-client area so native chrome is invisible
                 return True, 0
 
@@ -809,9 +838,18 @@ class MainWindow(QMainWindow):
             if manual_cells_data is not None:
                 self.detail.restore_manual_cells(manual_cells_data)
         else:
-            self.energy_debt.refresh(self.detail.df_full)
-            self.vznosy_debt.refresh(self.detail.df_full)
-            self.home.refresh(self.detail.df_full)
+            # В загруженном проекте нет сохранённой выписки (или она не
+            # распарсилась) — явно очищаем self.detail, иначе виджеты ниже
+            # обновятся СТАРОЙ выпиской из предыдущего проекта, и новые
+            # участки/тарифы окажутся смешаны с чужими операциями.
+            self.detail._manual_rows.clear()
+            self.detail._manual_cells.clear()
+            self.detail._dup_pending.clear()
+            self.detail.df_full = None
+            self.detail.apply_filters()
+            self.energy_debt.refresh(None)
+            self.vznosy_debt.refresh(None)
+            self.home.refresh(None)
 
         QMessageBox.information(self, "Загружено", "Проект успешно загружен.")
 
