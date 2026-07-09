@@ -222,13 +222,13 @@ class VznosyCardDialog(_FramelessDialog):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
-            "Период", "Тариф", "Начислено", "Оплачено за период",
+            "Период", "Группа/договор", "Тариф", "Начислено", "Оплачено за период",
             "Корректировка", "Баланс нараст.",
         ])
         hdr = self.table.horizontalHeader()
-        for c, w in enumerate([200, 240, 120, 140, 190, 130]):
+        for c, w in enumerate([200, 170, 240, 120, 140, 190, 130]):
             hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
             self.table.setColumnWidth(c, w)
         hdr.setStretchLastSection(False)
@@ -362,6 +362,8 @@ class VznosyCardDialog(_FramelessDialog):
             self.warning_lbl.setVisible(False)
 
         # Главная таблица периодов
+        from core import ownership as own
+        plot_rec = energy.plot_record(self._plot)
         self.table.setRowCount(len(bal.breakdown))
         cum = 0.0
         for r, y in enumerate(bal.breakdown):
@@ -371,6 +373,19 @@ class VznosyCardDialog(_FramelessDialog):
                                     f"—{y.period_to.strftime('%d.%m.%Y')}")
                 else:
                     period_label = f"{y.period_from.strftime('%d.%m.%Y')}—..."
+
+                # Группа/договор, действовавшая в периоде
+                g_from = own.group_at(plot_rec, y.period_from)
+                group_text = own.group_label(g_from, empty="—") if g_from else "—"
+                group_color = "#374151" if g_from else "#9CA3AF"
+                if y.period_to:
+                    g_to = own.group_at(plot_rec, y.period_to)
+                    key_from = (own.group_since(g_from), own.group_until(g_from)) if g_from else None
+                    key_to = (own.group_since(g_to), own.group_until(g_to)) if g_to else None
+                    if key_to != key_from:
+                        to_text = own.group_label(g_to, empty="—") if g_to else "—"
+                        group_text = f"{group_text} → {to_text}"
+                        group_color = "#B45309"
 
                 # Тариф
                 if y.tariff is None:
@@ -432,6 +447,7 @@ class VznosyCardDialog(_FramelessDialog):
 
                 self._set_year_row(r, [
                     (period_label, None),
+                    (group_text, group_color),
                     (tariff_text, tariff_color),
                     (amount_text, amount_color),
                     (paid_text, paid_color),

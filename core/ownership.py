@@ -377,3 +377,17 @@ def group_owners(group: dict) -> list:
 
 def group_label(group: dict, *, empty: str = "—") -> str:
     return owners_label(group_owners(group), only_owners=True, empty=empty)
+
+
+def group_at(plot: dict, d: date) -> Optional[dict]:
+    """Группа, действовавшая на дату ``d`` (since — включающая граница,
+    until — исключающая, как и в :func:`is_active_at`)."""
+    for g in plot_groups(plot):
+        s = group_since(g)
+        if s is not None and d < s:
+            continue
+        u = group_until(g)
+        if u is not None and d >= u:
+            continue
+        return g
+    return None
