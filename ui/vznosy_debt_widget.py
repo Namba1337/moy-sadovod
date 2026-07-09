@@ -1,12 +1,13 @@
 import os
 import re
+from datetime import datetime
 
-from PyQt6.QtCore import Qt, QDate, QModelIndex
+from PyQt6.QtCore import Qt, QDate, QModelIndex, QPoint, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QDateEdit, QFileDialog,
-    QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QPushButton, QTreeView, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QDateEdit, QFileDialog,
+    QFrame, QHBoxLayout, QHeaderView, QLabel, QMenu,
+    QPushButton, QTreeView, QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from core import energy
@@ -31,6 +32,149 @@ class _VznosyModel(_FlatTableModel):
         "Участок", "Собственник", "Площадь, м²",
         "Начислено", "Оплачено", "Долг / Аванс",
     ]
+
+
+# ============================================================================ #
+#  Кнопка мультивыбора периодов                                                #
+# ============================================================================ #
+
+class _PeriodFilterButton(QWidget):
+    """Кнопка с выпадающим меню чекбоксов для выбора периодов ЧВ.
+
+    Идентификатор периода — ``date_from`` в ISO-формате (как в
+    :func:`core.vznosy.balance_for_periods`). Выбор по умолчанию — «все».
+    При обновлении списка периодов (:meth:`set_periods`) уже снятые/отмеченные
+    пользователем периоды сохраняют своё состояние; новые периоды добавляются
+    выбранными."""
+
+    selectionChanged = pyqtSignal(object)   # set[str] выбранных ключей
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._periods: list[tuple[str, str]] = []   # (key, label)
+        self._selected: set[str] = set()
+
+        lyt = QHBoxLayout(self)
+        lyt.setContentsMargins(0, 0, 0, 0)
+        lyt.setSpacing(6)
+        lyt.addWidget(QLabel("периоды:", objectName="filterLabel"))
+        self._btn = QPushButton("Все  ▾")
+        self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn.clicked.connect(self._open_menu)
+        lyt.addWidget(self._btn)
+        self._update_label()
+
+    def set_periods(self, periods: list[tuple[str, str]]):
+        new_keys = {k for k, _ in periods}
+        old_keys = {k for k, _ in self._periods}
+        self._periods = list(periods)
+        if new_keys != old_keys:
+            self._selected = (self._selected & new_keys) | (new_keys - old_keys)
+        self._update_label()
+
+    def get_selected(self) -> set[str]:
+        return set(self._selected)
+
+    def is_all_selected(self) -> bool:
+        return len(self._selected) == len(self._periods)
+
+    def _update_label(self):
+        n = len(self._periods)
+        s = len(self._selected)
+        if n == 0 or s == n:
+            self._btn.setText("Все  ▾")
+            self._btn.setStyleSheet("""
+                QPushButton {
+                    background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
+                    color: #374151; padding: 2px 8px; font-size: 12px;
+                }
+                QPushButton:hover { background: #F3F4F6; }
+            """)
+        elif s == 0:
+            self._btn.setText("Ничего  ▾")
+            self._btn.setStyleSheet("""
+                QPushButton {
+                    background: #FEE2E2; border: 1px solid #FCA5A5; border-radius: 11px;
+                    color: #991B1B; padding: 2px 10px; font-size: 11px; font-weight: 500;
+                }
+                QPushButton:hover { background: #FECACA; }
+            """)
+        else:
+            self._btn.setText(f"{s} из {n}  ▾")
+            self._btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(7,65,79,0.1); border: 1px solid rgba(7,65,79,0.35);
+                    border-radius: 11px; color: #07414F;
+                    padding: 2px 10px; font-size: 11px; font-weight: 500;
+                }
+                QPushButton:hover { background: rgba(7,65,79,0.18); }
+            """)
+
+    def _open_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: #FFFFFF; border: 1px solid #D1D5DB;
+                border-radius: 8px; padding: 4px;
+            }
+            QMenu::item { padding: 0px; margin: 1px 0px; }
+        """)
+
+        if not self._periods:
+            act = QWidgetAction(menu)
+            lb = QLabel("  Нет периодов — задайте их в «Периоды»")
+            lb.setStyleSheet("color:#9CA3AF; font-size:12px; padding:6px 14px;")
+            act.setDefaultWidget(lb)
+            menu.addAction(act)
+            menu.exec(self._btn.mapToGlobal(self._btn.rect().bottomLeft() + QPoint(0, 2)))
+            return
+
+        for label_text, state in (("✓  Выбрать все", True), ("✗  Снять все", False)):
+            wa = QWidgetAction(menu)
+            btn = QPushButton(label_text)
+            btn.setStyleSheet(
+                "border:none; text-align:left; padding:5px 14px; "
+                "color:#374151; font-size:12px; background:transparent;"
+            )
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            s = state
+            btn.clicked.connect(lambda _, st=s: (self._set_all(st), menu.close()))
+            wa.setDefaultWidget(btn)
+            menu.addAction(wa)
+
+        menu.addSeparator()
+
+        for key, label in reversed(self._periods):   # новые сверху
+            wa = QWidgetAction(menu)
+            cb = QCheckBox(f"  {label}")
+            cb.setChecked(key in self._selected)
+            cb.setStyleSheet(
+                "QCheckBox { padding: 5px 14px; color: #374151; font-size: 12px;"
+                "  spacing: 8px; background: transparent; }"
+                "QCheckBox:hover { background: #F3F4F6; border-radius: 4px; }"
+                "QCheckBox::indicator { width: 14px; height: 14px;"
+                "  border: 1px solid #D1D5DB; border-radius: 3px; background: #FFFFFF; }"
+                "QCheckBox::indicator:checked {"
+                "  background: #07414F; border-color: #07414F; }"
+            )
+            cb.toggled.connect(lambda checked, k=key: self._toggle(k, checked))
+            wa.setDefaultWidget(cb)
+            menu.addAction(wa)
+
+        menu.exec(self._btn.mapToGlobal(self._btn.rect().bottomLeft() + QPoint(0, 2)))
+
+    def _toggle(self, key: str, checked: bool):
+        if checked:
+            self._selected.add(key)
+        else:
+            self._selected.discard(key)
+        self._update_label()
+        self.selectionChanged.emit(self._selected)
+
+    def _set_all(self, state: bool):
+        self._selected = ({k for k, _ in self._periods} if state else set())
+        self._update_label()
+        self.selectionChanged.emit(self._selected)
 
 
 # ============================================================================ #
@@ -139,6 +283,25 @@ class VznosyDebtWidget(QWidget):
         lay.setSpacing(12)
 
         top = QHBoxLayout()
+
+        self.chk_active_only = QCheckBox("Только активный договор")
+        self.chk_active_only.setChecked(True)
+        self.chk_active_only.setToolTip(
+            "Если включено — начисления и оплаты считаются только с даты начала "
+            "текущей активной группы (договора). Если выключено — вся история "
+            "участка, включая прежних собственников."
+        )
+        self.chk_active_only.setStyleSheet(
+            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
+            "QCheckBox::indicator{width:15px;height:15px;}"
+        )
+        self.chk_active_only.stateChanged.connect(self._rebuild)
+        top.addWidget(self.chk_active_only)
+
+        self.period_filter = _PeriodFilterButton()
+        self.period_filter.selectionChanged.connect(lambda _: self._rebuild())
+        top.addWidget(self.period_filter)
+
         top.addStretch()
 
         top.addWidget(QLabel("на дату:", objectName="filterLabel"))
@@ -303,12 +466,35 @@ class VznosyDebtWidget(QWidget):
 
     def _rebuild(self):
         from core import vznosy
+        from core import ownership as own
         as_of = self.date_as_of.date().toPyDate()
         rates = vznosy.load_rates()
         adj = vznosy.load_adjustments()
         areas = vznosy.plot_area_map()
         owners = energy.owners_map()
+        plot_recs = energy.plots_by_num()
         plots = self._plot_list()
+        active_only = self.chk_active_only.isChecked()
+
+        periods = vznosy.build_periods(rates)
+        period_opts = []
+        for r in periods:
+            pf, pt = r.get("date_from", ""), r.get("date_to", "")
+            try:
+                pf_label = datetime.strptime(pf, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                pf_label = pf
+            if pt:
+                try:
+                    pt_label = datetime.strptime(pt, "%Y-%m-%d").strftime("%d.%m.%Y")
+                except Exception:
+                    pt_label = pt
+            else:
+                pt_label = "открытый"
+            period_opts.append((pf, f"{pf_label} — {pt_label}"))
+        self.period_filter.set_periods(period_opts)
+        period_filter_active = not self.period_filter.is_all_selected()
+        selected_period_keys = self.period_filter.get_selected() if period_filter_active else None
 
         annual_avg = 0.0
         if rates:
@@ -330,6 +516,16 @@ class VznosyDebtWidget(QWidget):
         for plot in plots:
             area = areas.get(plot)
             bal = vznosy.balance_for_plot(plot, area, as_of, rates, adj, self._df)
+            if active_only or period_filter_active:
+                since = (own.group_since(own.active_group(plot_recs.get(plot, {})) or {})
+                         if active_only else None)
+                gb = vznosy.balance_for_periods(
+                    plot, area, as_of, rates, adj, self._df,
+                    since=since, period_keys=selected_period_keys)
+                charged, paid, debt = gb.charged, gb.paid, gb.debt
+            else:
+                charged, paid, debt = bal.charged, bal.paid, bal.debt
+
             owners_list = owners.get(plot, []) or []
             visible = next((o for o in owners_list if _is_visible(o)), None)
             main = next((o for o in owners_list if _is_owner(o)),
@@ -343,7 +539,7 @@ class VznosyDebtWidget(QWidget):
             area_tip = ("Не указана площадь — начисление по тарифу за м² невозможно"
                         if bal.area_missing_warning else "")
 
-            color = vznosy.debt_color(bal.debt, annual_avg=annual_avg)
+            color = vznosy.debt_color(debt, annual_avg=annual_avg)
 
             try:
                 plot_sort = float(str(plot).split(",")[0])
@@ -363,28 +559,28 @@ class VznosyDebtWidget(QWidget):
                 "_fg_Площадь, м²": area_color,
                 "_tip_Площадь, м²": area_tip,
 
-                "_text_Начислено": fmt_money(bal.charged),
-                "_sort_Начислено": bal.charged,
-                "_fg_Начислено": "#f9a825" if bal.charged else "#9CA3AF",
+                "_text_Начислено": fmt_money(charged),
+                "_sort_Начислено": charged,
+                "_fg_Начислено": "#f9a825" if charged else "#9CA3AF",
 
-                "_text_Оплачено": fmt_money(bal.paid),
-                "_sort_Оплачено": bal.paid,
-                "_fg_Оплачено": "#059669" if bal.paid else "#9CA3AF",
+                "_text_Оплачено": fmt_money(paid),
+                "_sort_Оплачено": paid,
+                "_fg_Оплачено": "#059669" if paid else "#9CA3AF",
 
-                "_text_Долг / Аванс": fmt_money(bal.debt),
-                "_sort_Долг / Аванс": bal.debt,
+                "_text_Долг / Аванс": fmt_money(debt),
+                "_sort_Долг / Аванс": debt,
                 "_bg_Долг / Аванс": _DEBT_COLOR_LIGHT.get(color, color),
                 "_bold_Долг / Аванс": True,
             }
             rows.append(row)
 
-            total_charged += bal.charged
-            total_paid += bal.paid
-            total_debt += bal.debt
-            if bal.debt > 0.5:
+            total_charged += charged
+            total_paid += paid
+            total_debt += debt
+            if debt > 0.5:
                 debt_count += 1
-            debts_map[plot] = {"debt": bal.debt, "charged": bal.charged,
-                               "paid": bal.paid, "owner": owner_text}
+            debts_map[plot] = {"debt": debt, "charged": charged,
+                               "paid": paid, "owner": owner_text}
 
         # Применяем поиск
         for col_idx, text in self._search_filters.items():

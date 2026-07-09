@@ -521,14 +521,14 @@ class PlotCardDialog(_FramelessDialog):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
             "Дата / Месяц", "Показание", "Расход (кВт·ч)",
             "Тариф", "Начислено", "Оплачено",
-            "Изм. баланса", "Баланс нараст.", "",
+            "Изм. баланса", "Баланс нараст.", "Группа/договор", "",
         ])
         hdr = self.table.horizontalHeader()
-        for c, w in enumerate([90, 150, 110, 75, 110, 110, 110, 130, 40]):
+        for c, w in enumerate([90, 150, 110, 75, 110, 110, 110, 130, 170, 40]):
             hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
             self.table.setColumnWidth(c, w)
         hdr.setStretchLastSection(False)
@@ -632,8 +632,10 @@ class PlotCardDialog(_FramelessDialog):
 
     # ── Перестройка таблицы ──────────────────────────────────────────────
     def _rebuild(self):
+        from core import ownership as own
         self._value_edits.clear()
 
+        plot_rec = energy.plot_record(self._plot)
         meters = energy.load_meters()
         rates = energy.load_rates()
         repls = energy.load_replacements()
@@ -675,6 +677,11 @@ class PlotCardDialog(_FramelessDialog):
             if a.type in ("drop", "spike"):
                 anomaly_map[(a.year, a.month)] = a.type
 
+        def _group_cell(d):
+            g = own.group_at(plot_rec, d) if d else None
+            return (own.group_label(g, empty="—") if g else "—",
+                    "#374151" if g else "#9CA3AF")
+
         self.table.setRowCount(len(events) + (1 if base != 0 else 0))
         r0 = 0
         cum = base
@@ -687,12 +694,14 @@ class PlotCardDialog(_FramelessDialog):
                 ("—", None), ("—", None),
                 (fmt_money(base), None),
                 (fmt_money(base), self._debt_color(base)),
+                _group_cell(base_start),
                 ("", None),
             ], bold=True)
             r0 = 1
 
         for i, (kind, evdate, payload) in enumerate(events):
             r = r0 + i
+            group_cell = _group_cell(evdate)
             if kind == "charge":
                 c = payload
                 y, m = c["year"], c["month"]
@@ -715,6 +724,7 @@ class PlotCardDialog(_FramelessDialog):
                     ("—", None),
                     (mbal_text, None),
                     (fmt_money(cum), self._debt_color(cum)),
+                    group_cell,
                     ("", None) if is_calc else None,   # кнопка удаления (тип 1)
                 ])
                 if not is_calc:
@@ -736,6 +746,7 @@ class PlotCardDialog(_FramelessDialog):
                     (fmt_money(paid), "#059669"),
                     (fmt_money(-paid), None),
                     (fmt_money(cum), self._debt_color(cum)),
+                    group_cell,
                     ("", None),
                 ])
                 # tooltip с назначением платежа на всю строку
@@ -757,6 +768,7 @@ class PlotCardDialog(_FramelessDialog):
                     (reading_text, "#B45309"),
                     ("—", None), ("—", None), ("—", None), ("—", None), ("—", None),
                     (fmt_money(cum), self._debt_color(cum)),
+                    group_cell,
                     None,
                 ])
                 note = repl.get("note", "").strip()
@@ -955,7 +967,7 @@ class PlotCardDialog(_FramelessDialog):
             "QPushButton:hover{background:#FEE2E2;color:#B91C1C;}"
         )
         btn.clicked.connect(lambda _, y=year, m=month: self._on_delete_reading(y, m))
-        self.table.setCellWidget(r, 8, btn)
+        self.table.setCellWidget(r, 9, btn)
 
     def _install_delete_replacement_button(self, r: int, repl_date: str):
         btn = QPushButton("✕")
@@ -968,7 +980,7 @@ class PlotCardDialog(_FramelessDialog):
             "QPushButton:hover{background:#FEF3C7;color:#92400E;}"
         )
         btn.clicked.connect(lambda _, d=repl_date: self._on_delete_replacement(d))
-        self.table.setCellWidget(r, 8, btn)
+        self.table.setCellWidget(r, 9, btn)
 
     def _on_delete_replacement(self, repl_date: str):
         confirmed = _ConfirmDialog.confirm(

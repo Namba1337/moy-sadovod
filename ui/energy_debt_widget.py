@@ -5,7 +5,7 @@ from datetime import date
 from PyQt6.QtCore import Qt, QDate, QModelIndex
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDateEdit, QFileDialog, QFrame,
+    QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QPushButton, QTreeView,
     QVBoxLayout, QWidget,
 )
@@ -137,6 +137,21 @@ class EnergyDebtWidget(QWidget):
         lay.setSpacing(12)
 
         top = QHBoxLayout()
+
+        self.chk_active_only = QCheckBox("Только активный договор")
+        self.chk_active_only.setChecked(True)
+        self.chk_active_only.setToolTip(
+            "Если включено — начисления и оплаты считаются только с даты начала "
+            "текущей активной группы (договора). Если выключено — вся история "
+            "участка, включая прежних собственников."
+        )
+        self.chk_active_only.setStyleSheet(
+            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
+            "QCheckBox::indicator{width:15px;height:15px;}"
+        )
+        self.chk_active_only.stateChanged.connect(self._rebuild)
+        top.addWidget(self.chk_active_only)
+
         top.addStretch()
 
         top.addWidget(QLabel("на дату:", objectName="filterLabel"))
@@ -316,6 +331,7 @@ class EnergyDebtWidget(QWidget):
         return sorted(set(nums), key=_key)
 
     def _rebuild(self):
+        from core import ownership as own
         as_of = self.date_as_of.date().toPyDate()
         meters = energy.load_meters()
         rates = energy.load_rates()
@@ -324,7 +340,9 @@ class EnergyDebtWidget(QWidget):
         if self._df is not None and not self._df.empty:
             baseline["start_date"] = self._df["Дата"].min().date().isoformat()
         owners = energy.owners_map()
+        plot_recs = energy.plots_by_num()
         plots = self._plot_list()
+        active_only = self.chk_active_only.isChecked()
 
         total_debt = 0.0
         total_charged = 0.0
@@ -341,6 +359,14 @@ class EnergyDebtWidget(QWidget):
             bt = energy.billing_type_of(plot)
             type_counts[bt] = type_counts.get(bt, 0) + 1
             bal = energy.balance(plot, as_of, meters, rates, repls, baseline, self._df)
+            if active_only:
+                since = own.group_since(own.active_group(plot_recs.get(plot, {})) or {})
+                gb = energy.balance_for_active_group(
+                    plot, as_of, meters, rates, repls, baseline, self._df, since=since)
+                charged, paid, base_amt, debt = gb.charged, gb.paid, gb.baseline, gb.debt
+            else:
+                charged, paid, base_amt, debt = bal.charged, bal.paid, bal.baseline, bal.debt
+
             owner = ", ".join(owners.get(plot, [])) or "—"
             last_reading_text = "—"
             last_date_text = "—"
@@ -353,19 +379,19 @@ class EnergyDebtWidget(QWidget):
                 reading_sort = float(lv)
                 date_sort = float(ly * 100 + lm)
 
-            color = energy.debt_color(bal.debt, monthly_avg=300.0)
-            debts_map[plot] = {"debt": bal.debt, "color": color,
-                                "charged": bal.charged, "paid": bal.paid,
+            color = energy.debt_color(debt, monthly_avg=300.0)
+            debts_map[plot] = {"debt": debt, "color": color,
+                                "charged": charged, "paid": paid,
                                 "billing_type": bt}
 
             if bt == energy.BILLING_DIRECT:
-                direct_debt_total += bal.debt
+                direct_debt_total += debt
             else:
-                total_debt += bal.debt
-                total_charged += bal.charged
-                total_paid += bal.paid
-                type_charged[bt] = type_charged.get(bt, 0.0) + bal.charged
-                if bal.debt > 0.5:
+                total_debt += debt
+                total_charged += charged
+                total_paid += paid
+                type_charged[bt] = type_charged.get(bt, 0.0) + charged
+                if debt > 0.5:
                     debt_count += 1
 
             try:
@@ -392,20 +418,20 @@ class EnergyDebtWidget(QWidget):
                 "_sort_Дата показ.": date_sort,
                 "_fg_Дата показ.": "#9CA3AF",
 
-                "_text_Начислено": fmt_money(bal.charged),
-                "_sort_Начислено": bal.charged,
-                "_fg_Начислено": "#f9a825" if bal.charged else "#9CA3AF",
+                "_text_Начислено": fmt_money(charged),
+                "_sort_Начислено": charged,
+                "_fg_Начислено": "#f9a825" if charged else "#9CA3AF",
 
-                "_text_Оплачено": fmt_money(bal.paid),
-                "_sort_Оплачено": bal.paid,
-                "_fg_Оплачено": "#059669" if bal.paid else "#9CA3AF",
+                "_text_Оплачено": fmt_money(paid),
+                "_sort_Оплачено": paid,
+                "_fg_Оплачено": "#059669" if paid else "#9CA3AF",
 
-                "_text_Стартовое": fmt_money(bal.baseline) if bal.baseline else "—",
-                "_sort_Стартовое": bal.baseline,
-                "_fg_Стартовое": "#c97c7c" if bal.baseline else "#9CA3AF",
+                "_text_Стартовое": fmt_money(base_amt) if base_amt else "—",
+                "_sort_Стартовое": base_amt,
+                "_fg_Стартовое": "#c97c7c" if base_amt else "#9CA3AF",
 
-                "_text_Долг / Аванс": fmt_money(bal.debt),
-                "_sort_Долг / Аванс": bal.debt,
+                "_text_Долг / Аванс": fmt_money(debt),
+                "_sort_Долг / Аванс": debt,
                 "_bg_Долг / Аванс": _DEBT_COLOR_LIGHT.get(color, color),
                 "_bold_Долг / Аванс": True,
 

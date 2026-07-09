@@ -627,6 +627,40 @@ def _period_at_date_is_ignored(d: date, breakdown: list[PeriodCharge]) -> bool:
     return pc is not None and pc.ignored
 
 
+def balance_for_periods(plot: str, area: Optional[float], as_of: date,
+                         rates: list, adjustments: dict, df,
+                         since: Optional[date] = None,
+                         period_keys: Optional[set[str]] = None) -> GroupBalance:
+    """Баланс, ограниченный выбором пользователя: ``since`` — нижняя граница
+    по дате начала периода (как в :func:`balance_for_active_group`, None —
+    без ограничения), ``period_keys`` — явный набор периодов (``date_from``
+    в ISO-формате, None — все периоды). Условия комбинируются («И»)."""
+    breakdown = charged_periods_breakdown(plot, area, as_of, rates, adjustments)
+
+    def _period_ok(pf: date) -> bool:
+        if since is not None and pf < since:
+            return False
+        if period_keys is not None and pf.isoformat() not in period_keys:
+            return False
+        return True
+
+    charged = sum(
+        y.amount for y in breakdown
+        if y.amount is not None and not y.ignored and _period_ok(y.period_from)
+    )
+
+    paid = 0.0
+    for p in payments_breakdown(plot, df, adjustments):
+        if p["date"] is None or p["date"] > as_of:
+            continue
+        pc = _find_period(p["date"], breakdown)
+        if pc is None or pc.ignored or not _period_ok(pc.period_from):
+            continue
+        paid += p["amount"]
+
+    return GroupBalance(charged=charged, paid=paid, debt=charged - paid)
+
+
 # ── палитра для UI ────────────────────────────────────────────────────
 
 def debt_color(debt: float, annual_avg: float = 0.0) -> str:
