@@ -241,6 +241,7 @@ class BillingTypeDialog(_FramelessDialog):
         super().__init__(parent)
         self._plot = str(plot)
         self._plots = energy.load_plots()
+        self._auto_settings = energy.load_auto_settings()
         self._rec = next(
             (p for p in self._plots if str(p.get("num", "")) == self._plot), None
         )
@@ -298,20 +299,76 @@ class BillingTypeDialog(_FramelessDialog):
         self._g_calc = QWidget()
         fc = QFormLayout(self._g_calc)
         fc.setContentsMargins(0, 4, 0, 0)
+        self.cb_calc_method = QComboBox()
+        for cm in energy.CALC_METHODS:
+            self.cb_calc_method.addItem(energy.CALC_METHOD_LABELS[cm], cm)
+        cur_calc_method = rec.get("calc_method") or energy.CALC_METHOD_NORM
+        if cur_calc_method not in energy.CALC_METHODS:
+            cur_calc_method = energy.CALC_METHOD_NORM
+        self.cb_calc_method.setCurrentIndex(
+            max(self.cb_calc_method.findData(cur_calc_method), 0))
+        fc.addRow("Способ расчёта:", self.cb_calc_method)
+
         norm_raw = rec.get("norm_kw")
         self.inp_norm = QLineEdit("" if norm_raw in (None, "") else f"{float(norm_raw):g}")
-        self.inp_norm.setPlaceholderText("обязательно, например: 1.5")
+        default_norm = self._auto_settings.get("default_norm_kw")
+        if default_norm not in (None, ""):
+            self.inp_norm.setPlaceholderText(
+                f"пусто = из настроек СНТ ({float(default_norm):g} кВт)")
+        else:
+            self.inp_norm.setPlaceholderText("обязательно, например: 1.5")
         self.de_norm_start = self._make_date_edit(
             rec.get("norm_start_date") or _next_period_start().isoformat()
         )
-        fc.addRow("Норматив мощности, кВт:", self.inp_norm)
+        self._lbl_norm = QLabel("Норматив мощности, кВт:")
+        fc.addRow(self._lbl_norm, self.inp_norm)
         fc.addRow("Дата начала применения:", self.de_norm_start)
-        note = QLabel("Начисление: норматив × 24 ч × дни в периоде × тариф.\n"
-                      "Показания прибора учёта игнорируются.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#9CA3AF;font-size:11px;")
-        fc.addRow(note)
+
+        self._lbl_window = QLabel("Окно усреднения, мес.:")
+        self.spin_avg_window = QSpinBox()
+        self.spin_avg_window.setRange(1, 24)
+        self.spin_avg_window.setToolTip(
+            "Сколько последних месяцев с известным расходом брать для среднего "
+            "(документ допускает 6-12 мес.; если истории меньше — считается "
+            "по фактически доступному периоду).")
+        # Глобальное значение «по умолчанию» без учёта локального override
+        # этого участка — именно то, что унаследует чекбокс ниже.
+        global_window = energy.avg_window_months_of(
+            self._plot, plots=[], auto_settings=self._auto_settings)
+        self.chk_inherit_window = QCheckBox(f"из настроек СНТ ({global_window} мес.)")
+        window_raw = rec.get("avg_window_months")
+        try:
+            has_local_window = int(window_raw) > 0
+        except (TypeError, ValueError):
+            has_local_window = False
+        self.chk_inherit_window.setChecked(not has_local_window)
+        self.spin_avg_window.setValue(int(window_raw) if has_local_window else global_window)
+        self.spin_avg_window.setEnabled(has_local_window)
+        self.chk_inherit_window.toggled.connect(self._on_inherit_window_toggled)
+
+        self._window_row = QWidget()
+        wr_lay = QHBoxLayout(self._window_row)
+        wr_lay.setContentsMargins(0, 0, 0, 0)
+        wr_lay.addWidget(self.spin_avg_window)
+        wr_lay.addWidget(self.chk_inherit_window)
+        wr_lay.addStretch()
+        fc.addRow(self._lbl_window, self._window_row)
+
+        self._lbl_avg = QLabel("Среднее до начала применения:")
+        self.avg_preview_lbl = QLabel("—")
+        self.avg_preview_lbl.setStyleSheet("color:#374151;font-size:13px;")
+        fc.addRow(self._lbl_avg, self.avg_preview_lbl)
+
+        self.note_calc = QLabel()
+        self.note_calc.setWordWrap(True)
+        self.note_calc.setStyleSheet("color:#9CA3AF;font-size:11px;")
+        fc.addRow(self.note_calc)
         lay.addWidget(self._g_calc)
+
+        self.cb_calc_method.currentIndexChanged.connect(self._on_calc_method_changed)
+        self.de_norm_start.dateChanged.connect(self._update_avg_preview)
+        self.spin_avg_window.valueChanged.connect(self._update_avg_preview)
+        self._on_calc_method_changed()
 
         # Тип 3 — Прямой договор
         self._g_direct = QWidget()
@@ -347,6 +404,51 @@ class BillingTypeDialog(_FramelessDialog):
         self._g_direct.setVisible(bt == energy.BILLING_DIRECT)
         self.adjustSize()
 
+    def _on_inherit_window_toggled(self, checked: bool):
+        self.spin_avg_window.setEnabled(not checked)
+        if checked:
+            eff = energy.avg_window_months_of(
+                self._plot, plots=[], auto_settings=self._auto_settings)
+            self.spin_avg_window.setValue(eff)
+        self._update_avg_preview()
+
+    def _on_calc_method_changed(self):
+        cm = self.cb_calc_method.currentData()
+        is_avg = cm == energy.CALC_METHOD_OWN_AVERAGE
+        self._lbl_norm.setVisible(not is_avg)
+        self.inp_norm.setVisible(not is_avg)
+        self._lbl_window.setVisible(is_avg)
+        self._window_row.setVisible(is_avg)
+        self._lbl_avg.setVisible(is_avg)
+        self.avg_preview_lbl.setVisible(is_avg)
+        if is_avg:
+            self.note_calc.setText(
+                "Начисление: среднемесячный расход участка за предыдущие "
+                "месяцы (по факту переданных показаний) × дни в периоде × "
+                "тариф. Требует хотя бы одной пары показаний участка.")
+            self._update_avg_preview()
+        else:
+            self.note_calc.setText(
+                "Начисление: норматив × 24 ч × дни в периоде × тариф.\n"
+                "Показания прибора учёта игнорируются.")
+        self.adjustSize()
+
+    def _update_avg_preview(self):
+        if self.cb_calc_method.currentData() != energy.CALC_METHOD_OWN_AVERAGE:
+            return
+        before = self.de_norm_start.date().toPyDate()
+        window = self.spin_avg_window.value()
+        meters = energy.load_meters()
+        repls = energy.load_replacements()
+        avg = energy.own_average_kwh(self._plot, meters, repls, before=before,
+                                     window_months=window)
+        self.avg_preview_lbl.setText(
+            f"{avg:.0f} кВт·ч/мес (по последним {window} мес. с расходом)"
+            if avg is not None else "нет истории показаний — метод недоступен")
+        self.avg_preview_lbl.setStyleSheet(
+            "color:#374151;font-size:13px;" if avg is not None
+            else "color:#DC2626;font-size:13px;")
+
     def _on_accept(self):
         rec = self._rec
         bt = self.cb_billing.currentData()
@@ -357,18 +459,49 @@ class BillingTypeDialog(_FramelessDialog):
             rec["meter_act_number"] = self.inp_meter_act.text().strip()
             rec["meter_location"] = self.inp_meter_loc.text().strip()
         elif bt == energy.BILLING_CALCULATED:
-            raw = self.inp_norm.text().strip().replace(",", ".")
-            try:
-                nv = float(raw)
-            except ValueError:
-                nv = 0.0
-            if nv <= 0:
-                _AlertDialog.show_alert(self, "Расчётный метод",
-                                        "Для расчётного метода обязательно укажите "
-                                        "норматив мощности (положительное число, кВт).")
-                return
-            rec["norm_kw"] = nv
-            rec["norm_start_date"] = self.de_norm_start.date().toString("yyyy-MM-dd")
+            calc_method = self.cb_calc_method.currentData()
+            norm_start_iso = self.de_norm_start.date().toString("yyyy-MM-dd")
+            if calc_method == energy.CALC_METHOD_OWN_AVERAGE:
+                before = self.de_norm_start.date().toPyDate()
+                window = self.spin_avg_window.value()
+                avg = energy.own_average_kwh(
+                    self._plot, energy.load_meters(), energy.load_replacements(),
+                    before=before, window_months=window)
+                if avg is None:
+                    _AlertDialog.show_alert(
+                        self, "Среднее по своей истории",
+                        "У участка нет ни одной пары показаний до выбранной даты — "
+                        "этим методом посчитать нечего. Выберите норматив мощности "
+                        "или дождитесь хотя бы одного показания.")
+                    return
+                if self.chk_inherit_window.isChecked():
+                    rec.pop("avg_window_months", None)
+                else:
+                    rec["avg_window_months"] = window
+            else:
+                raw = self.inp_norm.text().strip().replace(",", ".")
+                if raw:
+                    try:
+                        nv = float(raw)
+                    except ValueError:
+                        nv = 0.0
+                    if nv <= 0:
+                        _AlertDialog.show_alert(
+                            self, "Расчётный метод",
+                            "Норматив мощности должен быть положительным числом.")
+                        return
+                    rec["norm_kw"] = nv
+                elif self._auto_settings.get("default_norm_kw") in (None, ""):
+                    _AlertDialog.show_alert(
+                        self, "Расчётный метод",
+                        "Укажите норматив мощности на участке, либо задайте "
+                        "значение по умолчанию в «⚙ Настройки» на вкладке "
+                        "«Электроэнергия».")
+                    return
+                else:
+                    rec.pop("norm_kw", None)
+            rec["calc_method"] = calc_method
+            rec["norm_start_date"] = norm_start_iso
         else:  # direct
             rec["direct_contract_date"] = self.de_direct_date.date().toString("yyyy-MM-dd")
             rec["direct_contract_number"] = self.inp_direct_num.text().strip()
@@ -645,14 +778,16 @@ class PlotCardDialog(_FramelessDialog):
 
         base = energy._to_float(baseline.get("balances", {}).get(self._plot)) or 0.0
         base_start = energy._parse_iso(baseline.get("start_date", ""))
+        auto_settings = energy.load_auto_settings()
 
         # Тип расчёта определяет логику начисления и доступность ввода показаний
         bt = energy.billing_type_of(self._plot)
         self._entry.setVisible(bt == energy.BILLING_METER)
-        self._configure_banner(bt, meters)
+        self._configure_banner(bt, meters, auto_settings)
 
         # ── Хронология: каждое снятие показания + каждый платёж — отдельная строка
-        charges = energy.charges_for_plot(self._plot, meters, rates, repls, up_to=self._as_of)
+        charges = energy.charges_for_plot(self._plot, meters, rates, repls,
+                                          up_to=self._as_of, auto_settings=auto_settings)
         payments = [
             p for p in energy.payments_breakdown(self._plot, self._df)
             if p["date"] is not None
@@ -713,8 +848,14 @@ class PlotCardDialog(_FramelessDialog):
                 cum += amount
                 mbal_text = fmt_money(amount) if amount else "0 ₽"
                 is_calc = bool(c.get("calculated"))
-                # Тип 2: показание не вводится — вместо редактора пометка «расчётный метод»
-                value_cell = (f"расч. · {c.get('days', 0)} дн", "#07414F") if is_calc else None
+                is_auto = bool(c.get("auto_estimate"))
+                # Тип 2 / автооценка: показание не вводится — вместо редактора пометка
+                if is_auto:
+                    value_cell = (f"авто · {c.get('days', 0)} дн", "#B45309")
+                elif is_calc:
+                    value_cell = (f"расч. · {c.get('days', 0)} дн", "#07414F")
+                else:
+                    value_cell = None
                 self._set_row(r, [
                     (label, None),
                     value_cell,                        # «Показание» — редактируемое поле (тип 1)
@@ -727,6 +868,14 @@ class PlotCardDialog(_FramelessDialog):
                     group_cell,
                     ("", None) if is_calc else None,   # кнопка удаления (тип 1)
                 ])
+                if is_auto:
+                    tip = ("Автоматическая оценка (показания не переданы) — "
+                          "будет пересчитано по факту, как только придёт "
+                          "реальное показание, закрывающее разрыв.")
+                    for col in range(self.table.columnCount()):
+                        it = self.table.item(r, col)
+                        if it is not None:
+                            it.setToolTip(tip)
                 if not is_calc:
                     self._install_value_editor(r, y, m, c["value"], anomaly_map.get((y, m)))
                     self._install_delete_button(r, y, m)
@@ -890,28 +1039,52 @@ class PlotCardDialog(_FramelessDialog):
             return f"по {until.strftime('%d.%m.%Y')}"
         return "—"
 
-    def _configure_banner(self, bt: str, meters: dict):
+    def _configure_banner(self, bt: str, meters: dict, auto_settings: dict | None = None):
         """Плашка под сводкой: расчётный метод / прямой договор / ожидание показаний."""
         if bt == energy.BILLING_CALCULATED:
-            self._set_banner(
-                "Расчётный метод — прибор учёта не введён в эксплуатацию. "
-                "Начисление по нормативу (норматив × 24 ч × дни × тариф).",
-                "#92400E", "#FEF3C7", "#FCD34D",
-            )
+            if energy.calc_method_of(self._plot) == energy.CALC_METHOD_OWN_AVERAGE:
+                window = energy.avg_window_months_of(self._plot)
+                text = (f"Расчётный метод — среднее потребление участка за последние "
+                        f"{window} мес. с известным расходом (по факту переданных "
+                        f"показаний) × дни × тариф.")
+            else:
+                text = ("Расчётный метод — прибор учёта не введён в эксплуатацию. "
+                        "Начисление по нормативу (норматив × 24 ч × дни × тариф).")
+            self._set_banner(text, "#92400E", "#FEF3C7", "#FCD34D")
         elif bt == energy.BILLING_DIRECT:
             self._set_banner(
                 "Расчёты ведутся напрямую с Пермэнергосбытом. "
                 "Начисление через СНТ не производится, участок исключён из баланса СНТ.",
                 "#3730A3", "#EEF2FF", "#C7D2FE",
             )
-        elif energy.waiting_for_readings(self._plot, meters):
-            self._set_banner(
-                "Ожидание показаний — показания прибора учёта ещё не переданы, "
-                "начисление не производится.",
-                "#9A3412", "#FFF7ED", "#FED7AA",
-            )
         else:
-            self.banner_lbl.setVisible(False)
+            auto_settings = auto_settings or {}
+            threshold = auto_settings.get("months") or energy.DEFAULT_AUTO_SWITCH_MONTHS
+            mwr = energy.months_without_reading(self._plot, meters, self._as_of)
+            if mwr is not None and mwr >= threshold:
+                if auto_settings.get("enabled"):
+                    self._set_banner(
+                        f"Показания не переданы уже {mwr} мес. подряд — начисление "
+                        "автоматически ведётся по среднему потреблению участка "
+                        "(до передачи показаний). Как только показания придут — "
+                        "начисление за этот период пересчитается по факту.",
+                        "#B45309", "#FFF7ED", "#FCD34D",
+                    )
+                else:
+                    self._set_banner(
+                        f"Показания не переданы уже {mwr} мес. подряд — по порядку "
+                        "действий СНТ пора переходить на расчётный метод "
+                        "(кнопка «⚙ Тип расчёта» ниже).",
+                        "#991B1B", "#FEF2F2", "#FCA5A5",
+                    )
+            elif energy.waiting_for_readings(self._plot, meters):
+                self._set_banner(
+                    "Ожидание показаний — показания прибора учёта ещё не переданы, "
+                    "начисление не производится.",
+                    "#9A3412", "#FFF7ED", "#FED7AA",
+                )
+            else:
+                self.banner_lbl.setVisible(False)
 
     def _set_banner(self, text: str, fg: str, bg: str, border: str):
         self.banner_lbl.setText(text)

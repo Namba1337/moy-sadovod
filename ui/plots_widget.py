@@ -3555,8 +3555,8 @@ class PlotEditDialog(QWidget):
         if area_val is not None:
             result["area"] = area_val
         for k in ("billing_type", "meter_commission_date", "meter_act_number",
-                  "meter_location", "norm_kw", "norm_start_date",
-                  "direct_contract_date", "direct_contract_number",
+                  "meter_location", "norm_kw", "calc_method", "avg_window_months",
+                  "norm_start_date", "direct_contract_date", "direct_contract_number",
                   "billing_history"):
             if k in self._plot_data:
                 result[k] = self._plot_data[k]
