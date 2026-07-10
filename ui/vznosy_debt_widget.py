@@ -513,15 +513,20 @@ class VznosyDebtWidget(QWidget):
         debt_count = 0
         debts_map: dict[str, dict] = {}
 
+        # Индекс платежей — один проход по выписке вместо скана на каждый участок
+        pay_idx = vznosy.payments_index(self._df)
+
         for plot in plots:
             area = areas.get(plot)
-            bal = vznosy.balance_for_plot(plot, area, as_of, rates, adj, self._df)
+            bal = vznosy.balance_for_plot(plot, area, as_of, rates, adj, self._df,
+                                          pay_index=pay_idx)
             if active_only or period_filter_active:
                 since = (own.group_since(own.active_group(plot_recs.get(plot, {})) or {})
                          if active_only else None)
                 gb = vznosy.balance_for_periods(
                     plot, area, as_of, rates, adj, self._df,
-                    since=since, period_keys=selected_period_keys)
+                    since=since, period_keys=selected_period_keys,
+                    pay_index=pay_idx)
                 charged, paid, debt = gb.charged, gb.paid, gb.debt
             else:
                 charged, paid, debt = bal.charged, bal.paid, bal.debt
@@ -644,13 +649,15 @@ class VznosyDebtWidget(QWidget):
 
         # Должник = участок, где задолженность есть у ТЕКУЩЕГО собственника
         # (квитанция выставляется ему; долг прежнего сюда не входит).
+        pay_idx = vznosy.payments_index(self._df)
         debtors: list[tuple[str, str]] = []
         for plot in self._plot_list():
             rec = plot_recs.get(plot, {})
             owners_list = rec.get("owners", []) or []
             rows = vznosy.balances_by_owner(
                 plot, areas.get(plot), as_of, rates, adj, self._df,
-                owners_list, ownership_form=rec.get("ownership_form"))
+                owners_list, ownership_form=rec.get("ownership_form"),
+                pay_index=pay_idx)
             cur_debt = sum(r.debt for r in rows if r.is_current)
             if cur_debt > 0.5:
                 cur_name = next((r.name for r in rows if r.is_current), "")

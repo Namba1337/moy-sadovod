@@ -2377,18 +2377,23 @@ class PlotsWidget(QWidget):
                 meters = en.load_meters(); en_rates = en.load_rates()
                 repl = en.load_replacements(); base = en.load_baseline()
                 today = date.today()
+                # Индексы платежей — один проход по выписке на все участки
+                vz_idx = vzn.payments_index(self._df)
+                en_idx = en.payments_index(self._df, en.CATS_ELECTRO_INCOME)
                 for p in self._plots:
                     num = str(p.get("num", ""))
                     since = ownership.group_since(ownership.active_group(p) or {})
                     try:
                         gb = vzn.balance_for_active_group(
-                            num, area_map.get(num), today, rates, adj, self._df, since=since)
+                            num, area_map.get(num), today, rates, adj, self._df,
+                            since=since, pay_index=vz_idx)
                         vznosy_debt[num] = gb.debt
                     except Exception:
                         pass
                     try:
                         egb = en.balance_for_active_group(
-                            num, today, meters, en_rates, repl, base, self._df, since=since)
+                            num, today, meters, en_rates, repl, base, self._df,
+                            since=since, plots=self._plots, pay_index=en_idx)
                         energy_debt[num] = egb.debt
                     except Exception:
                         pass

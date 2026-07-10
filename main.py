@@ -617,25 +617,36 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(body, stretch=1)
 
-        # Подписки на загрузку выписки
-        self.detail.dataLoaded.connect(self.vznosy_debt.refresh)
-        self.detail.dataLoaded.connect(self.energy_debt.refresh)
-        self.detail.dataLoaded.connect(self.home.refresh)
-        self.detail.dataLoaded.connect(self.plots.refresh)  # df нужен мастеру смены собственника
-        # При изменении списка участков (в т.ч. площади) пересчитать ЧВ
-        self.plots.plotsUpdated.connect(
-            lambda: self.vznosy_debt.refresh(self.detail.df_full)
-        )
-        # Список участков влияет на расчёт долга по взносам — обновим «Главную»
-        self.plots.plotsUpdated.connect(
-            lambda: self.home.refresh(self.detail.df_full)
-        )
+        # Подписки на изменение данных.
+        # Раньше каждое изменение выписки веером синхронно перестраивало все
+        # зависимые вкладки (дашборд, участки, оба реестра долгов) — отсюда
+        # подвисания при любой правке. Теперь пересчитывается только видимая
+        # вкладка; скрытые обновляются лениво при переходе на них
+        # (страницы 0/2/4 и так пересчитываются в _nav_click, для «Участков»
+        # используется флаг _plots_stale).
+        self._plots_stale = False
+        self.detail.dataLoaded.connect(self._on_statement_changed)
 
-        # При изменении данных вкладки «Участки» — обновить все зависимые вкладки
+        # Изменение реестра участков: столбец «Участок» в детализации
+        # обновляем сразу — он мутирует df_full, которым пользуются расчёты
+        # всех вкладок. Остальные вкладки пересчитаются при переходе на них.
         self.plots.plotsUpdated.connect(self.detail.refresh_plot_column)
-        self.plots.plotsUpdated.connect(self.energy_debt._rebuild)
 
         self._nav_click(0)  # initial page: Главная
+
+    def _on_statement_changed(self, df):
+        """Выписка изменилась: пересчитываем только видимую вкладку."""
+        self._plots_stale = True
+        cur = self.stack.currentIndex()
+        if cur == 0:
+            self.home.refresh(df)
+        elif cur == 2:
+            self.vznosy_debt.refresh(df)
+        elif cur == 3:
+            self._plots_stale = False
+            self.plots.refresh(df)
+        elif cur == 4:
+            self.energy_debt.refresh(df)
 
     def _nav_click(self, page_idx: int):
         for btn in self._nav_buttons:
@@ -645,6 +656,9 @@ class MainWindow(QMainWindow):
             self.home.refresh(self.detail.df_full)
         elif page_idx == 2:
             self.vznosy_debt.refresh(self.detail.df_full)
+        elif page_idx == 3 and self._plots_stale:
+            self._plots_stale = False
+            self.plots.refresh(self.detail.df_full)
         elif page_idx == 4:
             self.energy_debt.refresh(self.detail.df_full)
 
@@ -850,6 +864,9 @@ class MainWindow(QMainWindow):
             self.energy_debt.refresh(None)
             self.vznosy_debt.refresh(None)
             self.home.refresh(None)
+            # Кэш долгов на «Участках» тоже считался по старой выписке
+            self.plots.refresh(None)
+            self._plots_stale = False
 
         QMessageBox.information(self, "Загружено", "Проект успешно загружен.")
 

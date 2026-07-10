@@ -3555,11 +3555,15 @@ class DetailWidget(QWidget):
         ordered = [c for c in self._COLUMN_ORDER if c in visible]
         ordered += [c for c in visible if c not in self._COLUMN_ORDER]
         columns = ordered
-        records = []
-        for df_idx, row in df.iterrows():
-            data = {c: row[c] for c in columns}
-            breakdown = _parse_breakdown(row.get("_breakdown"))
-            records.append((df_idx, data, breakdown))
+        # Без df.iterrows(): создание Series на каждую строку заметно
+        # замедляло перестроение таблицы на больших выписках.
+        bd_values = (list(df["_breakdown"]) if "_breakdown" in df.columns
+                     else [None] * len(df))
+        records = [
+            (df_idx, data, _parse_breakdown(raw_bd))
+            for df_idx, data, raw_bd in zip(
+                df.index, df[columns].to_dict("records"), bd_values)
+        ]
 
         self.model.load(columns, records)
         self._apply_header_layout(self.model.columns())
@@ -3911,12 +3915,17 @@ class DetailWidget(QWidget):
 
         if self._hdr_cat_filter:
             _sel = self._hdr_cat_filter
-            def _hdr_cat_matches(row):
-                bd = _parse_breakdown(row.get("_breakdown"))
-                if bd:
-                    return any(it.get("Категория") in _sel for it in bd)
-                return row.get("Категория") in _sel
-            df = df[df.apply(_hdr_cat_matches, axis=1)]
+            # Строка с разбивкой фильтруется по категориям её строк, без —
+            # по верхнеуровневой. JSON разбивки парсим только там, где он
+            # есть (df.apply по всем строкам был излишне медленным).
+            mask = df["Категория"].isin(_sel)
+            if "_breakdown" in df.columns:
+                bd_col = df["_breakdown"]
+                for idx in df.index[bd_col.notna()]:
+                    bd = _parse_breakdown(bd_col.at[idx])
+                    if bd:
+                        mask.at[idx] = any(it.get("Категория") in _sel for it in bd)
+            df = df[mask]
 
         # Поисковые фильтры из заголовков столбцов
         if self._hdr_search_filters:
