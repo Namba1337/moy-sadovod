@@ -776,7 +776,9 @@ def _row_amount_for_plot(row: pd.Series, plot: str, cats: Optional[set] = None) 
     if plot not in plots:
         return 0.0
     amount = _to_float(row.get("Сумма"))
-    if amount is None or amount <= 0:
+    # amount != amount — проверка на NaN: такая «сумма» (например, у вручную
+    # добавленной операции без суммы) иначе отравляет NaN'ом весь итог.
+    if amount is None or amount != amount or amount <= 0:
         return 0.0
     if row.get("Категория") == CAT_MIXED:
         amount /= 2
@@ -801,7 +803,7 @@ def _row_amount_for_cats(row: pd.Series, cats: set) -> float:
         return result
 
     amount = _to_float(row.get("Сумма"))
-    if amount is None or amount <= 0:
+    if amount is None or amount != amount or amount <= 0:
         return 0.0
     if row.get("Категория") == CAT_MIXED:
         amount /= 2
@@ -818,17 +820,122 @@ def _rows_matching_cats(df: pd.DataFrame, cats: set) -> pd.DataFrame:
     категории, как будто разбивки ещё нет (см. parse_breakdown)."""
     mask = df["Категория"].isin(cats)
     if "_breakdown" in df.columns:
-        def _has_relevant_breakdown(row) -> bool:
-            items = parse_breakdown(row.get("_breakdown"), total=row.get("Сумма"))
-            return any(str(i.get("Категория", "")) in cats
-                       for i in items if isinstance(i, dict))
-        mask = mask | df.apply(_has_relevant_breakdown, axis=1)
+        # Разбивка есть у единиц строк — парсим JSON только там, где колонка
+        # непуста и строка ещё не прошла по верхнеуровневой категории
+        # (df.apply по всем строкам здесь превращался в узкое место).
+        bd_col = df["_breakdown"]
+        candidates = bd_col.notna() & ~mask
+        if candidates.any():
+            sums = df["Сумма"]
+            extra = []
+            for idx in df.index[candidates]:
+                items = parse_breakdown(bd_col.at[idx], total=sums.at[idx])
+                if any(str(i.get("Категория", "")) in cats
+                       for i in items if isinstance(i, dict)):
+                    extra.append(idx)
+            if extra:
+                mask = mask.copy()
+                mask.loc[extra] = True
     return df[mask]
 
 
+def payments_index(df, cats: set) -> dict[str, list[dict]]:
+    """Индекс платежей по участкам за ОДИН проход по выписке.
+
+    Возвращает ``{участок: [{date, amount, mixed, purpose}, ...]}`` —
+    списки отсортированы по дате. Суммы и состав записей идентичны
+    последовательным вызовам ``_rows_matching_cats`` +
+    ``_row_amount_for_plot`` для каждого участка, но без O(участки × строки):
+    вкладки со сводкой по всем участкам строят индекс один раз и передают
+    его в ``payments_total``/``payments_breakdown``/``balance`` и т.п.
+    """
+    d = _ensure_df(df)
+    out: dict[str, list[dict]] = {}
+    if d is None:
+        return out
+
+    n = len(d)
+    dates = list(d["Дата"])
+    sums = list(d["Сумма"])
+    cats_col = list(d["Категория"])
+    plots_col = list(d["Участок"])
+    bds = list(d["_breakdown"]) if "_breakdown" in d.columns else [None] * n
+    purps = list(d["Назначение"]) if "Назначение" in d.columns else [""] * n
+
+    for dt, total, cat, plot_raw, raw_bd, purp in zip(
+            dates, sums, cats_col, plots_col, bds, purps):
+        breakdown = []
+        if isinstance(raw_bd, list) or (isinstance(raw_bd, str) and raw_bd.strip()):
+            breakdown = parse_breakdown(raw_bd, total=total)
+
+        row_amounts: dict[str, float] = {}
+        if breakdown:
+            parent_plot = str(plot_raw).strip()
+            for item in breakdown:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("Категория", "")) not in cats:
+                    continue
+                item_plot_raw = str(item.get("Участок", "")).strip() or parent_plot
+                item_plots = [p.strip() for p in item_plot_raw.split(",") if p.strip()]
+                if not item_plots:
+                    continue
+                amt = _to_float(item.get("Сумма"))
+                if amt is None or amt != amt or amt <= 0:
+                    continue
+                # Делим на полную длину списка, но каждому УНИКАЛЬНОМУ участку
+                # засчитываем долю один раз — так же, как _row_amount_for_plot
+                # при дубликате участка в списке («16, 16»).
+                share = amt / len(item_plots)
+                for p in dict.fromkeys(item_plots):
+                    row_amounts[p] = row_amounts.get(p, 0.0) + share
+        elif cat in cats:
+            plots = [p.strip() for p in str(plot_raw).split(",") if p.strip()]
+            amount = _to_float(total)
+            if plots and amount is not None and amount == amount and amount > 0:
+                if cat == CAT_MIXED:
+                    amount /= 2
+                share = amount / len(plots)
+                for p in dict.fromkeys(plots):
+                    row_amounts[p] = row_amounts.get(p, 0.0) + share
+
+        if not row_amounts:
+            continue
+        entry_date = dt.date() if pd.notna(dt) else None
+        mixed = (cat == CAT_MIXED and not breakdown)
+        purpose = str(purp)
+        for p, amount in row_amounts.items():
+            out.setdefault(p, []).append({
+                "date": entry_date,
+                "amount": amount,
+                "mixed": mixed,
+                "purpose": purpose,
+            })
+
+    for lst in out.values():
+        lst.sort(key=lambda r: r["date"] or date.min)
+    return out
+
+
 def payments_total(plot: str, df, date_from: Optional[date] = None,
-                   date_to: Optional[date] = None) -> float:
-    """Сумма платежей за электричество для участка в интервале [from, to]."""
+                   date_to: Optional[date] = None,
+                   index: Optional[dict] = None) -> float:
+    """Сумма платежей за электричество для участка в интервале [from, to].
+
+    `index` — заранее построенный payments_index(df, CATS_ELECTRO_INCOME):
+    при массовых расчётах по всем участкам избавляет от повторного
+    сканирования всей выписки на каждый участок."""
+    if index is not None:
+        total = 0.0
+        for p in index.get(str(plot), ()):
+            d0 = p["date"]
+            if date_from is not None and (d0 is None or d0 < date_from):
+                continue
+            if date_to is not None and (d0 is None or d0 > date_to):
+                continue
+            total += p["amount"]
+        return total
+
     df = _ensure_df(df)
     if df is None:
         return 0.0
@@ -847,8 +954,13 @@ def payments_total(plot: str, df, date_from: Optional[date] = None,
     return total
 
 
-def payments_breakdown(plot: str, df) -> list[dict]:
-    """Хронологический список платежей по электричеству для участка."""
+def payments_breakdown(plot: str, df, index: Optional[dict] = None) -> list[dict]:
+    """Хронологический список платежей по электричеству для участка.
+
+    `index` — см. payments_total()."""
+    if index is not None:
+        return list(index.get(str(plot), ()))
+
     df = _ensure_df(df)
     if df is None:
         return []
@@ -891,7 +1003,8 @@ class Balance:
 def balance(plot: str, as_of: date, meters: dict, rates: list,
             replacements: dict, baseline: dict, df,
             plots: Optional[list] = None,
-            auto_settings: Optional[dict] = None) -> Balance:
+            auto_settings: Optional[dict] = None,
+            pay_index: Optional[dict] = None) -> Balance:
     base = _to_float(baseline.get("balances", {}).get(str(plot))) or 0.0
     base_start = _parse_iso(baseline.get("start_date", ""))
 
@@ -907,12 +1020,13 @@ def balance(plot: str, as_of: date, meters: dict, rates: list,
         if c.get("auto_estimate"):
             auto_estimated = True
 
-    paid = payments_total(plot, df, date_from=base_start, date_to=as_of)
+    paid = payments_total(plot, df, date_from=base_start, date_to=as_of,
+                          index=pay_index)
     debt = base + charged - paid
 
     # Сколько месяцев подряд без платежей электро (от последнего платежа до as_of)
     months_without_payment: Optional[int] = None
-    breakdown = payments_breakdown(plot, df)
+    breakdown = payments_breakdown(plot, df, index=pay_index)
     breakdown = [p for p in breakdown if p["date"] and p["date"] <= as_of]
     if breakdown:
         last_pay = breakdown[-1]["date"]
@@ -972,7 +1086,8 @@ def balances_by_owner(plot: str, as_of: date, meters: dict, rates: list,
                       owners: list,
                       ownership_form: Optional[str] = None,
                       plots: Optional[list] = None,
-                      auto_settings: Optional[dict] = None) -> list[EnergyOwnerBalance]:
+                      auto_settings: Optional[dict] = None,
+                      pay_index: Optional[dict] = None) -> list[EnergyOwnerBalance]:
     """Раскладывает долг по электроэнергии по собственникам во времени.
 
     Атрибуция: месячное начисление → собственнику на дату снятия показания
@@ -1024,7 +1139,7 @@ def balances_by_owner(plot: str, as_of: date, meters: dict, rates: list,
         _spread(charged_acc, active, amt)
 
     # Платежи → собственник на дату платежа (в окне [base_start, as_of])
-    for p in payments_breakdown(plot, df):
+    for p in payments_breakdown(plot, df, index=pay_index):
         d = p["date"]
         if d is None or d > as_of:
             continue
@@ -1258,7 +1373,8 @@ def balance_for_active_group(plot: str, as_of: date, meters: dict, rates: list,
                               replacements: dict, baseline: dict, df,
                               since: Optional[date] = None,
                               plots: Optional[list] = None,
-                              auto_settings: Optional[dict] = None) -> EnergyGroupBalance:
+                              auto_settings: Optional[dict] = None,
+                              pay_index: Optional[dict] = None) -> EnergyGroupBalance:
     """Баланс активной группы по электроэнергии, ограниченный датой since.
 
     Начальное сальдо (baseline) учитывается только если оно не предшествует
@@ -1280,7 +1396,8 @@ def balance_for_active_group(plot: str, as_of: date, meters: dict, rates: list,
     )
 
     effective_since = since if since is not None else base_start
-    paid = payments_total(plot, df, date_from=effective_since, date_to=as_of)
+    paid = payments_total(plot, df, date_from=effective_since, date_to=as_of,
+                          index=pay_index)
 
     return EnergyGroupBalance(
         charged=charged,

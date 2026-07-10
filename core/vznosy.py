@@ -294,26 +294,40 @@ def charged_for_plot(plot: str, area: Optional[float], as_of: date,
 
 # ── платежи ───────────────────────────────────────────────────────────
 
-def payments_breakdown(plot: str, df, adjustments: Optional[dict] = None) -> list[dict]:
-    """Хронологический список платежей по ЧВ для участка."""
+def payments_index(df) -> dict[str, list[dict]]:
+    """Индекс платежей по ЧВ для ВСЕХ участков за один проход по выписке
+    (см. energy.payments_index). Передаётся в balance_for_plot() и др.
+    через параметр pay_index при массовых расчётах."""
+    return energy.payments_index(df, CATS_VZNOSY_INCOME)
+
+
+def payments_breakdown(plot: str, df, adjustments: Optional[dict] = None,
+                       index: Optional[dict] = None) -> list[dict]:
+    """Хронологический список платежей по ЧВ для участка.
+
+    `index` — заранее построенный payments_index(df): избавляет от
+    повторного сканирования всей выписки на каждый участок."""
     out: list[dict] = []
-    d = _ensure_df(df)
-    if d is not None:
-        sub = energy._rows_matching_cats(d, CATS_VZNOSY_INCOME).copy()
-        for _, row in sub.iterrows():
-            amount = energy._row_amount_for_plot(row, plot, cats=CATS_VZNOSY_INCOME)
-            if amount <= 0:
-                continue
-            out.append({
-                "date": row["Дата"].date() if pd.notna(row["Дата"]) else None,
-                "amount": amount,
-                # mixed=True — авто-категория, ещё не разделена вручную
-                # (см. energy.parse_breakdown) — подсказка UI «раздели точнее».
-                "mixed": (row.get("Категория") == CAT_MIXED
-                          and not energy.parse_breakdown(row.get("_breakdown"), total=row.get("Сумма"))),
-                "purpose": str(row.get("Назначение", "")),
-                "source": "csv",
-            })
+    if index is not None:
+        out = [dict(e, source="csv") for e in index.get(str(plot), ())]
+    else:
+        d = _ensure_df(df)
+        if d is not None:
+            sub = energy._rows_matching_cats(d, CATS_VZNOSY_INCOME).copy()
+            for _, row in sub.iterrows():
+                amount = energy._row_amount_for_plot(row, plot, cats=CATS_VZNOSY_INCOME)
+                if amount <= 0:
+                    continue
+                out.append({
+                    "date": row["Дата"].date() if pd.notna(row["Дата"]) else None,
+                    "amount": amount,
+                    # mixed=True — авто-категория, ещё не разделена вручную
+                    # (см. energy.parse_breakdown) — подсказка UI «раздели точнее».
+                    "mixed": (row.get("Категория") == CAT_MIXED
+                              and not energy.parse_breakdown(row.get("_breakdown"), total=row.get("Сумма"))),
+                    "purpose": str(row.get("Назначение", "")),
+                    "source": "csv",
+                })
 
     if adjustments:
         for m in _manual_payments(plot, adjustments):
@@ -330,19 +344,21 @@ def payments_breakdown(plot: str, df, adjustments: Optional[dict] = None) -> lis
 
 
 def paid_for_plot(plot: str, df, as_of: date,
-                  adjustments: Optional[dict] = None) -> float:
+                  adjustments: Optional[dict] = None,
+                  index: Optional[dict] = None) -> float:
     return sum(
-        p["amount"] for p in payments_breakdown(plot, df, adjustments)
+        p["amount"] for p in payments_breakdown(plot, df, adjustments, index=index)
         if p["date"] is not None and p["date"] <= as_of
     )
 
 
 def paid_by_period(plot: str, df, as_of: date,
-                   periods: list, adjustments: Optional[dict] = None) -> dict[str, float]:
+                   periods: list, adjustments: Optional[dict] = None,
+                   index: Optional[dict] = None) -> dict[str, float]:
     """Возвращает {period_key: сумма_оплаченного} — платёж относится
     к периоду, в котором находится его дата."""
     out: dict[str, float] = {}
-    for p in payments_breakdown(plot, df, adjustments):
+    for p in payments_breakdown(plot, df, adjustments, index=index):
         if p["date"] is None or p["date"] > as_of:
             continue
         for r in periods:
@@ -374,19 +390,20 @@ class VznosyBalance:
 
 
 def balance_for_plot(plot: str, area: Optional[float], as_of: date,
-                     rates: list, adjustments: dict, df) -> VznosyBalance:
+                     rates: list, adjustments: dict, df,
+                     pay_index: Optional[dict] = None) -> VznosyBalance:
     periods = build_periods(rates)
     breakdown = charged_periods_breakdown(plot, area, as_of, rates, adjustments)
     charged = sum(y.amount for y in breakdown if y.amount is not None)
 
-    py = paid_by_period(plot, df, as_of, periods, adjustments)
+    py = paid_by_period(plot, df, as_of, periods, adjustments, index=pay_index)
 
     # Платежи из игнорируемых периодов не учитываем в итоге —
     # иначе они превращаются в фиктивный «аванс».
     ignored_keys = {y.period_from.isoformat() for y in breakdown if y.ignored}
     paid_in_active = sum(v for k, v in py.items() if k not in ignored_keys)
     # Платежи, не попавшие ни в один период (до первого периода / в пробелах)
-    total_raw = paid_for_plot(plot, df, as_of, adjustments)
+    total_raw = paid_for_plot(plot, df, as_of, adjustments, index=pay_index)
     paid_in_any = sum(py.values())
     paid = paid_in_active + max(0.0, total_raw - paid_in_any)
 
@@ -484,7 +501,8 @@ def _find_period(d: date, breakdown: list[PeriodCharge]) -> Optional[PeriodCharg
 def balances_by_owner(plot: str, area: Optional[float], as_of: date,
                       rates: list, adjustments: dict, df,
                       owners: list,
-                      ownership_form: Optional[str] = None) -> list[OwnerBalance]:
+                      ownership_form: Optional[str] = None,
+                      pay_index: Optional[dict] = None) -> list[OwnerBalance]:
     """Раскладывает начисления и платежи участка по собственникам во времени.
 
     Правила атрибуции:
@@ -530,7 +548,7 @@ def balances_by_owner(plot: str, area: Optional[float], as_of: date,
             charged_acc[id(o)] = charged_acc.get(id(o), 0.0) + pc.amount * w
 
     # Платежи → собственник на дату платежа
-    for p in payments_breakdown(plot, df, adjustments):
+    for p in payments_breakdown(plot, df, adjustments, index=pay_index):
         d = p["date"]
         if d is None or d > as_of:
             continue
@@ -593,7 +611,8 @@ class GroupBalance:
 
 def balance_for_active_group(plot: str, area: Optional[float], as_of: date,
                               rates: list, adjustments: dict, df,
-                              since: Optional[date] = None) -> GroupBalance:
+                              since: Optional[date] = None,
+                              pay_index: Optional[dict] = None) -> GroupBalance:
     """Баланс активной группы: только платежи и начисления >= since.
 
     ``since`` — дата начала активной группы (может быть None для единственной
@@ -612,7 +631,7 @@ def balance_for_active_group(plot: str, area: Optional[float], as_of: date,
     # и в balance_for_plot (иначе такой платёж превращается в фиктивный
     # аванс: начисление за период не идёт в счёт, а платёж — идёт).
     paid = sum(
-        p["amount"] for p in payments_breakdown(plot, df, adjustments)
+        p["amount"] for p in payments_breakdown(plot, df, adjustments, index=pay_index)
         if p["date"] is not None
         and p["date"] <= as_of
         and (since is None or p["date"] >= since)
@@ -630,7 +649,8 @@ def _period_at_date_is_ignored(d: date, breakdown: list[PeriodCharge]) -> bool:
 def balance_for_periods(plot: str, area: Optional[float], as_of: date,
                          rates: list, adjustments: dict, df,
                          since: Optional[date] = None,
-                         period_keys: Optional[set[str]] = None) -> GroupBalance:
+                         period_keys: Optional[set[str]] = None,
+                         pay_index: Optional[dict] = None) -> GroupBalance:
     """Баланс, ограниченный выбором пользователя: ``since`` — нижняя граница
     по дате начала периода (как в :func:`balance_for_active_group`, None —
     без ограничения), ``period_keys`` — явный набор периодов (``date_from``
@@ -650,7 +670,7 @@ def balance_for_periods(plot: str, area: Optional[float], as_of: date,
     )
 
     paid = 0.0
-    for p in payments_breakdown(plot, df, adjustments):
+    for p in payments_breakdown(plot, df, adjustments, index=pay_index):
         if p["date"] is None or p["date"] > as_of:
             continue
         pc = _find_period(p["date"], breakdown)

@@ -533,19 +533,25 @@ class EnergyDebtWidget(QWidget):
         stale_readings_count = 0
         auto_estimated_count = 0
 
+        # Индекс платежей — один проход по выписке вместо скана на каждый
+        # участок; plots_list передаётся в ядро, чтобы оно не перечитывало
+        # snt_plots.json с диска на каждый вызов.
+        pay_idx = energy.payments_index(self._df, energy.CATS_ELECTRO_INCOME)
+
         rows: list[dict] = []
         for plot in plots:
-            bt = energy.billing_type_of(plot)
+            bt = energy.billing_type_of(plot, plots_list)
             type_counts[bt] = type_counts.get(bt, 0) + 1
             bal = energy.balance(plot, as_of, meters, rates, repls, baseline, self._df,
-                                 auto_settings=auto_settings)
+                                 plots=plots_list, auto_settings=auto_settings,
+                                 pay_index=pay_idx)
             if bal.auto_estimated:
                 auto_estimated_count += 1
             if active_only:
                 since = own.group_since(own.active_group(plot_recs.get(plot, {})) or {})
                 gb = energy.balance_for_active_group(
                     plot, as_of, meters, rates, repls, baseline, self._df, since=since,
-                    auto_settings=auto_settings)
+                    plots=plots_list, auto_settings=auto_settings, pay_index=pay_idx)
                 charged, paid, base_amt, debt = gb.charged, gb.paid, gb.baseline, gb.debt
             else:
                 charged, paid, base_amt, debt = bal.charged, bal.paid, bal.baseline, bal.debt
@@ -708,7 +714,8 @@ class EnergyDebtWidget(QWidget):
                 date_to = as_of
             common = energy.load_common_meter()
             rec = energy.reconcile(date_from, date_to, plots,
-                                    meters, rates, repls, common, df)
+                                    meters, rates, repls, common, df,
+                                    plot_records=plots_list)
             extras = ""
             if rec.common_kwh is not None:
                 extras = (f"  ·  общий счётчик: {rec.common_kwh:.0f} кВт·ч"
@@ -753,6 +760,7 @@ class EnergyDebtWidget(QWidget):
         as_of = self.date_as_of.date().toPyDate()
 
         # Должник = участок, где задолженность у ТЕКУЩЕГО собственника.
+        pay_idx = energy.payments_index(self._df, energy.CATS_ELECTRO_INCOME)
         debtors: list[tuple[str, str]] = []
         for plot in self._plot_list():
             rec = by_num.get(plot, {})
@@ -760,7 +768,7 @@ class EnergyDebtWidget(QWidget):
             rows = energy.balances_by_owner(
                 plot, as_of, meters, rates, repls, baseline, self._df,
                 owners_list, ownership_form=rec.get("ownership_form"),
-                plots=plots_recs)
+                plots=plots_recs, pay_index=pay_idx)
             cur_debt = sum(r.debt for r in rows if r.is_current)
             if cur_debt > 0.5:
                 cur_name = next((r.name for r in rows if r.is_current), "")

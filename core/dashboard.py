@@ -209,12 +209,17 @@ def vznosy_debt_summary(df: Optional[pd.DataFrame], as_of: date) -> DebtSummary:
     rates = vznosy.load_rates()
     adj = vznosy.load_adjustments()
     areas = vznosy.plot_area_map()
-    plots = [str(p.get("num", "")) for p in energy.load_plots() if p.get("num")]
+    plot_records = energy.load_plots()
+    plots = [str(p.get("num", "")) for p in plot_records if p.get("num")]
 
     e_meters = energy.load_meters()
     e_rates = energy.load_rates()
     e_replacements = energy.load_replacements()
     e_baseline = energy.load_baseline()
+
+    # Индексы платежей — один проход по выписке на все участки
+    vz_idx = vznosy.payments_index(df)
+    en_idx = energy.payments_index(df, energy.CATS_ELECTRO_INCOME)
 
     total = 0.0
     debtors = 0
@@ -222,13 +227,14 @@ def vznosy_debt_summary(df: Optional[pd.DataFrame], as_of: date) -> DebtSummary:
         plot_debt = 0.0
         try:
             vznosy_bal = vznosy.balance_for_plot(
-                plot, areas.get(plot), as_of, rates, adj, df)
+                plot, areas.get(plot), as_of, rates, adj, df, pay_index=vz_idx)
             plot_debt += max(0.0, vznosy_bal.debt)
         except Exception:
             pass
         try:
             e_bal = energy.balance(
-                plot, as_of, e_meters, e_rates, e_replacements, e_baseline, df)
+                plot, as_of, e_meters, e_rates, e_replacements, e_baseline, df,
+                plots=plot_records, pay_index=en_idx)
             plot_debt += max(0.0, e_bal.debt)
         except Exception:
             pass
