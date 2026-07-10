@@ -22,6 +22,7 @@ REPLACEMENTS_FILE = os.path.join(DATA_DIR, "snt_meter_replacements.json")
 BASELINE_FILE = os.path.join(DATA_DIR, "snt_energy_baseline.json")
 COMMON_METER_FILE = os.path.join(DATA_DIR, "snt_common_meter.json")
 PLOTS_FILE = os.path.join(DATA_DIR, "snt_plots.json")
+AUTO_SETTINGS_FILE = os.path.join(DATA_DIR, "snt_energy_auto_settings.json")
 
 CAT_ELECTRO_FROM_OWNERS = "Электроэнергия (от садоводов)"
 CAT_MIXED = "Членские взносы + Электроэнергия"
@@ -75,6 +76,34 @@ def load_plots() -> list:
 def save_plots(data: list) -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(PLOTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+DEFAULT_AUTO_SWITCH_MONTHS = 3
+
+
+def load_auto_settings() -> dict:
+    """{"enabled": bool, "months": int, "default_norm_kw": float|None,
+    "default_avg_window_months": int|None} — общие на всё СНТ настройки
+    электроэнергии (решение общего собрания, не за отдельный участок):
+
+    - enabled/months — автопереход участков типа «Счётчик» на оценку по
+      среднему/нормативу, если показания не переданы `months` месяцев
+      подряд (см. auto_estimate_charges()).
+    - default_norm_kw/default_avg_window_months — глобальные значения по
+      умолчанию для расчётного метода; используются участком, только если
+      на нём самом это поле не задано (см. norm_kw_of()/avg_window_months_of()).
+      Меняются здесь — сразу применяются ко всем участкам без своего
+      значения (живое наследование, не разовая подстановка)."""
+    return _read_json(AUTO_SETTINGS_FILE, {
+        "enabled": False, "months": DEFAULT_AUTO_SWITCH_MONTHS,
+        "default_norm_kw": None, "default_avg_window_months": None,
+    })
+
+
+def save_auto_settings(data: dict) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(AUTO_SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -342,7 +371,125 @@ def all_charges(plot: str, meters: dict, rates: list, replacements: dict,
     return out
 
 
-# ── расчётный метод (норматив) ────────────────────────────────────────
+# ── расчётный метод (норматив / среднее по своей истории) ─────────────
+# norm         — норматив мощности (кВт) × 24 ч × дни × тариф (как раньше)
+# own_average  — среднемесячное потребление ЭТОГО участка за предыдущие
+#                месяцы (по факту снятых показаний до начала периода) ×
+#                дни/тариф. Приоритетный метод по устойчивости в суде —
+#                прямая аналогия с признанной практикой (п. 59-60 Правил
+#                № 354): использует реальную историю участка, а не
+#                усреднённый норматив.
+CALC_METHOD_NORM = "norm"
+CALC_METHOD_OWN_AVERAGE = "own_average"
+CALC_METHODS = (CALC_METHOD_NORM, CALC_METHOD_OWN_AVERAGE)
+CALC_METHOD_LABELS = {
+    CALC_METHOD_NORM: "По нормативу мощности (кВт)",
+    CALC_METHOD_OWN_AVERAGE: "Среднее потребление участка (по своей истории)",
+}
+
+OWN_AVERAGE_WINDOW_MONTHS = 12
+
+
+def calc_method_of(plot: str, plots: Optional[list] = None) -> str:
+    """Способ расчётного метода участка. Неизвестное/пустое → norm (совместимость)."""
+    cm = plot_record(plot, plots).get("calc_method") or CALC_METHOD_NORM
+    return cm if cm in CALC_METHODS else CALC_METHOD_NORM
+
+
+def avg_window_months_of(plot: str, plots: Optional[list] = None,
+                         auto_settings: Optional[dict] = None) -> int:
+    """Окно усреднения (мес.) для метода own_average — приоритет:
+    значение на самом участке (`avg_window_months`) → глобальное значение
+    по умолчанию (`auto_settings['default_avg_window_months']`, настраивается
+    в диалоге «Автопереход») → 12 (документ допускает 6-12 мес., это верхняя
+    граница диапазона — абсолютный запасной вариант, если и глобальное не
+    задано)."""
+    raw = plot_record(plot, plots).get("avg_window_months")
+    try:
+        n = int(raw)
+        if n > 0:
+            return n
+    except (TypeError, ValueError):
+        pass
+    if auto_settings:
+        raw_g = auto_settings.get("default_avg_window_months")
+        try:
+            ng = int(raw_g)
+            if ng > 0:
+                return ng
+        except (TypeError, ValueError):
+            pass
+    return OWN_AVERAGE_WINDOW_MONTHS
+
+
+def norm_kw_of(plot: str, plots: Optional[list] = None,
+              auto_settings: Optional[dict] = None) -> Optional[float]:
+    """Норматив мощности (кВт) — приоритет: значение на самом участке
+    (`norm_kw`) → глобальное значение по умолчанию
+    (`auto_settings['default_norm_kw']`). None — если не задано нигде
+    (оценить/начислить по нормативу нечем)."""
+    local = _to_float(plot_record(plot, plots).get("norm_kw"))
+    if local is not None:
+        return local
+    if auto_settings:
+        return _to_float(auto_settings.get("default_norm_kw"))
+    return None
+
+
+def own_average_kwh(plot: str, meters: dict, replacements: dict, before: date,
+                    window_months: int = OWN_AVERAGE_WINDOW_MONTHS) -> Optional[float]:
+    """Среднемесячный расход участка (кВт·ч) по факту снятых показаний ДО даты
+    `before`, за последние `window_months` месяцев с известным расходом (если
+    истории меньше — за фактически доступный период). None, если у участка нет
+    ни одной пары показаний до этой даты (расход посчитать не из чего)."""
+    readings = plot_readings(plot, meters)
+    values: list[tuple[date, float]] = []
+    for i in range(1, len(readings)):
+        y, m, _ = readings[i]
+        rd = reading_date(y, m)
+        if rd >= before:
+            continue
+        kwh = consumption_kwh(plot, y, m, meters, replacements)
+        if kwh is not None and kwh >= 0:
+            values.append((rd, kwh))
+    if not values:
+        return None
+    values.sort(key=lambda t: t[0])
+    window = values[-window_months:]
+    return sum(kwh for _, kwh in window) / len(window)
+
+
+def own_average_charges(plot: str, avg_kwh_per_month: Optional[float], start: Optional[date],
+                        rates: list, up_to: Optional[date] = None) -> list[dict]:
+    """Помесячные начисления методом «среднее по своей истории».
+
+    amount = avg_kwh_per_month × (дни_в_периоде / дней_в_месяце) × тариф.
+    Формат строк совместим с all_charges/calculated_charges (+ флаги
+    calculated и calc_method, + поле days)."""
+    out: list[dict] = []
+    if avg_kwh_per_month is None or start is None:
+        return out
+    up_to = up_to or date.today()
+    if up_to < start:
+        return out
+
+    y, m = start.year, start.month
+    while (y, m) <= (up_to.year, up_to.month):
+        days = _days_in_month_within(y, m, start, up_to)
+        last_day = calendar.monthrange(y, m)[1]
+        rd = reading_date(y, m)
+        rate = rate_at(rd, rates)
+        kwh = avg_kwh_per_month * days / last_day
+        amount = kwh * rate if rate is not None else None
+        out.append({
+            "year": y, "month": m, "prev_value": None, "value": None,
+            "kwh": kwh, "rate": rate, "amount": amount,
+            "calculated": True, "days": days,
+            "calc_method": CALC_METHOD_OWN_AVERAGE,
+        })
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
 
 def _days_in_month_within(year: int, month: int,
                           start: date, end: date) -> int:
@@ -391,7 +538,8 @@ def calculated_charges(plot: str, norm_kw: Optional[float], start: Optional[date
 
 def charges_for_plot(plot: str, meters: dict, rates: list, replacements: dict,
                      up_to: Optional[date] = None,
-                     plots: Optional[list] = None) -> list[dict]:
+                     plots: Optional[list] = None,
+                     auto_settings: Optional[dict] = None) -> list[dict]:
     """Начисления участка с учётом типа расчёта и истории его смены.
 
     Тип 1 (meter)      — по показаниям прибора учёта.
@@ -399,11 +547,17 @@ def charges_for_plot(plot: str, meters: dict, rates: list, replacements: dict,
     Тип 3 (direct)     — пусто (через СНТ не начисляется).
     Каждый сегмент истории считается своим методом, что корректно
     обрабатывает смену типа в середине истории.
+
+    Если передан `auto_settings` (см. load_auto_settings()) и он включён —
+    к открытому «хвосту» участка типа «Счётчик» (после последнего показания)
+    добавляется автооценка (см. auto_estimate_charges()), помеченная флагом
+    "auto_estimate": True.
     """
     up_to = up_to or date.today()
     rec = plot_record(plot, plots)
-    norm = _to_float(rec.get("norm_kw"))
+    norm = norm_kw_of(plot, plots, auto_settings)
     norm_start = _parse_iso(rec.get("norm_start_date", ""))
+    calc_method = calc_method_of(plot, plots)
 
     out: list[dict] = []
     for seg_from, seg_to, bt in billing_segments(plot, plots):
@@ -416,13 +570,28 @@ def charges_for_plot(plot: str, meters: dict, rates: list, replacements: dict,
             c_start = norm_start or seg_from
             if seg_from is not None and (c_start is None or c_start < seg_from):
                 c_start = seg_from
-            out += calculated_charges(plot, norm, c_start, rates, up_to=seg_end)
+            if calc_method == CALC_METHOD_OWN_AVERAGE:
+                window = avg_window_months_of(plot, plots, auto_settings)
+                avg = own_average_kwh(plot, meters, replacements,
+                                      before=c_start or date.today(),
+                                      window_months=window)
+                out += own_average_charges(plot, avg, c_start, rates, up_to=seg_end)
+            else:
+                out += calculated_charges(plot, norm, c_start, rates, up_to=seg_end)
         else:  # meter
             for c in all_charges(plot, meters, rates, replacements, up_to=seg_end):
                 rd = reading_date(c["year"], c["month"])
                 if seg_from is not None and rd < seg_from:
                     continue
                 out.append(c)
+
+    if auto_settings:
+        known = {(c["year"], c["month"]) for c in out}
+        for c in auto_estimate_charges(plot, meters, rates, replacements,
+                                       up_to, auto_settings, plots=plots):
+            if (c["year"], c["month"]) not in known:
+                out.append(c)
+
     out.sort(key=lambda c: (c["year"], c["month"]))
     return out
 
@@ -433,6 +602,109 @@ def waiting_for_readings(plot: str, meters: dict,
     if billing_type_of(plot, plots) != BILLING_METER:
         return False
     return not plot_readings(plot, meters)
+
+
+def months_without_reading(plot: str, meters: dict, as_of: date,
+                           plots: Optional[list] = None) -> Optional[int]:
+    """Сколько месяцев подряд участок типа «Счётчик» не передаёт показания
+    (см. Ситуация 1/2 в порядке действий СНТ по электроэнергии — после
+    3 месяцев рекомендуется переходить на расчётный метод).
+
+    Отсчёт — от последнего переданного показания до `as_of`. Если показаний
+    не было вообще — от даты ввода счётчика в эксплуатацию (`meter_commission_date`),
+    если она указана. None — если тип расчёта не «Счётчик», либо начинать
+    отсчёт не от чего (нет ни показаний, ни даты ввода в эксплуатацию)."""
+    if billing_type_of(plot, plots) != BILLING_METER:
+        return None
+    readings = plot_readings(plot, meters)
+    if readings:
+        ly, lm, _ = readings[-1]
+        base = reading_date(ly, lm)
+    else:
+        base = _parse_iso(plot_record(plot, plots).get("meter_commission_date", ""))
+        if base is None:
+            return None
+    if as_of < base:
+        return 0
+    return (as_of.year - base.year) * 12 + (as_of.month - base.month)
+
+
+def auto_estimate_charges(plot: str, meters: dict, rates: list, replacements: dict,
+                          as_of: date, auto_settings: Optional[dict],
+                          plots: Optional[list] = None) -> list[dict]:
+    """Автоматическая оценка начисления для ОТКРЫТОГО «хвоста» участка типа
+    «Счётчик» — периода после последнего показания (или после ввода счётчика
+    в эксплуатацию, если показаний не было вовсе), если он не передаётся уже
+    `auto_settings['months']` месяцев и более (см. Ситуация 1/2 порядка
+    действий СНТ по электроэнергии).
+
+    Отдельного «отката» не требуется: как только придёт новое показание,
+    закрывающее разрыв, эти месяцы естественным образом попадут в обычный
+    расчёт по счётчику (см. all_charges) при следующем вызове, а данная
+    функция для них больше ничего не сгенерирует — просто потому что разрыв
+    больше не «открыт». Ничего не пишется на диск, это чисто расчётная
+    надстройка над charges_for_plot().
+
+    Метод оценки берётся из настроек САМОГО участка (`calc_method`/`norm_kw`/
+    `avg_window_months` — те же поля, что и у ручного расчётного метода, если
+    администратор когда-либо явно их выбирал через диалог «Тип расчёта»).
+    Если участок вообще не настраивался (поля отсутствуют — типичный случай
+    для нетронутого участка типа «Счётчик») — по умолчанию пробуем среднее по
+    своей истории: оно не требует ничего вводить руками и использует уже
+    имеющиеся показания. Норматив мощности как дефолт тут НЕ используется
+    (в отличие от calc_method_of(), где дефолт — «norm», в паре с ручным
+    диалогом, где выбор всегда явный) — иначе оценка на нетронутом участке
+    молча возвращала бы [] из-за отсутствующего norm_kw. Если своей истории
+    категорически нет (ни одного показания вообще) — используем норматив
+    мощности (если задан). Если нет ни истории, ни норматива —
+    оценить нечем, возвращается []."""
+    if not auto_settings or not auto_settings.get("enabled"):
+        return []
+    if billing_type_of(plot, plots) != BILLING_METER:
+        return []
+    threshold = auto_settings.get("months") or DEFAULT_AUTO_SWITCH_MONTHS
+    mwr = months_without_reading(plot, meters, as_of, plots=plots)
+    if mwr is None or mwr < threshold:
+        return []
+
+    readings = plot_readings(plot, meters)
+    if readings:
+        ly, lm, _ = readings[-1]
+        start = date(ly + 1, 1, 1) if lm == 12 else date(ly, lm + 1, 1)
+    else:
+        base = _parse_iso(plot_record(plot, plots).get("meter_commission_date", ""))
+        if base is None:
+            return []
+        start = date(base.year, base.month, 1)
+    if start > as_of:
+        return []
+
+    rec = plot_record(plot, plots)
+    raw_method = rec.get("calc_method")
+    if raw_method in CALC_METHODS:
+        # Способ расчёта для этого участка когда-то был явно выбран
+        # (в диалоге «Тип расчёта») — уважаем этот выбор.
+        method = raw_method
+    else:
+        # Никогда не настраивалось: пробуем среднее по своей истории первым —
+        # это ничего не требует руками ввести, в отличие от норматива, и
+        # именно история участка — самый устойчивый в суде метод (см.
+        # own_average_kwh). Норматив как способ по умолчанию (calc_method_of())
+        # тут не годится — он почти наверняка не задан на нетронутом участке.
+        method = CALC_METHOD_OWN_AVERAGE
+    charges: list[dict] = []
+    if method == CALC_METHOD_OWN_AVERAGE:
+        window = avg_window_months_of(plot, plots, auto_settings)
+        avg = own_average_kwh(plot, meters, replacements, before=start,
+                              window_months=window)
+        if avg is not None:
+            charges = own_average_charges(plot, avg, start, rates, up_to=as_of)
+    if not charges:
+        norm = norm_kw_of(plot, plots, auto_settings)
+        charges = calculated_charges(plot, norm, start, rates, up_to=as_of)
+    for c in charges:
+        c["auto_estimate"] = True
+    return charges
 
 
 # ── платежи из выписки ────────────────────────────────────────────────
@@ -613,22 +885,27 @@ class Balance:
     debt: float
     last_reading: Optional[tuple[int, int, float]]
     months_without_payment: Optional[int]
+    auto_estimated: bool = False
 
 
 def balance(plot: str, as_of: date, meters: dict, rates: list,
             replacements: dict, baseline: dict, df,
-            plots: Optional[list] = None) -> Balance:
+            plots: Optional[list] = None,
+            auto_settings: Optional[dict] = None) -> Balance:
     base = _to_float(baseline.get("balances", {}).get(str(plot))) or 0.0
     base_start = _parse_iso(baseline.get("start_date", ""))
 
     charged = 0.0
     last: Optional[tuple[int, int, float]] = None
+    auto_estimated = False
     for c in charges_for_plot(plot, meters, rates, replacements,
-                              up_to=as_of, plots=plots):
+                              up_to=as_of, plots=plots, auto_settings=auto_settings):
         if c["amount"] is not None:
             charged += c["amount"]
         if c["value"] is not None:
             last = (c["year"], c["month"], c["value"])
+        if c.get("auto_estimate"):
+            auto_estimated = True
 
     paid = payments_total(plot, df, date_from=base_start, date_to=as_of)
     debt = base + charged - paid
@@ -656,6 +933,7 @@ def balance(plot: str, as_of: date, meters: dict, rates: list,
         debt=debt,
         last_reading=last,
         months_without_payment=months_without_payment,
+        auto_estimated=auto_estimated,
     )
 
 
@@ -693,7 +971,8 @@ def balances_by_owner(plot: str, as_of: date, meters: dict, rates: list,
                       replacements: dict, baseline: dict, df,
                       owners: list,
                       ownership_form: Optional[str] = None,
-                      plots: Optional[list] = None) -> list[EnergyOwnerBalance]:
+                      plots: Optional[list] = None,
+                      auto_settings: Optional[dict] = None) -> list[EnergyOwnerBalance]:
     """Раскладывает долг по электроэнергии по собственникам во времени.
 
     Атрибуция: месячное начисление → собственнику на дату снятия показания
@@ -733,7 +1012,7 @@ def balances_by_owner(plot: str, as_of: date, meters: dict, rates: list,
 
     # Помесячные начисления → собственник на дату показания (конец месяца)
     for c in charges_for_plot(plot, meters, rates, replacements,
-                              up_to=as_of, plots=plots):
+                              up_to=as_of, plots=plots, auto_settings=auto_settings):
         amt = c["amount"]
         if amt is None:
             continue
@@ -978,7 +1257,8 @@ class EnergyGroupBalance:
 def balance_for_active_group(plot: str, as_of: date, meters: dict, rates: list,
                               replacements: dict, baseline: dict, df,
                               since: Optional[date] = None,
-                              plots: Optional[list] = None) -> EnergyGroupBalance:
+                              plots: Optional[list] = None,
+                              auto_settings: Optional[dict] = None) -> EnergyGroupBalance:
     """Баланс активной группы по электроэнергии, ограниченный датой since.
 
     Начальное сальдо (baseline) учитывается только если оно не предшествует
@@ -993,7 +1273,8 @@ def balance_for_active_group(plot: str, as_of: date, meters: dict, rates: list,
 
     charged = sum(
         c["amount"] for c in charges_for_plot(plot, meters, rates, replacements,
-                                               up_to=as_of, plots=plots)
+                                               up_to=as_of, plots=plots,
+                                               auto_settings=auto_settings)
         if c["amount"] is not None
         and (since is None or reading_date(c["year"], c["month"]) >= since)
     )

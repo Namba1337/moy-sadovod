@@ -5,9 +5,9 @@ from datetime import date
 from PyQt6.QtCore import Qt, QDate, QModelIndex
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFileDialog, QFrame,
-    QHBoxLayout, QHeaderView, QLabel, QPushButton, QTreeView,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog,
+    QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QPushButton, QSpinBox, QTreeView, QVBoxLayout, QWidget,
 )
 
 from core import energy
@@ -30,6 +30,7 @@ class _EnergyModel(_FlatTableModel):
 
     COLUMNS = [
         "Участок", "Владелец", "Последнее показание", "Дата показ.",
+        "Без показ., мес.",
         "Начислено", "Оплачено", "Стартовое", "Долг / Аванс",
         "Без оплаты, мес.", "Тип расчёта",
     ]
@@ -118,6 +119,148 @@ class _NormsDialog(_FramelessDialog):
         """)
 
 
+class _EnergySettingsDialog(_FramelessDialog):
+    """Общие настройки электроэнергии на всё СНТ (решение общего собрания,
+    не за отдельный участок): автопереход при отсутствии показаний +
+    глобальные значения по умолчанию для расчётного метода (норматив,
+    окно усреднения). Участок использует своё собственное значение, если
+    оно задано в его карточке («⚙ Тип расчёта»); иначе — глобальное отсюда,
+    причём живьём: смена значения здесь сразу отражается на всех участках
+    без собственного override (см. energy.norm_kw_of()/avg_window_months_of())."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки электроэнергии")
+        self.setMinimumWidth(460)
+        self.setModal(True)
+        settings = energy.load_auto_settings()
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 20, 20, 18)
+        lay.setSpacing(14)
+
+        title = QLabel("Настройки электроэнергии")
+        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
+        lay.addWidget(title)
+
+        # ── Автопереход ──────────────────────────────────────────────
+        sect1 = QLabel("Автопереход при отсутствии показаний")
+        sect1.setStyleSheet("font-size:12px;font-weight:600;color:#07414F;")
+        lay.addWidget(sect1)
+
+        info = QLabel(
+            "Если участок типа «Счётчик» не передаёт показания N месяцев "
+            "подряд — начисление за эти месяцы автоматически оценивается. "
+            "Тип расчёта на самом участке при этом НЕ меняется: как только "
+            "придёт реальное показание, закрывающее разрыв, начисление за "
+            "пропущенные месяцы автоматически пересчитается по факту."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#6B7280;font-size:12px;")
+        lay.addWidget(info)
+
+        self.chk_enabled = QCheckBox("Включить автопереход")
+        self.chk_enabled.setChecked(bool(settings.get("enabled")))
+        lay.addWidget(self.chk_enabled)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Порог отсутствия показаний, мес.:"))
+        self.spin_months = QSpinBox()
+        self.spin_months.setRange(1, 24)
+        self.spin_months.setValue(
+            int(settings.get("months") or energy.DEFAULT_AUTO_SWITCH_MONTHS))
+        row.addWidget(self.spin_months)
+        row.addStretch()
+        lay.addLayout(row)
+
+        # ── Глобальные значения по умолчанию ────────────────────────
+        sect2 = QLabel("Значения по умолчанию для расчётного метода")
+        sect2.setStyleSheet("font-size:12px;font-weight:600;color:#07414F;margin-top:6px;")
+        lay.addWidget(sect2)
+
+        info2 = QLabel(
+            "Используются, только если на конкретном участке (кнопка "
+            "«⚙ Тип расчёта») своё значение не задано — например, "
+            "региональный норматив на освещение можно указать один раз "
+            "здесь, а не на каждом участке."
+        )
+        info2.setWordWrap(True)
+        info2.setStyleSheet("color:#6B7280;font-size:12px;")
+        lay.addWidget(info2)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Норматив мощности по умолчанию, кВт:"))
+        self.inp_default_norm = QLineEdit()
+        self.inp_default_norm.setPlaceholderText("не задано")
+        default_norm = settings.get("default_norm_kw")
+        if default_norm not in (None, ""):
+            self.inp_default_norm.setText(f"{float(default_norm):g}")
+        self.inp_default_norm.setFixedWidth(120)
+        row2.addWidget(self.inp_default_norm)
+        row2.addStretch()
+        lay.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Окно усреднения по умолчанию, мес.:"))
+        self.spin_default_window = QSpinBox()
+        self.spin_default_window.setRange(1, 24)
+        default_window = settings.get("default_avg_window_months")
+        self.spin_default_window.setValue(
+            int(default_window) if default_window else energy.OWN_AVERAGE_WINDOW_MONTHS)
+        row3.addWidget(self.spin_default_window)
+        row3.addStretch()
+        lay.addLayout(row3)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+        self.setStyleSheet(self._frame_qss() + """
+            QLabel { background: transparent; color: #374151; font-size: 13px; }
+            QCheckBox { color: #374151; background: transparent; font-size: 13px; }
+            QLineEdit, QSpinBox {
+                background: #F8F9FA; border: 1px solid #D1D5DB; border-radius: 5px;
+                color: #374151; padding: 6px 8px; font-size: 13px;
+            }
+            QLineEdit:focus, QSpinBox:focus { border: 1px solid #07414F; }
+            QDialogButtonBox QPushButton {
+                background: #07414F; color: white; border: none;
+                border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
+            }
+            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
+            QDialogButtonBox QPushButton[text='Отмена'] { background: #E5E7EB; color: #6B7280; }
+        """)
+
+    def _on_accept(self):
+        raw_norm = self.inp_default_norm.text().strip().replace(",", ".")
+        default_norm_kw = None
+        if raw_norm:
+            try:
+                nv = float(raw_norm)
+            except ValueError:
+                _AlertDialog.show_alert(self, "Настройки электроэнергии",
+                                        "Норматив по умолчанию должен быть числом.")
+                return
+            if nv <= 0:
+                _AlertDialog.show_alert(self, "Настройки электроэнергии",
+                                        "Норматив по умолчанию должен быть положительным.")
+                return
+            default_norm_kw = nv
+
+        energy.save_auto_settings({
+            "enabled": self.chk_enabled.isChecked(),
+            "months": self.spin_months.value(),
+            "default_norm_kw": default_norm_kw,
+            "default_avg_window_months": self.spin_default_window.value(),
+        })
+        self.accept()
+
+
 class EnergyDebtWidget(QWidget):
     """Вкладка контроля долгов по электроэнергии."""
 
@@ -152,6 +295,19 @@ class EnergyDebtWidget(QWidget):
         self.chk_active_only.stateChanged.connect(self._rebuild)
         top.addWidget(self.chk_active_only)
 
+        self.chk_stale_readings = QCheckBox("Без показаний ≥ 3 мес.")
+        self.chk_stale_readings.setToolTip(
+            "Участки со счётчиком, которые не передают показания 3 месяца "
+            "подряд и дольше — по порядку действий СНТ таким пора переходить "
+            "на расчётный метод (кнопка «⚙ Тип расчёта» на карточке участка)."
+        )
+        self.chk_stale_readings.setStyleSheet(
+            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
+            "QCheckBox::indicator{width:15px;height:15px;}"
+        )
+        self.chk_stale_readings.stateChanged.connect(self._rebuild)
+        top.addWidget(self.chk_stale_readings)
+
         top.addStretch()
 
         top.addWidget(QLabel("на дату:", objectName="filterLabel"))
@@ -167,10 +323,6 @@ class EnergyDebtWidget(QWidget):
         self.cb_only_debt.currentIndexChanged.connect(self._rebuild)
         top.addWidget(self.cb_only_debt)
 
-        btn = QPushButton("🔄  Пересчитать", objectName="btnPrimary")
-        btn.clicked.connect(self._rebuild)
-        top.addWidget(btn)
-
         self.btn_mass_pdf = QPushButton("📄  Квитанции должникам", objectName="btnSecondary")
         self.btn_mass_pdf.clicked.connect(self._export_debtor_receipts)
         top.addWidget(self.btn_mass_pdf)
@@ -178,6 +330,14 @@ class EnergyDebtWidget(QWidget):
         btn_rates = QPushButton("📐  Нормативы", objectName="btnSecondary")
         btn_rates.clicked.connect(self._open_rates_dialog)
         top.addWidget(btn_rates)
+
+        btn_settings = QPushButton("⚙  Настройки", objectName="btnSecondary")
+        btn_settings.setToolTip(
+            "Автопереход при отсутствии показаний + глобальные значения "
+            "по умолчанию (норматив, окно усреднения) для расчётного метода."
+        )
+        btn_settings.clicked.connect(self._open_energy_settings_dialog)
+        top.addWidget(btn_settings)
 
         btn_excel = QPushButton("Экспорт в Excel", objectName="btnSecondary")
         btn_excel.clicked.connect(self._export_excel)
@@ -310,6 +470,11 @@ class EnergyDebtWidget(QWidget):
         self.rates.setParent(self)  # type: ignore[arg-type]
         self._rebuild()
 
+    def _open_energy_settings_dialog(self):
+        dlg = _EnergySettingsDialog(self)
+        if _exec_dialog(dlg, self) == QDialog.DialogCode.Accepted:
+            self._rebuild()
+
     def refresh(self, df):
         self._df = df
         self._rebuild()
@@ -343,6 +508,17 @@ class EnergyDebtWidget(QWidget):
         plot_recs = energy.plots_by_num()
         plots = self._plot_list()
         active_only = self.chk_active_only.isChecked()
+        auto_settings = energy.load_auto_settings()
+        stale_threshold = auto_settings.get("months") or energy.DEFAULT_AUTO_SWITCH_MONTHS
+        self.chk_stale_readings.setText(f"Без показаний ≥ {stale_threshold} мес.")
+        self.chk_stale_readings.setToolTip(
+            f"Участки со счётчиком, которые не передают показания "
+            f"{stale_threshold} мес. подряд и дольше. "
+            + ("Начисление для них уже ведётся автоматически по среднему "
+               "потреблению (автопереход включён)." if auto_settings.get("enabled")
+               else "По порядку действий СНТ таким пора переходить на "
+                    "расчётный метод (кнопка «⚙ Тип расчёта» на карточке участка).")
+        )
 
         total_debt = 0.0
         total_charged = 0.0
@@ -353,16 +529,23 @@ class EnergyDebtWidget(QWidget):
                        energy.BILLING_DIRECT: 0}
         type_charged = {energy.BILLING_METER: 0.0, energy.BILLING_CALCULATED: 0.0}
         direct_debt_total = 0.0
+        plots_list = list(plot_recs.values())
+        stale_readings_count = 0
+        auto_estimated_count = 0
 
         rows: list[dict] = []
         for plot in plots:
             bt = energy.billing_type_of(plot)
             type_counts[bt] = type_counts.get(bt, 0) + 1
-            bal = energy.balance(plot, as_of, meters, rates, repls, baseline, self._df)
+            bal = energy.balance(plot, as_of, meters, rates, repls, baseline, self._df,
+                                 auto_settings=auto_settings)
+            if bal.auto_estimated:
+                auto_estimated_count += 1
             if active_only:
                 since = own.group_since(own.active_group(plot_recs.get(plot, {})) or {})
                 gb = energy.balance_for_active_group(
-                    plot, as_of, meters, rates, repls, baseline, self._df, since=since)
+                    plot, as_of, meters, rates, repls, baseline, self._df, since=since,
+                    auto_settings=auto_settings)
                 charged, paid, base_amt, debt = gb.charged, gb.paid, gb.baseline, gb.debt
             else:
                 charged, paid, base_amt, debt = bal.charged, bal.paid, bal.baseline, bal.debt
@@ -400,6 +583,9 @@ class EnergyDebtWidget(QWidget):
                 plot_sort = 0.0
 
             mwp = bal.months_without_payment
+            mwr = energy.months_without_reading(plot, meters, as_of, plots=plots_list)
+            if mwr is not None and mwr >= stale_threshold:
+                stale_readings_count += 1
             row = {
                 "_text_Участок": f"уч. {plot}",
                 "_sort_Участок": plot_sort,
@@ -417,6 +603,10 @@ class EnergyDebtWidget(QWidget):
                 "_text_Дата показ.": last_date_text,
                 "_sort_Дата показ.": date_sort,
                 "_fg_Дата показ.": "#9CA3AF",
+
+                "_text_Без показ., мес.": "—" if mwr is None else str(mwr),
+                "_sort_Без показ., мес.": mwr or 0,
+                "_fg_Без показ., мес.": "#DC2626" if (mwr or 0) >= stale_threshold else "#374151",
 
                 "_text_Начислено": fmt_money(charged),
                 "_sort_Начислено": charged,
@@ -439,10 +629,13 @@ class EnergyDebtWidget(QWidget):
                 "_sort_Без оплаты, мес.": mwp or 0,
                 "_fg_Без оплаты, мес.": "#DC2626" if (mwp or 0) > 3 else "#374151",
 
-                "_text_Тип расчёта": energy.BILLING_LABELS.get(bt, bt),
+                "_text_Тип расчёта": (
+                    f"{energy.BILLING_LABELS.get(bt, bt)} · авто-оценка"
+                    if bal.auto_estimated else energy.BILLING_LABELS.get(bt, bt)),
                 "_sort_Тип расчёта": bt,
                 "_bg_Тип расчёта": "#E8F0F5" if bt == energy.BILLING_DIRECT else None,
-                "_fg_Тип расчёта": "#07414F" if bt == energy.BILLING_DIRECT else "#6B7280",
+                "_fg_Тип расчёта": ("#B45309" if bal.auto_estimated else
+                                    "#07414F" if bt == energy.BILLING_DIRECT else "#6B7280"),
             }
             rows.append(row)
 
@@ -463,10 +656,13 @@ class EnergyDebtWidget(QWidget):
         elif mode == "Только аванс/0":
             rows = [r for r in rows if r.get("_sort_Долг / Аванс", 0.0) <= 0.5]
 
+        if self.chk_stale_readings.isChecked():
+            rows = [r for r in rows if r.get("_sort_Без показ., мес.", 0) >= stale_threshold]
+
         self.model.load(rows)
 
         # Ширины колонок
-        widths = [85, 240, 140, 95, 110, 110, 95, 120, 110, 120]
+        widths = [85, 240, 140, 95, 110, 110, 110, 95, 120, 110, 120]
         for h in (self.hdr_view, self.tree.header()):
             h.setStretchLastSection(False)
             for c, w in enumerate(widths):
@@ -484,6 +680,10 @@ class EnergyDebtWidget(QWidget):
                 f"  ·  прямой договор: {type_counts[energy.BILLING_DIRECT]} "
                 f"(вне баланса СНТ, долг {fmt_money(direct_debt_total)} закрывается вручную)"
             )
+        stale_note = (f"  ·  без показаний ≥{stale_threshold} мес: {stale_readings_count}"
+                      if stale_readings_count else "")
+        auto_note = (f"  ·  автооценка активна: {auto_estimated_count}"
+                     if auto_estimated_count else "")
         self.status_lbl.setText(
             f"Участков: {len(plots)}  ·  "
             f"счётчик: {type_counts.get(energy.BILLING_METER, 0)} "
@@ -491,7 +691,7 @@ class EnergyDebtWidget(QWidget):
             f"расчётный: {type_counts.get(energy.BILLING_CALCULATED, 0)} "
             f"({fmt_money(type_charged.get(energy.BILLING_CALCULATED, 0.0))})"
             f"{direct_note}  ·  должников: {debt_count}  ·  "
-            f"общий долг (тип 1+2): {fmt_money(total_debt)}"
+            f"общий долг (тип 1+2): {fmt_money(total_debt)}{stale_note}{auto_note}"
         )
 
         # Сверка
