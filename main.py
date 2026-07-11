@@ -565,10 +565,10 @@ class MainWindow(QMainWindow):
         self._nav_buttons: list[_NavButton] = []
         for icon, label, idx in [
             (chr(0xe587), "Главная",            0),
-            (chr(0xf8ee), "Список участков",    3),
-            (chr(0xf191), "Детализация",        1),
-            (chr(0xeaec), "Членские взносы",    2),
-            (chr(0xec1c), "Электричество",      4),
+            (chr(0xe58a), "Участки",            3),
+            (chr(0xf1be), "Операции",           1),
+            (chr(0xf3ee), "Взносы",             2),
+            (chr(0xea0b), "Электроэнергия",     4),
         ]:
             btn = _NavButton(icon, label, idx)
             btn.nav_clicked.connect(self._nav_click)

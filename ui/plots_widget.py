@@ -57,6 +57,7 @@ from ui.common import (                                     # noqa: E402
     INPUT_ERROR_SS as _INPUT_ERROR_SS,
     FIELD_LABEL_SS as _FIELD_LABEL_SS,
     CalendarArrowFlip,
+    NoJumpDateEdit,
     style_date_popup,
 )
 from ui.dialogs import (                                    # noqa: E402
@@ -106,24 +107,6 @@ _F_STAR_OUTLINE  = _mat_font(20, fill=0)
 _F_STAR_FILLED   = _mat_font(20, fill=1)
 _F_CHEVRON       = _mat_font(18, fill=0)
 _F_COPY_OUTLINE  = _mat_font(18, fill=0)
-def _make_decorative_star(role_key: str = "contact") -> QLabel:
-    """Некликабельная звезда «избранный» для диалогов создания (_NewGroupDialog,
-    _QuickAddPlotDialog) — тот же визуальный язык (форма/цвета), что и активная
-    звезда в превью контактов группы (см. _refresh_contacts_preview).
-
-    Рисуется через _mat_icon() (растровая иконка с оверсэмплингом), а НЕ через
-    QFont-глиф на QLabel.setText() — текстовый рендер шрифта Material Symbols
-    оказался чувствителен к субпиксельному позиционированию окна и давал чуть
-    разный видимый размер звезды в разных диалогах при полностью идентичном
-    коде; растровая иконка от этого не зависит (как и все остальные иконки в
-    приложении)."""
-    role_bg, _ = _ROLE_COLORS[role_key]
-    star = QLabel()
-    star.setFixedSize(18, 18)
-    star.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    star.setStyleSheet(f"background:{role_bg}; border-radius:9px;")
-    star.setPixmap(_mat_icon(0xE838, 12, fill=1, color="#07414F").pixmap(12, 12))
-    return star
 
 
 _SS_DIRTY_BADGE = (
@@ -385,10 +368,35 @@ class _NewGroupDialog(_ConfirmDialog):
                          cancel_text=cancel_text, danger=False, parent=parent)
 
         date_col = QVBoxLayout()
+        date_col.setContentsMargins(0, 0, 0, 0)
         date_col.setSpacing(2)
         date_col.addWidget(QLabel("Дата начала", styleSheet=_FIELD_LABEL_SS))
-        self.inp_since = QDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
+        # NoJumpDateEdit — та же защита от паразитного «прыжка» даты при
+        # клике рядом со стрелкой, что и у «Дата начала» в карточке участка
+        # (см. ui.common.NoJumpDateEdit). Стиль/размер — как у _INPUT_SS
+        # (компактные поля контакта), а не растянутый на всю ширину диалога
+        # дефолт: иначе стрелка календаря оказывается далеко от текста даты,
+        # в пустом месте, и выглядит как нерабочая.
+        self.inp_since = NoJumpDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
         style_date_popup(self.inp_since)
+        self.inp_since.setFixedWidth(140)
+        # QDateEdit со своим встроенным drop-down у Qt по умолчанию считает
+        # sizeHint на пару px выше, чем у QLineEdit с тем же паддингом —
+        # фиксируем явно, чтобы оба поля были одной высоты (см. inp_name).
+        self.inp_since.setFixedHeight(29)
+        _arr_dn = icon_png_path("expand_more", 12, color="#6B7280")
+        _arr_up = icon_png_path("expand_less", 12, color="#6B7280")
+        self.inp_since.setStyleSheet(
+            "QDateEdit{background:#F8F9FA;border:1px solid #D5DCE4;"
+            "border-radius:4px;padding:4px 8px;font-size:12px;color:#1F2937;}"
+            "QDateEdit:focus{border:1px solid #07414F;}"
+            "QDateEdit::drop-down{subcontrol-origin:padding;subcontrol-position:right;"
+            "width:18px;border:none;border-left:1px solid #D5DCE4;background:transparent;"
+            "border-top-right-radius:4px;border-bottom-right-radius:4px;}"
+            "QDateEdit::drop-down:hover{background:#F3F4F6;}"
+            f"QDateEdit::down-arrow{{image:url({_arr_dn});width:12px;height:12px;}}"
+            f'QDateEdit[calOpen="true"]::down-arrow{{image:url({_arr_up});}}')
+        CalendarArrowFlip(self.inp_since)
         self.inp_since.setDate(QDate.currentDate())
         if min_since is not None:
             self.inp_since.setMinimumDate(
@@ -398,13 +406,14 @@ class _NewGroupDialog(_ConfirmDialog):
         date_box.setLayout(date_col)
         self._insert_widget(date_box)
 
-        row = QWidget()
-        row_lay = QHBoxLayout(row)
-        row_lay.setContentsMargins(0, 0, 0, 0)
-        row_lay.setSpacing(8)
-
-        row_lay.addWidget(_make_decorative_star())
-
+        # ФИО — своя колонка с подписью (как «Дата начала» выше и как в
+        # _QuickAddPlotDialog) и БЕЗ декоративной звезды: здесь она не несёт
+        # смысла (контакт станет избранным автоматически, единственный в
+        # новой группе), только занимала место.
+        name_col = QVBoxLayout()
+        name_col.setContentsMargins(0, 0, 0, 0)
+        name_col.setSpacing(2)
+        name_col.addWidget(QLabel("ФИО", styleSheet=_FIELD_LABEL_SS))
         self.inp_name = QLineEdit()
         self.inp_name.setPlaceholderText("Фамилия Имя Отчество")
         self.inp_name.setStyleSheet(_INPUT_SS)
@@ -412,9 +421,10 @@ class _NewGroupDialog(_ConfirmDialog):
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self.inp_name.setCompleter(completer)
-        row_lay.addWidget(self.inp_name, stretch=1)
-
-        self._insert_widget(row)
+        name_col.addWidget(self.inp_name)
+        name_box = QWidget()
+        name_box.setLayout(name_col)
+        self._insert_widget(name_box)
         self._finalize()
 
         # «Создать» активна только при непустом ФИО.
@@ -501,14 +511,11 @@ class _QuickAddPlotDialog(_ConfirmDialog):
         area_col.addWidget(self.inp_area)
         f_lay.addLayout(area_col)
 
-        # -- ФИО собственника --
+        # -- ФИО собственника (без декоративной звезды — как в _NewGroupDialog:
+        # единственный контакт всё равно станет избранным автоматически) --
         name_col = QVBoxLayout()
         name_col.setSpacing(2)
         name_col.addWidget(QLabel("ФИО собственника", styleSheet=_FIELD_LABEL_SS))
-        name_row = QHBoxLayout()
-        name_row.setContentsMargins(0, 0, 0, 0)
-        name_row.setSpacing(8)
-        name_row.addWidget(_make_decorative_star())
         self.inp_name = QLineEdit()
         self.inp_name.setPlaceholderText("Фамилия Имя Отчество")
         self.inp_name.setStyleSheet(_INPUT_SS)
@@ -516,8 +523,7 @@ class _QuickAddPlotDialog(_ConfirmDialog):
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self.inp_name.setCompleter(completer)
-        name_row.addWidget(self.inp_name, stretch=1)
-        name_col.addLayout(name_row)
+        name_col.addWidget(self.inp_name)
         f_lay.addLayout(name_col)
 
         self._insert_widget(fields)
@@ -572,6 +578,68 @@ class _QuickAddPlotDialog(_ConfirmDialog):
                 overlay.deleteLater()
 
 
+class _ExportFormatDialog(_BasePromptDialog):
+    """«Сохранить как файл» → выбор формата: пилюли Excel/Word/PDF заменяют
+    привычную пару Отмена/Подтвердить — клик по пилюле СРАЗУ выбирает
+    формат и закрывает диалог (см. _pick), отдельная кнопка подтверждения
+    не нужна. «Отмена» — единственная кнопка в футере."""
+
+    _FORMATS = [
+        ("excel", "Excel", "excel", "#0F7B3F"),
+        ("word",  "Word",  "description", "#1D4ED8"),
+        ("pdf",   "PDF",   "pdf", "#B91C1C"),
+    ]
+
+    def __init__(self, count: int, parent=None):
+        noun = "участок" if count % 10 == 1 and count % 100 != 11 else (
+            "участка" if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14)
+            else "участков")
+        super().__init__(
+            "Сохранить как файл",
+            f"Будет сохранено: {count} {noun}. Выберите формат файла.",
+            parent=parent)
+        self.result_format: str | None = None
+
+        pills_row = QWidget()
+        pl = QHBoxLayout(pills_row)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(8)
+        for key, label, icon_name, color in self._FORMATS:
+            btn = QPushButton(f"  {label}")
+            btn.setIcon(_get_icon_impl(icon_name, 16, color=color))
+            btn.setIconSize(QSize(16, 16))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton{background:#FFFFFF;border:1px solid #D5DCE4;"
+                f"border-radius:16px;padding:7px 16px;font-size:13px;"
+                f"font-weight:600;color:{color};}}"
+                "QPushButton:hover{background:#F3F4F6;}"
+                "QPushButton:pressed{background:#E5E7EB;}")
+            btn.clicked.connect(lambda _checked, k=key: self._pick(k))
+            pl.addWidget(btn)
+        self._insert_widget(pills_row)
+
+        self._add_button("Отмена", SecondaryButton, self.reject)
+        self._finalize()
+
+    def _pick(self, fmt: str):
+        self.result_format = fmt
+        self.accept()
+
+    @staticmethod
+    def ask(parent, count: int) -> str | None:
+        """Возвращает 'excel' | 'word' | 'pdf', либо None при отмене."""
+        dlg = _ExportFormatDialog(count, parent=parent)
+        overlay = _BasePromptDialog._show_centered(dlg, parent)
+        try:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return None
+            return dlg.result_format
+        finally:
+            if overlay is not None:
+                overlay.hide()
+                overlay.deleteLater()
+
 
 # ============================================================================ #
 #  Чистый список участов (вариант А): модель + делегат строки                  #
@@ -616,6 +684,81 @@ def _plot_search_names(plot: dict) -> list[str]:
             if nm:
                 out.append(nm)
     return out
+
+
+def _rows_to_html(headers: list[str], rows: list[list], title: str) -> str:
+    """HTML-таблица для «Сохранить как файл...» → PDF (см.
+    core.receipt.render_pdf — тот же путь HTML→QTextDocument→QPrinter, что
+    и у квитанций)."""
+    def esc(s) -> str:
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+                       .replace(">", "&gt;"))
+    thead = "".join(
+        f"<th style='border:1px solid #999;padding:4px 8px;background:#EEE;"
+        f"text-align:left;'>{esc(h)}</th>" for h in headers)
+    trs = "".join(
+        "<tr>" + "".join(
+            f"<td style='border:1px solid #999;padding:4px 8px;'>{esc(c)}</td>"
+            for c in row) + "</tr>"
+        for row in rows)
+    return (
+        "<html><body style='font-family:Arial;font-size:10pt;'>"
+        f"<h2>{esc(title)}</h2>"
+        "<table style='border-collapse:collapse;width:100%;'>"
+        f"<tr>{thead}</tr>{trs}</table></body></html>")
+
+
+def _rtf_escape(text: str) -> str:
+    """Экранирует строку для вставки в RTF: спецсимволы разметки и
+    не-ASCII (кириллица) — юникод-эскейпом \\uNNNN? (подстановочный '?'
+    для читалок без юникода, RTF-спека требует его сразу после эскейпа)."""
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if ch in ("\\", "{", "}"):
+            out.append("\\" + ch)
+        elif code < 128:
+            out.append(ch)
+        else:
+            signed = code if code < 32768 else code - 65536
+            out.append(f"\\u{signed}?")
+    return "".join(out)
+
+
+def _rows_to_rtf(headers: list[str], rows: list[list], title: str) -> str:
+    """Простая RTF-таблица без сторонних библиотек (см. _export_rows_word) —
+    открывается Word'ом как обычный документ."""
+    col_w = 2400  # твипсов на колонку — ровные столбцы без подгонки под текст
+    n = len(headers)
+    cellx = "".join(f"\\cellx{col_w * (i + 1)}" for i in range(n))
+
+    def row_rtf(cells: list, bold: bool = False) -> str:
+        b, be = ("\\b ", "\\b0 ") if bold else ("", "")
+        cells_rtf = "".join(
+            f"\\intbl {b}{_rtf_escape(str(c))}{be}\\cell " for c in cells)
+        return f"\\trowd\\trgaph70{cellx}{cells_rtf}\\row\n"
+
+    body = row_rtf(headers, bold=True)
+    for row in rows:
+        body += row_rtf(row)
+
+    return (
+        "{\\rtf1\\ansi\\deff0\\adeflang1025"
+        "{\\fonttbl{\\f0\\fswiss\\fcharset204 Arial;}}"
+        f"\\f0\\fs22 {{\\b\\fs28 {_rtf_escape(title)}\\b0\\par}}\\par\n"
+        f"{body}"
+        "}")
+
+
+_INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_filename(name: str) -> str:
+    """Убирает символы, недопустимые в именах файлов Windows, и обрезает
+    висящие точки/пробелы на конце — для приписок «№участка_ФИО_...» при
+    экспорте документов в архив (см. _export_full_base)."""
+    cleaned = _INVALID_FS_CHARS.sub("_", name).strip(" .")
+    return cleaned or "файл"
 
 
 class PlotsListModel(QAbstractListModel):
@@ -1079,11 +1222,12 @@ class PlotsWidget(QWidget):
             return b
 
         # Массовые операции над выбранными участками — в одном ряду с
-        # «Импорт»/«Добавить», слева от них. Активны только при выборе строк
-        # (см. _refresh_toolbar); в disabled-состоянии Qt сам гасит иконку.
-        self._btn_bulk_save = _hdr_icon_btn("Сохранить выбранные", self._on_bulk_save_stub)
-        self._btn_bulk_save.setEnabled(False)
-        list_hdr.addWidget(self._btn_bulk_save)
+        # «Импорт»/«Добавить», слева от них.
+        # «Сохранить как файл...» работает всегда (экспортирует отмеченные
+        # галочками участки, а без отметок — весь текущий видимый список,
+        # см. _export_to_excel); «Удалить выбранные» активна только при
+        # выборе строк (см. _refresh_toolbar) — в disabled-состоянии Qt сам
+        # гасит иконку.
         self._btn_bulk_delete = _hdr_icon_btn("Удалить выбранные", self._bulk_delete)
         self._btn_bulk_delete.setEnabled(False)
         self._btn_bulk_delete.setStyleSheet(
@@ -1091,6 +1235,13 @@ class PlotsWidget(QWidget):
             "QPushButton:hover{background:#FEF2F2;}"
             "QPushButton:disabled{background:transparent;}")
         list_hdr.addWidget(self._btn_bulk_delete)
+        self._btn_bulk_save = _hdr_icon_btn("Сохранить как файл...", self._export_to_excel)
+        list_hdr.addWidget(self._btn_bulk_save)
+        # «Экспорт в Excel» — выгрузка ВСЕЙ базы (номера участков + все
+        # контакты по всем группам, независимо от текущих фильтров списка)
+        # архивом с приложенными документами, см. _export_full_base.
+        self._btn_export_all = _hdr_icon_btn("Экспорт в Excel", self._export_full_base)
+        list_hdr.addWidget(self._btn_export_all)
         self._btn_import = _hdr_icon_btn("Импорт из Excel", self._import_from_excel)
         list_hdr.addWidget(self._btn_import)
         self._btn_add = _hdr_icon_btn("Добавить участок", self._add_plot)
@@ -1133,6 +1284,7 @@ class PlotsWidget(QWidget):
         self._search.setPlaceholderText("Поиск по номеру или ФИО")
         self._search.setClearButtonEnabled(True)
         self._search.setMinimumWidth(220)
+        self._search.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         # Свой стиль вместо нативного: «подбородок» (нижняя линия), на фокусе —
         # бирюзовый вместо системно-синего. Толщина одинаковая, чтобы текст не прыгал.
         self._search.setStyleSheet(
@@ -1356,8 +1508,12 @@ class PlotsWidget(QWidget):
         layout.addLayout(body)
 
     def _open_detail(self, plot):
-        """Открывает деталь участка в правом drawer (вместо модального диалога)."""
+        """Открывает деталь участка в правом drawer (вместо модального диалога).
+
+        Повторный клик по уже открытому участку закрывает панель — как
+        кнопка «Закрыть», а не переоткрывает её заново (см. _reclick ниже)."""
         if self._detail_panel is not None:
+            _reclick = plot is not None and plot is self._editing_plot
             if self._editing_plot is not None:
                 # Редактировали существующий участок — закрываем как при
                 # «Закрыть», а не просто отбрасываем панель. Если пользователь
@@ -1368,6 +1524,8 @@ class PlotsWidget(QWidget):
                     return
             else:
                 self._close_detail()  # черновик нового участка — отбрасываем как есть
+            if _reclick:
+                return
         self._editing_plot = plot  # None — новый участок
         if plot is not None:
             existing = {str(p.get("num", "")) for p in self._plots if p is not plot}
@@ -1403,8 +1561,9 @@ class PlotsWidget(QWidget):
 
     def _refresh_icons(self):
         """Обновить иконки всех кнопок шапки списка одновременно."""
-        self._btn_bulk_save.setIcon(_mat_icon(0xE161, 22, color="#9CA3AF"))    # save
+        self._btn_bulk_save.setIcon(_mat_icon(0xF17F, 22, color="#9CA3AF"))    # file_save
         self._btn_bulk_delete.setIcon(_mat_icon(0xE92B, 22, color="#DC2626"))  # delete
+        self._btn_export_all.setIcon(_mat_icon(0xF3B2, 22, color="#9CA3AF"))   # file_export
         self._btn_import.setIcon(_mat_icon(0xEAF3, 22, color="#9CA3AF"))
         self._refresh_add_icon()
 
@@ -1442,11 +1601,197 @@ class PlotsWidget(QWidget):
         n = len(self.list_model.get_selected_nums())
         self._selected_lbl.setText(f"Выбрано: {n}" if n else "")
         self._btn_bulk_delete.setEnabled(n > 0)
-        self._btn_bulk_save.setEnabled(n > 0)
 
-    def _on_bulk_save_stub(self):
-        """Заглушка — массовое сохранение выбранных участков будет добавлено позже."""
-        pass
+    def _export_to_excel(self):
+        """Точка входа кнопки «Сохранить как файл...».
+
+        Строки: если галочками отмечены конкретные участки — только они,
+        иначе весь текущий список (список уже отфильтрован поиском/вкладкой
+        — см. _rebuild_table). Долг берётся тем же форматтером модели, что
+        и в самом списке, поэтому переплата сворачивается в 0,00, если
+        «Показывать переплату» сейчас выключена — сохраняется ровно то, что
+        видит пользователь. Формат файла (Excel/Word/PDF) спрашивается
+        отдельным диалогом-пилюлями (см. _ExportFormatDialog)."""
+        selected = self.list_model.get_selected_nums()
+        rows_src = ([p for p in self.list_model._rows
+                     if str(p.get("num", "")) in selected]
+                    if selected else list(self.list_model._rows))
+        if not rows_src:
+            _AlertDialog.show_alert(
+                self, "Нечего сохранять", "В списке нет участков для сохранения.")
+            return
+
+        fmt = _ExportFormatDialog.ask(self, len(rows_src))
+        if fmt is None:
+            return
+
+        headers = ["№", "Контакт", "Член. взносы", "Электроэнергия"]
+        rows = []
+        for plot in rows_src:
+            name = _short_name(_plot_primary_name(plot)) or "—"
+            rows.append([
+                plot.get("num", ""),
+                name,
+                self.list_model.vznosy_debt_text(plot),
+                self.list_model.energy_debt_text(plot),
+            ])
+
+        if fmt == "excel":
+            self._export_rows_excel(headers, rows)
+        elif fmt == "word":
+            self._export_rows_word(headers, rows)
+        elif fmt == "pdf":
+            self._export_rows_pdf(headers, rows)
+
+    def _export_rows_excel(self, headers: list, rows: list):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить как файл", "участки.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        if not path.endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, Alignment
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Участки"
+            ws.append(headers)
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center")
+            for row in rows:
+                ws.append(row)
+            wb.save(path)
+            _AlertDialog.show_alert(self, "Сохранено", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            _AlertDialog.show_alert(self, "Ошибка сохранения", str(e))
+
+    def _export_rows_pdf(self, headers: list, rows: list):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить как файл", "участки.pdf", "PDF (*.pdf)")
+        if not path:
+            return
+        if not path.endswith(".pdf"):
+            path += ".pdf"
+        try:
+            from core import receipt
+            html_body = _rows_to_html(headers, rows, "Участки")
+            receipt.render_pdf(html_body, path, landscape=True)
+            _AlertDialog.show_alert(self, "Сохранено", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            _AlertDialog.show_alert(self, "Ошибка сохранения", str(e))
+
+    def _export_rows_word(self, headers: list, rows: list):
+        """Word: без python-docx (не в зависимостях приложения) — пишем
+        .rtf, его штатно открывает и Word, и LibreOffice/WordPad."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить как файл", "участки.rtf", "Документ Word (*.rtf)")
+        if not path:
+            return
+        if not path.endswith(".rtf"):
+            path += ".rtf"
+        try:
+            rtf = _rows_to_rtf(headers, rows, "Участки")
+            with open(path, "w", encoding="ascii", errors="backslashreplace") as f:
+                f.write(rtf)
+            _AlertDialog.show_alert(self, "Сохранено", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            _AlertDialog.show_alert(self, "Ошибка сохранения", str(e))
+
+    _ROLE_LABELS_RU = {"member": "Член", "owner": "Владелец", "contact": "Контакт"}
+    _DOC_LABELS_RU = {"opd_doc": "согласие на ОПД", "egrn_doc": "выписка ЕГРН",
+                      "member_doc": "членский документ"}
+
+    def _export_full_base(self):
+        """«Экспорт в Excel»: вся база независимо от текущих фильтров списка
+        (поиск/вкладка/переплата тут не участвуют — берём self._plots
+        целиком, а не отфильтрованную self.list_model._rows).
+
+        По каждому участку — ВСЕ контакты по ВСЕМ группам (активная и
+        архивные), с пометкой, к какой группе относится контакт. Результат —
+        .zip: xlsx-список + папка «Документы» со всеми приложенными файлами
+        контактов, переименованными в «№участка_ФИО_документ», чтобы их было
+        легко найти вручную. Пути к документам — это исходные пути с диска
+        пользователя (см. _DocFieldWidget — файлы не копируются в хранилище
+        при загрузке), поэтому если файл с тех пор перемещён/удалён, он
+        просто пропускается и упоминается в итоговом сообщении."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт в Excel", "база_снт.zip", "ZIP-архив (*.zip)")
+        if not path:
+            return
+        if not path.endswith(".zip"):
+            path += ".zip"
+
+        headers = ["№ участка", "Группа", "ФИО", "Роль", "Телефон", "Email"]
+        rows = []
+        doc_jobs: list[tuple[str, str]] = []   # (arcname, local_path)
+        missing: list[tuple[str, str, str]] = []  # (num, name, path)
+        used_names: set[str] = set()
+
+        for plot in self._plots:
+            num = str(plot.get("num", ""))
+            for group in ownership.plot_groups(plot):
+                group_label = "Активная" if group.get("until") is None else "Архивная"
+                for owner in ownership.group_owners(group):
+                    if not isinstance(owner, dict):
+                        continue
+                    name = ownership.owner_name(owner)
+                    role_key = ("member" if owner.get("is_member")
+                                else "owner" if owner.get("is_owner") else "contact")
+                    rows.append([
+                        num, group_label, name, self._ROLE_LABELS_RU[role_key],
+                        owner.get("phone", ""), owner.get("email", ""),
+                    ])
+                    for doc_key, doc_label in self._DOC_LABELS_RU.items():
+                        doc_path = owner.get(doc_key, "")
+                        if not doc_path:
+                            continue
+                        if not os.path.exists(doc_path):
+                            missing.append((num, name, doc_path))
+                            continue
+                        ext = os.path.splitext(doc_path)[1]
+                        stem = _sanitize_filename(f"{num}_{name}_{doc_label}")
+                        arcname = f"{stem}{ext}"
+                        n = 2
+                        while arcname in used_names:
+                            arcname = f"{stem} ({n}){ext}"
+                            n += 1
+                        used_names.add(arcname)
+                        doc_jobs.append((f"Документы/{arcname}", doc_path))
+
+        try:
+            import io
+            import zipfile
+            import openpyxl
+            from openpyxl.styles import Font, Alignment
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Участки"
+            ws.append(headers)
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center")
+            for row in rows:
+                ws.append(row)
+            buf = io.BytesIO()
+            wb.save(buf)
+
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("участки.xlsx", buf.getvalue())
+                for arcname, local_path in doc_jobs:
+                    zf.write(local_path, arcname)
+
+            msg = (f"Архив сохранён:\n{path}\n\n"
+                   f"Участков: {len(self._plots)}\n"
+                   f"Контактов: {len(rows)}\n"
+                   f"Документов: {len(doc_jobs)}")
+            if missing:
+                msg += f"\n\nНе найдено на диске (пропущено): {len(missing)}"
+            _AlertDialog.show_alert(self, "Экспорт завершён", msg)
+        except Exception as e:
+            _AlertDialog.show_alert(self, "Ошибка экспорта", str(e))
 
     def _refresh_overpay_icon(self):
         checked = self._chk_overpay.isChecked()
@@ -2493,12 +2838,12 @@ class PlotEditDialog(QWidget):
         if ctx.is_active:
             # Дата начала активной группы — ВСЕГДА редактируемый date-пикер
             # (без отдельного режима «включить правку» — правится напрямую).
-            since_prefix = QLabel("Активна с:")
+            since_prefix = QLabel("Дата начала:")
             since_prefix.setStyleSheet(
                 "font-size:12px; color:#6B7280; background:transparent;")
             hdr.addWidget(since_prefix)
 
-            ctx.since_date_edit = QDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
+            ctx.since_date_edit = NoJumpDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
             style_date_popup(ctx.since_date_edit)
             ctx.since_date_edit.setFixedWidth(110)
             # Стрелка dropdown: QSS-псевдоэлемент ::down-arrow затирает
@@ -3220,7 +3565,6 @@ class PlotEditDialog(QWidget):
                 "QWidget#contactPreviewCard{background:#FFFFFF;border:1px solid #E5E7EB;"
                 "border-radius:8px;}"
                 "QWidget#contactPreviewCard:hover{background:#E8F0F5;border:1px solid #C9D8E2;}")
-            card.setCursor(Qt.CursorShape.PointingHandCursor)
             card_vl = QVBoxLayout(card)
             card_vl.setContentsMargins(8, 4, 8, 4)
             card_vl.setSpacing(0)
@@ -3228,7 +3572,6 @@ class PlotEditDialog(QWidget):
             # ── Заголовок строки ──────────────────────────────────────
             hdr = QWidget(card)
             hdr.setStyleSheet("background:transparent;")
-            hdr.setCursor(Qt.CursorShape.PointingHandCursor)
             rl = QHBoxLayout(hdr)
             rl.setContentsMargins(0, 2, 0, 2)
             rl.setSpacing(6)
@@ -3478,8 +3821,8 @@ class PlotEditDialog(QWidget):
                     inp = QLineEdit(val, parent=det)
                     inp.setPlaceholderText(placeholder)
                     inp.setStyleSheet(_INPUT_SS)
+                    inp.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
                     if key == "phone":
-                        inp.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
                         _setup_phone_input(inp)
                     inp_row = QHBoxLayout()
                     inp_row.setContentsMargins(0, 0, 0, 0)

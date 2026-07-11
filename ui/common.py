@@ -26,8 +26,8 @@ from PyQt6.QtGui import (
     QTextCharFormat,
 )
 from PyQt6.QtWidgets import (
-    QCalendarWidget, QDateEdit, QFrame, QHeaderView, QLabel, QLineEdit,
-    QSpinBox, QToolButton, QWidget,
+    QAbstractSpinBox, QCalendarWidget, QDateEdit, QFrame, QHeaderView, QLabel,
+    QLineEdit, QSpinBox, QToolButton, QWidget,
 )
 
 from ui.theme import C, FS, TREE_SCROLLBAR_W, calendar_qss, tree_qss
@@ -45,6 +45,29 @@ INPUT_ERROR_SS = (
     f"border-radius:4px; padding:4px 8px; font-size:{FS.SMALL}px; color:{C.TEXT};}}"
     f"QLineEdit:focus{{border:1px solid {C.DANGER};}}")
 FIELD_LABEL_SS = f"font-size:10px; color:{C.TEXT_FAINT}; background:transparent;"
+
+
+class NoJumpDateEdit(QDateEdit):
+    """QDateEdit(calendarPopup=True) без паразитного «прыжка» даты и без
+    контекстного меню; ручной ввод (клик по секции, набор цифр, стрелки
+    клавиатуры, колесо) остаётся включённым как обычно.
+
+    Баг: даже когда up/down-кнопки не нарисованы (calendarPopup=True
+    визуально показывает только кнопку календаря), Qt внутри всё равно
+    держит их геометрию для хит-теста. Из-за этого узкая полоса пикселей
+    прямо ПЕРЕД кнопкой календаря (видимо пустая) на самом деле реагирует
+    как невидимая spin-кнопка — обычный клик там молча инкрементит/
+    декрементит текущую секцию на 1 без всякой подсказки, что произошло
+    (наблюдалось на «Дата начала» активной группы участка). ButtonSymbols.
+    NoButtons убирает эту логику целиком; кнопка календаря — отдельный
+    механизм, попап продолжает открываться как раньше."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+
+    def contextMenuEvent(self, event):
+        event.ignore()
 
 
 class CalendarArrowFlip(QObject):

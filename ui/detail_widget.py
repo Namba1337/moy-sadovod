@@ -13,7 +13,7 @@ from PyQt6.QtGui import (
     QPolygon, QRegion,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog,
+    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDateEdit, QDialog,
     QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
     QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
@@ -1688,19 +1688,43 @@ class CategoryEditorPanel(_FramelessDialog):
 class LoadSettingsDialog(_FramelessDialog):
     """Диалог настроек перед загрузкой файла выписки."""
 
-    def _style(self) -> str:
-        return self.base_qss() + f"""
-        QPushButton#fmtActive {{
+    # Пилюли (полностью скруглённые) — тот же визуальный язык, что и выбор
+    # формата в «Сохранить как файл» (ui.plots_widget._ExportFormatDialog):
+    # радиус/паддинг/шрифт совпадают, различие — «выбранное» состояние тут
+    # стойкое (залито брендом), а не мгновенное действие, как там.
+    #
+    # Стиль ставится ПРЯМО на кнопку (setStyleSheet), а не через objectName +
+    # каскад от диалога: у objectName-селекторов (#fmtActive/#fmtInactive)
+    # на этом диалоге почему-то не срабатывал каскад от родителя (кнопки
+    # оставались нестилизованными, как на скриншоте — обе выглядели
+    # одинаково блёкло) — прямая установка стиля надёжна независимо от
+    # причины.
+    _FMT_ACTIVE_QSS = f"""
+        QPushButton {{
             background: {C.BRAND}; color: #FFFFFF; border: none;
-            border-radius: 6px; padding: 8px 20px; font-size: {FS.BODY}px;
+            border-radius: 16px; padding: 7px 16px; font-size: {FS.BODY}px;
             font-weight: 600;
         }}
-        QPushButton#fmtInactive {{
+        QPushButton:hover {{ background: {C.BRAND_HOVER}; }}
+    """
+    # СберБизнес — фирменный зелёный вместо общего бренда приложения,
+    # узнаваемо как «это про Сбер», в отличие от «Мой Садовод».
+    _FMT_ACTIVE_SBER_QSS = f"""
+        QPushButton {{
+            background: #148F2B; color: #FFFFFF; border: none;
+            border-radius: 16px; padding: 7px 16px; font-size: {FS.BODY}px;
+            font-weight: 600;
+        }}
+        QPushButton:hover {{ background: #106F22; }}
+    """
+    _FMT_INACTIVE_QSS = f"""
+        QPushButton {{
             background: {C.BG_SURFACE}; color: {C.TEXT_MUTED};
             border: 1px solid {C.BORDER};
-            border-radius: 6px; padding: 8px 20px; font-size: {FS.BODY}px;
+            border-radius: 16px; padding: 7px 16px; font-size: {FS.BODY}px;
+            font-weight: 600;
         }}
-        QPushButton#fmtInactive:hover {{ background: {C.BG_HOVER}; color: {C.TEXT_BODY}; }}
+        QPushButton:hover {{ background: {C.BG_HOVER}; color: {C.TEXT_BODY}; }}
     """
 
     def __init__(self, parent=None, has_existing_data: bool = False):
@@ -1711,7 +1735,7 @@ class LoadSettingsDialog(_FramelessDialog):
         self._fmt = "sber"
         self._has_existing = has_existing_data
         self._setup_ui()
-        self.setStyleSheet(self._style())
+        self.setStyleSheet(self.base_qss())
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
@@ -1728,20 +1752,34 @@ class LoadSettingsDialog(_FramelessDialog):
 
         fmt_row = QHBoxLayout()
         fmt_row.setSpacing(8)
-        self._btn_sber = QPushButton("СберБизнес (операции)", objectName="fmtActive")
-        self._btn_snt  = QPushButton("Мой Садовод",            objectName="fmtInactive")
+        self._btn_sber = QPushButton("СберБизнес")
+        self._btn_snt  = QPushButton("Мой Садовод")
         self._btn_sber.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_snt .setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_sber.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_snt .setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_sber.clicked.connect(lambda: self._set_fmt("sber"))
         self._btn_snt .clicked.connect(lambda: self._set_fmt("snt"))
         fmt_row.addWidget(self._btn_sber)
         fmt_row.addWidget(self._btn_snt)
         fmt_row.addStretch()
         lay.addLayout(fmt_row)
+        self._btn_sber.setStyleSheet(self._FMT_ACTIVE_SBER_QSS)
+        self._btn_snt.setStyleSheet(self._FMT_INACTIVE_QSS)
 
         self._fmt_hint = QLabel()
         self._fmt_hint.setWordWrap(True)
+        self._fmt_hint.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self._fmt_hint.setStyleSheet("color:#9CA3AF; font-size:11px; background:transparent;")
+        # Высота зарезервирована под ХУДШИЙ случай (2 строки — подсказка
+        # «Мой Садовод» длиннее и переносится, а «СберБизнес» умещается в
+        # одну) — иначе переключение формата меняет высоту всего диалога, и
+        # он «дёргается»/скачет при клике (BaseDialog пересчитывает маску
+        # скругления на resize, отсюда и рывок).
+        _hint_font = QFont(self.font())
+        _hint_font.setPixelSize(11)
+        _hint_fm = QFontMetrics(_hint_font)
+        self._fmt_hint.setFixedHeight(_hint_fm.lineSpacing() * 2 + 2)
         lay.addWidget(self._fmt_hint)
         self._update_hint()
 
@@ -1751,12 +1789,37 @@ class LoadSettingsDialog(_FramelessDialog):
 
         lay.addWidget(QLabel("АВТОМАТИЧЕСКОЕ РАСПРЕДЕЛЕНИЕ", objectName="sectionLabel"))
 
-        self.chk_cat  = QCheckBox("Категория")
-        self.chk_plot = QCheckBox("Участок")
-        self.chk_cat .setChecked(True)
-        self.chk_plot.setChecked(True)
-        lay.addWidget(self.chk_cat)
-        lay.addWidget(self.chk_plot)
+        # Тумблеры toggle_on/toggle_off вместо чекбоксов — тот же виджет,
+        # что и «Показывать переплату» в PlotsWidget (ui.plots_widget).
+        def _make_toggle(text: str) -> QPushButton:
+            btn = QPushButton(f" {text}")
+            btn.setCheckable(True)
+            btn.setChecked(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setIconSize(QSize(20, 20))
+            btn.setStyleSheet(
+                "QPushButton{background:transparent;border:none;border-radius:6px;"
+                "padding:4px 8px;font-size:13px;color:#374151;text-align:left;}"
+                "QPushButton:hover{background:#F3F4F6;}")
+            return btn
+
+        def _refresh_toggle_icon(btn: QPushButton):
+            checked = btn.isChecked()
+            cp = 0xE9F6 if checked else 0xE9F5  # toggle_on / toggle_off
+            btn.setIcon(icons.get_icon(cp, 20, fill=1 if checked else 0,
+                                       color="#07414F" if checked else "#9CA3AF"))
+
+        self.chk_cat  = _make_toggle("Категория")
+        self.chk_plot = _make_toggle("Участок")
+        auto_row = QHBoxLayout()
+        auto_row.setContentsMargins(0, 0, 0, 0)
+        auto_row.setSpacing(8)
+        for btn in (self.chk_cat, self.chk_plot):
+            _refresh_toggle_icon(btn)
+            btn.toggled.connect(lambda _checked, b=btn: _refresh_toggle_icon(b))
+            auto_row.addWidget(btn)
+        auto_row.addStretch()
+        lay.addLayout(auto_row)
 
         div2 = QFrame(objectName="divider")
         div2.setFixedHeight(1)
@@ -1764,16 +1827,34 @@ class LoadSettingsDialog(_FramelessDialog):
 
         if self._has_existing:
             lay.addWidget(QLabel("РЕЖИМ ЗАГРУЗКИ", objectName="sectionLabel"))
-            self.chk_merge = QCheckBox("Добавить к существующим данным")
-            self.chk_merge.setChecked(True)
-            self.chk_merge.setToolTip(
-                "Новые операции будут добавлены к уже загруженным.\n"
-                "Операции, которые уже есть в списке, не задваиваются — "
-                "существующая строка подсвечивается жёлтым, правой кнопкой "
-                "мыши по ней можно восстановить исходные данные повтора "
-                "или оставить как есть."
-            )
+            self.chk_merge = _make_toggle("Добавить к существующим данным")
+            _refresh_toggle_icon(self.chk_merge)
+            self.chk_merge.toggled.connect(
+                lambda _checked, b=self.chk_merge: _refresh_toggle_icon(b))
             lay.addWidget(self.chk_merge)
+
+            merge_hint = QLabel(
+                "Новые операции будут добавлены к уже загруженным. Операции, "
+                "которые уже есть в списке, не задваиваются — существующая "
+                "строка подсвечивается жёлтым, правой кнопкой мыши по ней "
+                "можно восстановить исходные данные повтора или оставить "
+                "как есть.")
+            merge_hint.setWordWrap(True)
+            merge_hint.setStyleSheet(
+                "color:#9CA3AF; font-size:11px; background:transparent;")
+            # Высота задаётся явно по факту переноса текста на ширину
+            # содержимого диалога (400 - поля по 24px) — авто-высота
+            # WordWrap-лейбла в этом frameless-диалоге считается ДО того,
+            # как layout узнаёт финальную ширину, и текст обрезается снизу
+            # (см. скриншот с «...оставить как» без конца фразы).
+            _hint_font2 = QFont(self.font())
+            _hint_font2.setPixelSize(11)
+            _fm2 = QFontMetrics(_hint_font2)
+            _wrap_w = 400 - 24 - 24  # setFixedWidth(400) - поля 24px слева/справа
+            _rect = _fm2.boundingRect(
+                0, 0, _wrap_w, 2000, Qt.TextFlag.TextWordWrap, merge_hint.text())
+            merge_hint.setFixedHeight(_rect.height() + 4)
+            lay.addWidget(merge_hint)
 
             div3 = QFrame(objectName="divider")
             div3.setFixedHeight(1)
@@ -1789,11 +1870,10 @@ class LoadSettingsDialog(_FramelessDialog):
 
     def _set_fmt(self, fmt: str):
         self._fmt = fmt
-        self._btn_sber.setObjectName("fmtActive"   if fmt == "sber" else "fmtInactive")
-        self._btn_snt .setObjectName("fmtInactive" if fmt == "sber" else "fmtActive")
-        for btn in (self._btn_sber, self._btn_snt):
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
+        self._btn_sber.setStyleSheet(
+            self._FMT_ACTIVE_SBER_QSS if fmt == "sber" else self._FMT_INACTIVE_QSS)
+        self._btn_snt.setStyleSheet(
+            self._FMT_ACTIVE_QSS if fmt == "snt" else self._FMT_INACTIVE_QSS)
         self._update_hint()
 
     def _update_hint(self):
@@ -3183,22 +3263,45 @@ class DetailWidget(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(14)
 
+        # Шапка вкладки — тот же стиль, что и «Участки»: заголовок слева,
+        # иконочные кнопки без подписи (только тултип) справа.
         top_bar = QHBoxLayout()
+        top_bar.setSpacing(8)
+        lbl_title = QLabel("Операции")
+        lbl_title.setStyleSheet(
+            "font-size:14px; font-weight:700; color:#1F2937; background:transparent;")
+        top_bar.addWidget(lbl_title)
         top_bar.addStretch()
-        self.btn_load = PrimaryButton("Загрузить файл", icon="folder_open")
-        self.btn_load.clicked.connect(self.load_file)
-        top_bar.addWidget(self.btn_load)
 
-        btn_add_row = SecondaryButton("Добавить операцию", icon="add")
-        btn_add_row.clicked.connect(self._add_row)
+        def _hdr_icon_btn(tooltip: str, handler) -> QPushButton:
+            b = QPushButton()
+            b.setFixedSize(32, 32)
+            b.setIconSize(QSize(22, 22))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.installEventFilter(_TooltipFilter(tooltip, b))
+            b.setStyleSheet(
+                "QPushButton{background:transparent;border:none;border-radius:6px;}"
+                "QPushButton:hover{background:#EBF4F6;}")
+            b.clicked.connect(handler)
+            return b
+
+        # «Добавить операцию» — леве́е всех остальных иконок (единственная
+        # с нестандартным расположением по просьбе — остальные три идут в
+        # прежнем относительном порядке).
+        btn_add_row = _hdr_icon_btn("Добавить операцию", self._add_row)
+        btn_add_row.setIcon(icons.get_icon(0xE145, 22, color="#9CA3AF"))  # add
         top_bar.addWidget(btn_add_row)
 
-        btn_cat = SecondaryButton("Категории", icon="category")
-        btn_cat.clicked.connect(self._show_cat_editor)
+        self.btn_load = _hdr_icon_btn("Импорт из Excel", self.load_file)
+        self.btn_load.setIcon(icons.get_icon(0xEAF3, 22, color="#9CA3AF"))
+        top_bar.addWidget(self.btn_load)
+
+        btn_cat = _hdr_icon_btn("Категории", self._show_cat_editor)
+        btn_cat.setIcon(icons.get_icon("category", 22, color="#9CA3AF"))
         top_bar.addWidget(btn_cat)
 
-        btn_excel = SecondaryButton("Экспорт в Excel", icon="excel")
-        btn_excel.clicked.connect(self._export_excel)
+        btn_excel = _hdr_icon_btn("Экспорт в Excel", self._export_excel)
+        btn_excel.setIcon(icons.get_icon(0xF3B2, 22, color="#9CA3AF"))  # file_export
         top_bar.addWidget(btn_excel)
 
         layout.addLayout(top_bar)
