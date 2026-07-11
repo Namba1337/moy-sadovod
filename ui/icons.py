@@ -32,10 +32,10 @@ FONT_FAMILY = "Material Symbols Rounded"
 ICONS: dict[str, int] = {
     # Навигация (сайдбар)
     "home":          0xE587,  # cottage
-    "plots":         0xF8EE,  # dataset
-    "detail":        0xF191,  # table
-    "vznosy":        0xEAEC,  # currency_ruble
-    "energy":        0xEC1C,  # electric_bolt
+    "plots":         0xE58A,  # holiday_village
+    "detail":        0xF1BE,  # table_view
+    "vznosy":        0xF3EE,  # money_bag
+    "energy":        0xEA0B,  # bolt
     "save_base":     0xF09B,  # upload
     "load_base":     0xF090,  # download
     "chevron_left":  0xE5CB,
