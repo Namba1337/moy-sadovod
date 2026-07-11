@@ -32,6 +32,7 @@ from ui.common import (
     ClipFrame as _ClipFrame,
     TooltipFilter as _TooltipFilter,
     TREE_STYLE as _TREE_STYLE_COMMON,
+    style_date_popup,
 )
 from ui.dialogs import (
     AlertDialog as _AlertDialog,
@@ -2009,6 +2010,7 @@ class AddRowDialog(_FramelessDialog):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.date_edit = QDateEdit(QDate.currentDate(), calendarPopup=True)
+        style_date_popup(self.date_edit)
         self.date_edit.setDisplayFormat("dd.MM.yyyy")
         self.date_edit.setObjectName("datePicker")
         form.addRow("Дата:", self.date_edit)
@@ -2325,6 +2327,7 @@ class EditOperationDialog(_FramelessDialog):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.date_edit = QDateEdit(QDate.currentDate(), calendarPopup=True)
+        style_date_popup(self.date_edit)
         self.date_edit.setDisplayFormat("dd.MM.yyyy")
         self.date_edit.setObjectName("datePicker")
         form.addRow("Дата:", self.date_edit)

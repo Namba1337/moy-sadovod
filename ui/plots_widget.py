@@ -56,6 +56,8 @@ from ui.common import (                                     # noqa: E402
     INPUT_SS as _INPUT_SS,
     INPUT_ERROR_SS as _INPUT_ERROR_SS,
     FIELD_LABEL_SS as _FIELD_LABEL_SS,
+    CalendarArrowFlip,
+    style_date_popup,
 )
 from ui.dialogs import (                                    # noqa: E402
     AlertDialog as _AlertDialog,
@@ -84,7 +86,9 @@ def _is_visible(owner) -> bool:
 
 # Рендер иконок вынесен в ui.icons (единственная реализация оверсэмплинга);
 # здесь остаются тонкие обёртки под прежние сигнатуры.
-from ui.icons import icon_font as _icon_font_impl, get_icon as _get_icon_impl  # noqa: E402
+from ui.icons import (                                      # noqa: E402
+    icon_font as _icon_font_impl, get_icon as _get_icon_impl, icon_png_path,
+)
 
 
 def _mat_font(pixel_size: int = 20, fill: int = 0) -> QFont:
@@ -384,6 +388,7 @@ class _NewGroupDialog(_ConfirmDialog):
         date_col.setSpacing(2)
         date_col.addWidget(QLabel("Дата начала", styleSheet=_FIELD_LABEL_SS))
         self.inp_since = QDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
+        style_date_popup(self.inp_since)
         self.inp_since.setDate(QDate.currentDate())
         if min_since is not None:
             self.inp_since.setMinimumDate(
@@ -2494,7 +2499,14 @@ class PlotEditDialog(QWidget):
             hdr.addWidget(since_prefix)
 
             ctx.since_date_edit = QDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
+            style_date_popup(ctx.since_date_edit)
             ctx.since_date_edit.setFixedWidth(110)
+            # Стрелка dropdown: QSS-псевдоэлемент ::down-arrow затирает
+            # системную стрелку, поэтому подставляем свои глифы-шевроны
+            # (PNG — в image: QIcon не подсунуть). Вверх/вниз переключает
+            # CalendarArrowFlip через свойство calOpen.
+            _arr_dn = icon_png_path("expand_more", 12, color="#6B7280")
+            _arr_up = icon_png_path("expand_less", 12, color="#6B7280")
             ctx.since_date_edit.setStyleSheet(
                 "QDateEdit{background:#FFFFFF;border:1px solid #C9D8E2;"
                 "border-radius:6px;padding:2px 4px 2px 6px;font-size:12px;color:#1F2937;}"
@@ -2502,7 +2514,9 @@ class PlotEditDialog(QWidget):
                 "width:18px;border:none;border-left:1px solid #C9D8E2;background:transparent;"
                 "border-top-right-radius:6px;border-bottom-right-radius:6px;}"
                 "QDateEdit::drop-down:hover{background:#DCE7EC;}"
-                "QDateEdit::down-arrow{width:8px;height:8px;}")
+                f"QDateEdit::down-arrow{{image:url({_arr_dn});width:12px;height:12px;}}"
+                f'QDateEdit[calOpen="true"]::down-arrow{{image:url({_arr_up});}}')
+            CalendarArrowFlip(ctx.since_date_edit)
             ctx.since_date_edit.dateChanged.connect(
                 lambda _, c=ctx: self._on_since_changed(c))
             hdr.addWidget(ctx.since_date_edit)

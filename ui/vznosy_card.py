@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 from core import energy
 from core.utils import fmt_money
 from ui.buttons import GhostButton, PrimaryButton, SecondaryButton
+from ui.common import style_date_popup
 from ui.dialogs import (
     AlertDialog as _AlertDialog,
     BaseDialog as _FramelessDialog,
@@ -64,6 +65,7 @@ class VznosyAdjustmentDialog(_FramelessDialog):
         form.addRow("Тип:", self.cb_kind)
 
         self.inp_date = QDateEdit(calendarPopup=True)
+        style_date_popup(self.inp_date)
         self.inp_date.setDisplayFormat("dd.MM.yyyy")
         self.inp_date.setDate(QDate.currentDate())
         form.addRow("Дата:", self.inp_date)

@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 from core import energy
 from core.utils import fmt_money
 from ui.buttons import GhostButton, PrimaryButton, SecondaryButton
+from ui.common import style_date_popup
 from ui.dialogs import (
     AlertDialog as _AlertDialog,
     BaseDialog as _FramelessDialog,
@@ -146,6 +147,7 @@ class MeterReplacementDialog(_FramelessDialog):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.inp_date = QDateEdit(calendarPopup=True)
+        style_date_popup(self.inp_date)
         self.inp_date.setDisplayFormat("dd.MM.yyyy")
         self.inp_date.setDate(QDate.currentDate())
         form.addRow("Дата замены:", self.inp_date)
@@ -224,6 +226,7 @@ class BillingTypeDialog(_FramelessDialog):
 
     def _make_date_edit(self, iso: str | None) -> QDateEdit:
         de = QDateEdit(calendarPopup=True)
+        style_date_popup(de)
         de.setDisplayFormat("dd.MM.yyyy")
         d = energy._parse_iso(iso or "")
         de.setDate(QDate(d.year, d.month, d.day) if d else QDate.currentDate())

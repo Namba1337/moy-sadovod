@@ -23,10 +23,14 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QBitmap, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygon, QRegion,
+    QTextCharFormat,
 )
-from PyQt6.QtWidgets import QFrame, QHeaderView, QLabel, QLineEdit, QWidget
+from PyQt6.QtWidgets import (
+    QCalendarWidget, QDateEdit, QFrame, QHeaderView, QLabel, QLineEdit,
+    QSpinBox, QToolButton, QWidget,
+)
 
-from ui.theme import C, FS, TREE_SCROLLBAR_W, tree_qss
+from ui.theme import C, FS, TREE_SCROLLBAR_W, calendar_qss, tree_qss
 
 # ──────────────────────────────────────────────────────────────────────────
 #  Стили компактных полей ввода (формы карточек/диалогов)
@@ -41,6 +45,94 @@ INPUT_ERROR_SS = (
     f"border-radius:4px; padding:4px 8px; font-size:{FS.SMALL}px; color:{C.TEXT};}}"
     f"QLineEdit:focus{{border:1px solid {C.DANGER};}}")
 FIELD_LABEL_SS = f"font-size:10px; color:{C.TEXT_FAINT}; background:transparent;"
+
+
+class CalendarArrowFlip(QObject):
+    """Переключает стрелку dropdown у QDateEdit при открытии/закрытии
+    календаря. QSS не даёт состояния «попап открыт» для ::down-arrow
+    у QDateEdit (в отличие от :on у QComboBox), поэтому по Show/Hide
+    попапа выставляем на поле динамическое свойство calOpen и
+    перечитываем стиль — QSS поля матчит его селектором
+    ``QDateEdit[calOpen="true"]::down-arrow``. Живёт ребёнком QDateEdit."""
+
+    def __init__(self, de: QDateEdit):
+        super().__init__(de)
+        self._de = de
+        cal = de.calendarWidget()
+        if cal is not None:
+            cal.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        t = event.type()
+        if t in (QEvent.Type.Show, QEvent.Type.Hide):
+            try:
+                self._de.setProperty("calOpen", t == QEvent.Type.Show)
+                st = self._de.style()
+                st.unpolish(self._de)
+                st.polish(self._de)
+            except RuntimeError:
+                pass  # QDateEdit уже удалён (закрытие приложения)
+        return False
+
+
+def style_date_popup(de: QDateEdit) -> None:
+    """Приводит всплывающий календарь QDateEdit к светлой теме приложения.
+
+    Штатный QCalendarWidget — top-level попап, глобальный QSS главного окна
+    до него не доходит, поэтому он рендерился системной палитрой (тёмная
+    шапка навигации, красные выходные). Вызывать после создания
+    QDateEdit(calendarPopup=True); без calendarPopup — no-op.
+    """
+    cal = de.calendarWidget()
+    if cal is None:
+        return
+    from ui.icons import get_icon, icon_png_path
+    cal.setVerticalHeaderFormat(
+        QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+    # Кнопки спинбокса года (клик по году в шапке): системные бевел-стрелки
+    # заменяем на плоские с глифами-шевронами. Блок живёт здесь, а не в
+    # calendar_qss() — QSS ссылается на PNG-файлы иконок (icon_png_path),
+    # а ui.theme намеренно свободен от зависимостей.
+    arr_up = icon_png_path("expand_less", 10, color=C.TEXT_BODY)
+    arr_dn = icon_png_path("expand_more", 10, color=C.TEXT_BODY)
+    cal.setStyleSheet(calendar_qss() + f"""
+        QCalendarWidget QSpinBox::up-button, QCalendarWidget QSpinBox::down-button {{
+            subcontrol-origin: border; width: 16px;
+            border: none; border-radius: 3px; background: transparent;
+        }}
+        QCalendarWidget QSpinBox::up-button {{ subcontrol-position: top right; }}
+        QCalendarWidget QSpinBox::down-button {{ subcontrol-position: bottom right; }}
+        QCalendarWidget QSpinBox::up-button:hover,
+        QCalendarWidget QSpinBox::down-button:hover {{ background: {C.BRAND_GHOST}; }}
+        QCalendarWidget QSpinBox::up-arrow {{
+            image: url({arr_up}); width: 10px; height: 10px;
+        }}
+        QCalendarWidget QSpinBox::down-arrow {{
+            image: url({arr_dn}); width: 10px; height: 10px;
+        }}
+    """)
+    # Цвета дней задаются QTextCharFormat-ами, QSS их не покрывает:
+    # выходные — как будни, строка Пн..Вс — приглушённая.
+    day_fmt = QTextCharFormat()
+    day_fmt.setForeground(QColor(C.TEXT))
+    for d in (Qt.DayOfWeek.Saturday, Qt.DayOfWeek.Sunday):
+        cal.setWeekdayTextFormat(d, day_fmt)
+    hdr_fmt = QTextCharFormat()
+    hdr_fmt.setForeground(QColor(C.TEXT_FAINT))
+    cal.setHeaderTextFormat(hdr_fmt)
+    # Спинбокс года растягивается на всю свободную ширину шапки, из-за чего
+    # его кнопки прокрутки (прижаты к правому краю) улетают к краю окна —
+    # ограничиваем шириной «4 цифры + кнопки».
+    year_edit = cal.findChild(QSpinBox, "qt_calendar_yearedit")
+    if year_edit is not None:
+        year_edit.setMaximumWidth(72)
+        year_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    # Стрелки навигации — глифы приложения вместо системных пиксельных стрелок
+    for obj_name, icon in (("qt_calendar_prevmonth", "chevron_left"),
+                           ("qt_calendar_nextmonth", "chevron_right")):
+        btn = cal.findChild(QToolButton, obj_name)
+        if btn is not None:
+            btn.setIcon(get_icon(icon, 14, color=C.TEXT_BODY))
 
 
 def set_input_error(inp: QLineEdit, error: bool) -> None:

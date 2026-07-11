@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 
 from core.utils import DATA_DIR
 from ui.buttons import GhostButton, PrimaryButton
+from ui.common import style_date_popup
 from ui.dialogs import ConfirmDialog as _ConfirmDialog
 from ui.theme import C, menu_qss
 
@@ -100,6 +101,7 @@ class RatesWidget(QWidget):
         self.inp_date = QDateEdit()
         self.inp_date.setObjectName("datePicker")
         self.inp_date.setCalendarPopup(True)
+        style_date_popup(self.inp_date)
         self.inp_date.setDate(QDate.currentDate())
         self.inp_date.setDisplayFormat("dd.MM.yyyy")
         form_lay.addWidget(self.inp_date)
@@ -352,6 +354,7 @@ class VznosyRatesWidget(QWidget):
         self.inp_date_from = QDateEdit()
         self.inp_date_from.setObjectName("datePicker")
         self.inp_date_from.setCalendarPopup(True)
+        style_date_popup(self.inp_date_from)
         self.inp_date_from.setDate(QDate.currentDate())
         self.inp_date_from.setDisplayFormat("dd.MM.yyyy")
         self.inp_date_from.setFixedWidth(115)
@@ -361,6 +364,7 @@ class VznosyRatesWidget(QWidget):
         self.inp_date_to = QDateEdit()
         self.inp_date_to.setObjectName("datePicker")
         self.inp_date_to.setCalendarPopup(True)
+        style_date_popup(self.inp_date_to)
         self.inp_date_to.setDate(QDate.currentDate())
         self.inp_date_to.setDisplayFormat("dd.MM.yyyy")
         self.inp_date_to.setFixedWidth(115)

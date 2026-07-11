@@ -19,6 +19,7 @@ from ui.common import (
     FlatTableModel as _FlatTableModel,
     TREE_STYLE as _TREE_STYLE,
     SB_W as _SB_W,
+    style_date_popup,
 )
 from ui.theme import C
 from ui.dialogs import (
@@ -263,6 +264,7 @@ class VznosyDebtWidget(QWidget):
         top.addWidget(QLabel("на дату:", objectName="filterLabel"))
         self.date_as_of = QDateEdit(calendarPopup=True, objectName="datePicker",
                                     displayFormat="dd.MM.yyyy")
+        style_date_popup(self.date_as_of)
         self.date_as_of.setDate(QDate.currentDate())
         self.date_as_of.setMaximumDate(QDate.currentDate())
         self.date_as_of.dateChanged.connect(self._rebuild)
