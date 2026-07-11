@@ -6,19 +6,28 @@ from PyQt6.QtCore import Qt, QDate, QModelIndex
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog,
-    QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QPushButton, QSpinBox, QTreeView, QVBoxLayout, QWidget,
 )
 
 from core import energy
 from core.utils import fmt_money
+from ui.buttons import PrimaryButton, SecondaryButton
+from ui.common import (
+    SortHeaderView as _SortHeaderView,
+    ClipFrame as _ClipFrame,
+    FlatTableModel as _FlatTableModel,
+    TREE_STYLE as _TREE_STYLE,
+    SB_W as _SB_W,
+)
+from ui.dialogs import (
+    AlertDialog as _AlertDialog,
+    BaseDialog as _FramelessDialog,
+    exec_dialog as _exec_dialog,
+)
 from ui.energy_card import PlotCardDialog
 from ui.rates_widget import RatesWidget
-from ui.plots_widget import (
-    _SortHeaderView, _ClipFrame, _TREE_STYLE, _SB_W, _FlatTableModel,
-    _DEBT_COLOR_LIGHT,
-)
-from ui.detail_widget import _FramelessDialog, _exec_dialog, _AlertDialog
+from ui.theme import C, FS
 
 
 # ============================================================================ #
@@ -68,55 +77,6 @@ class _NormsDialog(_FramelessDialog):
         lay.addLayout(header)
 
         lay.addWidget(rates_widget, stretch=1)
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel { background: transparent; color: #374151; }
-            QLabel#pageTitle { font-size: 18px; font-weight: 700; color: #1F2937; }
-            QLabel#filterLabel { color: #9AA3AE; font-size: 13px; }
-            QLabel#statusLabel { color: #6B7280; font-size: 12px; }
-            QFrame#filterFrame {
-                background: #F8F9FA; border: 1px solid #E3E8EE; border-radius: 8px;
-            }
-            QLineEdit#searchInput {
-                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
-                color: #1F2937; padding: 7px 12px; font-size: 13px;
-            }
-            QLineEdit#searchInput:focus { border: 1px solid #07414F; }
-            QDateEdit#datePicker {
-                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
-                color: #1F2937; padding: 7px 10px; font-size: 13px;
-            }
-            QDateEdit#datePicker::drop-down { border: none; width: 18px; }
-            QPushButton#btnPrimary {
-                background: #07414F; color: #FFFFFF; border: none; border-radius: 6px;
-                padding: 8px 18px; font-size: 13px; font-weight: 600;
-            }
-            QPushButton#btnPrimary:hover   { background: #0B5A6E; }
-            QPushButton#btnPrimary:pressed { background: #062F38; }
-            QPushButton#btnSecondary {
-                background: #FFFFFF; color: #3C4654;
-                border: 1px solid #D5DCE4; border-radius: 6px;
-                padding: 7px 12px; font-size: 13px;
-            }
-            QPushButton#btnSecondary:hover { background: #F0F3F7; color: #1F2937; }
-            QPushButton#btnPanelClose {
-                background: transparent; border: none; color: #9CA3AF;
-                font-size: 15px; font-weight: 600; border-radius: 12px;
-            }
-            QPushButton#btnPanelClose:hover { background: #F3F4F6; color: #374151; }
-            QTableWidget#summaryTable {
-                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 8px;
-                gridline-color: #EAEDF1; color: #1F2937; font-size: 12px;
-                selection-background-color: #E8F0F5; selection-color: #07414F;
-            }
-            QTableWidget#summaryTable QHeaderView::section {
-                background: #EEF1F5; color: #6B7280; border: none;
-                border-right: 1px solid #E3E8EE; border-bottom: 2px solid #E3E8EE;
-                padding: 8px 10px; font-size: 12px; font-weight: 600;
-            }
-            QTableWidget#summaryTable::item {
-                padding: 4px 10px; border-bottom: 1px solid #EAEDF1;
-            }
-        """)
 
 
 class _EnergySettingsDialog(_FramelessDialog):
@@ -124,7 +84,7 @@ class _EnergySettingsDialog(_FramelessDialog):
     не за отдельный участок): автопереход при отсутствии показаний +
     глобальные значения по умолчанию для расчётного метода (норматив,
     окно усреднения). Участок использует своё собственное значение, если
-    оно задано в его карточке («⚙ Тип расчёта»); иначе — глобальное отсюда,
+    оно задано в его карточке («Тип расчёта»); иначе — глобальное отсюда,
     причём живьём: смена значения здесь сразу отражается на всех участках
     без собственного override (см. energy.norm_kw_of()/avg_window_months_of())."""
 
@@ -139,13 +99,12 @@ class _EnergySettingsDialog(_FramelessDialog):
         lay.setContentsMargins(20, 20, 20, 18)
         lay.setSpacing(14)
 
-        title = QLabel("Настройки электроэнергии")
-        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
-        lay.addWidget(title)
+        lay.addLayout(self.make_header("Настройки электроэнергии"))
 
         # ── Автопереход ──────────────────────────────────────────────
         sect1 = QLabel("Автопереход при отсутствии показаний")
-        sect1.setStyleSheet("font-size:12px;font-weight:600;color:#07414F;")
+        sect1.setStyleSheet(
+            f"font-size:{FS.SMALL}px;font-weight:600;color:{C.BRAND};")
         lay.addWidget(sect1)
 
         info = QLabel(
@@ -175,12 +134,13 @@ class _EnergySettingsDialog(_FramelessDialog):
 
         # ── Глобальные значения по умолчанию ────────────────────────
         sect2 = QLabel("Значения по умолчанию для расчётного метода")
-        sect2.setStyleSheet("font-size:12px;font-weight:600;color:#07414F;margin-top:6px;")
+        sect2.setStyleSheet(
+            f"font-size:{FS.SMALL}px;font-weight:600;color:{C.BRAND};margin-top:6px;")
         lay.addWidget(sect2)
 
         info2 = QLabel(
             "Используются, только если на конкретном участке (кнопка "
-            "«⚙ Тип расчёта») своё значение не задано — например, "
+            "«Тип расчёта») своё значение не задано — например, "
             "региональный норматив на освещение можно указать один раз "
             "здесь, а не на каждом участке."
         )
@@ -211,30 +171,11 @@ class _EnergySettingsDialog(_FramelessDialog):
         row3.addStretch()
         lay.addLayout(row3)
 
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        btns.accepted.connect(self._on_accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
-
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel { background: transparent; color: #374151; font-size: 13px; }
-            QCheckBox { color: #374151; background: transparent; font-size: 13px; }
-            QLineEdit, QSpinBox {
-                background: #F8F9FA; border: 1px solid #D1D5DB; border-radius: 5px;
-                color: #374151; padding: 6px 8px; font-size: 13px;
-            }
-            QLineEdit:focus, QSpinBox:focus { border: 1px solid #07414F; }
-            QDialogButtonBox QPushButton {
-                background: #07414F; color: white; border: none;
-                border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
-            }
-            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
-            QDialogButtonBox QPushButton[text='Отмена'] { background: #E5E7EB; color: #6B7280; }
-        """)
+        btn_cancel = SecondaryButton("Отмена")
+        btn_cancel.clicked.connect(self.reject)
+        btn_save = PrimaryButton("Сохранить")
+        btn_save.clicked.connect(self._on_accept)
+        lay.addLayout(self.make_button_row(btn_cancel, btn_save))
 
     def _on_accept(self):
         raw_norm = self.inp_default_norm.text().strip().replace(",", ".")
@@ -288,10 +229,6 @@ class EnergyDebtWidget(QWidget):
             "текущей активной группы (договора). Если выключено — вся история "
             "участка, включая прежних собственников."
         )
-        self.chk_active_only.setStyleSheet(
-            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
-            "QCheckBox::indicator{width:15px;height:15px;}"
-        )
         self.chk_active_only.stateChanged.connect(self._rebuild)
         top.addWidget(self.chk_active_only)
 
@@ -299,11 +236,7 @@ class EnergyDebtWidget(QWidget):
         self.chk_stale_readings.setToolTip(
             "Участки со счётчиком, которые не передают показания 3 месяца "
             "подряд и дольше — по порядку действий СНТ таким пора переходить "
-            "на расчётный метод (кнопка «⚙ Тип расчёта» на карточке участка)."
-        )
-        self.chk_stale_readings.setStyleSheet(
-            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
-            "QCheckBox::indicator{width:15px;height:15px;}"
+            "на расчётный метод (кнопка «Тип расчёта» на карточке участка)."
         )
         self.chk_stale_readings.stateChanged.connect(self._rebuild)
         top.addWidget(self.chk_stale_readings)
@@ -323,15 +256,15 @@ class EnergyDebtWidget(QWidget):
         self.cb_only_debt.currentIndexChanged.connect(self._rebuild)
         top.addWidget(self.cb_only_debt)
 
-        self.btn_mass_pdf = QPushButton("📄  Квитанции должникам", objectName="btnSecondary")
+        self.btn_mass_pdf = SecondaryButton("Квитанции должникам", icon="receipt")
         self.btn_mass_pdf.clicked.connect(self._export_debtor_receipts)
         top.addWidget(self.btn_mass_pdf)
 
-        btn_rates = QPushButton("📐  Нормативы", objectName="btnSecondary")
+        btn_rates = SecondaryButton("Нормативы", icon="ruler")
         btn_rates.clicked.connect(self._open_rates_dialog)
         top.addWidget(btn_rates)
 
-        btn_settings = QPushButton("⚙  Настройки", objectName="btnSecondary")
+        btn_settings = SecondaryButton("Настройки", icon="settings")
         btn_settings.setToolTip(
             "Автопереход при отсутствии показаний + глобальные значения "
             "по умолчанию (норматив, окно усреднения) для расчётного метода."
@@ -339,20 +272,20 @@ class EnergyDebtWidget(QWidget):
         btn_settings.clicked.connect(self._open_energy_settings_dialog)
         top.addWidget(btn_settings)
 
-        btn_excel = QPushButton("Экспорт в Excel", objectName="btnSecondary")
+        btn_excel = SecondaryButton("Экспорт в Excel", icon="excel")
         btn_excel.clicked.connect(self._export_excel)
         top.addWidget(btn_excel)
 
         lay.addLayout(top)
 
-        # Легенда
+        # Легенда — те же цвета, что и заливка строк (C.DEBT / C.DEBT_BG)
         legend = QHBoxLayout()
         legend.setSpacing(20)
         for color, text in [
-            ("#059669", "■  без долга / аванс"),
-            ("#f9a825", "■  небольшой долг"),
-            ("#ef6c00", "■  средний"),
-            ("#DC2626", "■  крупный"),
+            (C.DEBT["ok"],   "■  без долга / аванс"),
+            (C.DEBT["low"],  "■  небольшой долг"),
+            (C.DEBT["mid"],  "■  средний"),
+            (C.DEBT["high"], "■  крупный"),
         ]:
             lb = QLabel(text)
             lb.setStyleSheet(f"color:{color};background:transparent;font-size:11px;")
@@ -517,7 +450,7 @@ class EnergyDebtWidget(QWidget):
             + ("Начисление для них уже ведётся автоматически по среднему "
                "потреблению (автопереход включён)." if auto_settings.get("enabled")
                else "По порядку действий СНТ таким пора переходить на "
-                    "расчётный метод (кнопка «⚙ Тип расчёта» на карточке участка).")
+                    "расчётный метод (кнопка «Тип расчёта» на карточке участка).")
         )
 
         total_debt = 0.0
@@ -568,8 +501,8 @@ class EnergyDebtWidget(QWidget):
                 reading_sort = float(lv)
                 date_sort = float(ly * 100 + lm)
 
-            color = energy.debt_color(debt, monthly_avg=300.0)
-            debts_map[plot] = {"debt": debt, "color": color,
+            level = energy.debt_level(debt, monthly_avg=300.0)
+            debts_map[plot] = {"debt": debt, "level": level,
                                 "charged": charged, "paid": paid,
                                 "billing_type": bt}
 
@@ -628,7 +561,7 @@ class EnergyDebtWidget(QWidget):
 
                 "_text_Долг / Аванс": fmt_money(debt),
                 "_sort_Долг / Аванс": debt,
-                "_bg_Долг / Аванс": _DEBT_COLOR_LIGHT.get(color, color),
+                "_bg_Долг / Аванс": C.DEBT_BG[level],
                 "_bold_Долг / Аванс": True,
 
                 "_text_Без оплаты, мес.": "—" if mwp is None else str(mwp),
@@ -788,20 +721,27 @@ class EnergyDebtWidget(QWidget):
 
         ok = 0
         errors = []
-        for plot, cur_name in debtors:
-            surname = cur_name.split()[0] if cur_name else ""
-            fname = f"Уч_{plot}"
-            if surname:
-                safe_surname = re.sub(r"[^\w\-]", "_", surname)
-                fname += f"_{safe_surname}"
-            fname += f"_{as_of.isoformat()}.pdf"
-            fname = fname.replace("/", "-")
-            path = os.path.join(folder, fname)
-            try:
-                receipt.save_plot_receipt_pdf(plot, self._df, path, as_of=as_of)
-                ok += 1
-            except Exception as e:
-                errors.append(f"уч. {plot}: {e}")
+        # Пакетная генерация PDF заметно долгая — курсор занятости, чтобы
+        # окно не выглядело зависшим (U1 из аудита UI).
+        from PyQt6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for plot, cur_name in debtors:
+                surname = cur_name.split()[0] if cur_name else ""
+                fname = f"Уч_{plot}"
+                if surname:
+                    safe_surname = re.sub(r"[^\w\-]", "_", surname)
+                    fname += f"_{safe_surname}"
+                fname += f"_{as_of.isoformat()}.pdf"
+                fname = fname.replace("/", "-")
+                path = os.path.join(folder, fname)
+                try:
+                    receipt.save_plot_receipt_pdf(plot, self._df, path, as_of=as_of)
+                    ok += 1
+                except Exception as e:
+                    errors.append(f"уч. {plot}: {e}")
+        finally:
+            QApplication.restoreOverrideCursor()
         if errors:
             _AlertDialog.show_alert(
                 self, "Квитанции",

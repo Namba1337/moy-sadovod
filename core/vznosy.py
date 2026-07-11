@@ -681,15 +681,16 @@ def balance_for_periods(plot: str, area: Optional[float], as_of: date,
     return GroupBalance(charged=charged, paid=paid, debt=charged - paid)
 
 
-# ── палитра для UI ────────────────────────────────────────────────────
+# ── уровень долга для UI ─────────────────────────────────────────────
 
-def debt_color(debt: float, annual_avg: float = 0.0) -> str:
-    """Hex-цвет для индикации долга. Пороги в долях годовой суммы."""
+def debt_level(debt: float, annual_avg: float = 0.0) -> str:
+    """Уровень долга: 'ok' | 'low' | 'mid' | 'high'. Пороги в долях
+    годовой суммы. Конкретные цвета подставляет UI (ui.theme.C.DEBT)."""
     if debt <= 0:
-        return "#2e7d32"
+        return "ok"
     threshold = max(annual_avg, 1000.0)
     if debt <= 0.25 * threshold:
-        return "#f9a825"
+        return "low"
     if debt <= 0.75 * threshold:
-        return "#ef6c00"
-    return "#c62828"
+        return "mid"
+    return "high"

@@ -9,17 +9,17 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QProgressBar, QPushButton, QTextBrowser,
+    QHBoxLayout, QLabel, QProgressBar, QTextBrowser,
     QVBoxLayout, QWidget,
 )
 
 from core.updater import (
     APP_VERSION, ReleaseInfo, UpdateDownloader, human_size, run_installer,
 )
-from ui.detail_widget import _FramelessDialog
+from ui.buttons import PrimaryButton, SecondaryButton
+from ui.dialogs import BaseDialog
+from ui.theme import C, FS
 
 
 def _markdown_to_plain(text: str) -> str:
@@ -47,7 +47,7 @@ def _markdown_to_plain(text: str) -> str:
     return out.strip()
 
 
-class UpdateDialog(_FramelessDialog):
+class UpdateDialog(BaseDialog):
     """Окно «Доступно обновление».
 
     Состояния:
@@ -80,13 +80,8 @@ class UpdateDialog(_FramelessDialog):
         root.setSpacing(14)
 
         # Заголовок
-        title = QLabel(f"Доступна новая версия {self._info.version}",
-                       objectName="updateTitle")
-        f = QFont()
-        f.setPointSize(15)
-        f.setBold(True)
-        title.setFont(f)
-        root.addWidget(title)
+        root.addLayout(self.make_header(
+            f"Доступна новая версия {self._info.version}"))
 
         subtitle = QLabel(
             f"У вас установлена версия {APP_VERSION}.   "
@@ -97,9 +92,6 @@ class UpdateDialog(_FramelessDialog):
 
         # Что нового
         notes_label = QLabel("Что нового:", objectName="updateNotesLabel")
-        nf = QFont()
-        nf.setBold(True)
-        notes_label.setFont(nf)
         root.addWidget(notes_label)
 
         self._notes_view = QTextBrowser(objectName="updateNotes")
@@ -124,7 +116,7 @@ class UpdateDialog(_FramelessDialog):
         # Предупреждение про целостность
         if not self._info.sha256_expected:
             warn = QLabel(
-                "ℹ︎ Для этой версии не опубликован .sha256-файл — "
+                "Для этой версии не опубликован .sha256-файл — "
                 "проверка целостности будет пропущена.",
                 objectName="updateWarn",
             )
@@ -136,55 +128,36 @@ class UpdateDialog(_FramelessDialog):
         btn_row.setSpacing(10)
         btn_row.addStretch()
 
-        self._btn_later = QPushButton("Позже", objectName="btnSecondary")
-        self._btn_later.setFixedHeight(34)
+        self._btn_later = SecondaryButton("Позже")
         self._btn_later.setMinimumWidth(96)
-        self._btn_later.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_later.clicked.connect(self.reject)
         btn_row.addWidget(self._btn_later)
 
-        self._btn_primary = QPushButton("Обновить", objectName="btnPrimary")
-        self._btn_primary.setFixedHeight(34)
+        self._btn_primary = PrimaryButton("Обновить")
         self._btn_primary.setMinimumWidth(120)
         self._btn_primary.setDefault(True)
-        self._btn_primary.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_primary.clicked.connect(self._on_update_clicked)
         btn_row.addWidget(self._btn_primary)
 
         root.addLayout(btn_row)
 
     def _apply_styles(self) -> None:
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel { background: transparent; }
-            QLabel#updateTitle { color: #1F2937; }
-            QLabel#updateSubtitle { color: #6B7280; font-size: 12px; }
-            QLabel#updateNotesLabel { color: #1F2937; font-size: 13px; }
-            QLabel#updateStatus { color: #3C4654; font-size: 13px; }
-            QLabel#updateWarn { color: #8A6D3B; font-size: 12px; }
-            QTextBrowser#updateNotes {
-                background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
-                color: #1F2937; padding: 10px;
-            }
-            QProgressBar#updateProgress {
-                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
-                color: #1F2937; text-align: center; height: 20px;
-            }
-            QProgressBar#updateProgress::chunk {
-                background: #07414F; border-radius: 5px;
-            }
-            QPushButton#btnPrimary {
-                background: #07414F; color: #FFFFFF; border: none; border-radius: 6px;
-                padding: 6px 18px; font-size: 13px; font-weight: 600;
-            }
-            QPushButton#btnPrimary:hover   { background: #0B5A6E; }
-            QPushButton#btnPrimary:pressed { background: #062F38; }
-            QPushButton#btnPrimary:disabled { background: #A9BFC5; color: #EEF2F0; }
-            QPushButton#btnSecondary {
-                background: #E5E7EB; color: #6B7280;
-                border: 1px solid #D1D5DB; border-radius: 6px;
-                padding: 6px 14px; font-size: 13px;
-            }
-            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
+        self.setStyleSheet(self.base_qss() + f"""
+            QLabel#updateSubtitle {{ color: {C.TEXT_MUTED}; font-size: {FS.SMALL}px; }}
+            QLabel#updateNotesLabel {{ color: {C.TEXT}; font-size: {FS.BODY}px; font-weight: 600; }}
+            QLabel#updateStatus {{ color: {C.TEXT_BODY}; font-size: {FS.BODY}px; }}
+            QLabel#updateWarn {{ color: {C.WARNING}; font-size: {FS.SMALL}px; }}
+            QTextBrowser#updateNotes {{
+                background: {C.BG_SUBTLE}; border: 1px solid {C.BORDER_LIGHT};
+                border-radius: 8px; color: {C.TEXT}; padding: 10px;
+            }}
+            QProgressBar#updateProgress {{
+                background: {C.BG_SURFACE}; border: 1px solid {C.BORDER};
+                border-radius: 6px; color: {C.TEXT}; text-align: center; height: 20px;
+            }}
+            QProgressBar#updateProgress::chunk {{
+                background: {C.BRAND}; border-radius: 5px;
+            }}
         """)
 
     # ── Состояния ─────────────────────────────────────────────────────
@@ -244,7 +217,9 @@ class UpdateDialog(_FramelessDialog):
     def _on_error(self, message: str) -> None:
         self._progress.setVisible(False)
         self._status.setVisible(True)
-        self._status.setText(f"⚠ {message}")
+        self._status.setText(f"Ошибка: {message}")
+        self._status.setStyleSheet(
+            f"color:{C.DANGER_HOVER};font-size:{FS.BODY}px;background:transparent;")
 
         self._btn_primary.setEnabled(True)
         self._btn_primary.setText("Повторить")

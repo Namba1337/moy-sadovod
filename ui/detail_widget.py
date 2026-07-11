@@ -5,7 +5,8 @@ import time
 
 import pandas as pd
 from PyQt6.QtCore import (
-    Qt, QDate, QEvent, QPoint, QRect, QRectF, QModelIndex, QAbstractItemModel, pyqtSignal,
+    Qt, QDate, QEvent, QPoint, QRect, QRectF, QSize, QModelIndex,
+    QAbstractItemModel, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QAction, QBitmap, QBrush, QColor, QFont, QFontMetrics, QPainter, QPen,
@@ -13,7 +14,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog,
-    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QFileDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
     QPushButton, QScrollArea, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QTreeView, QVBoxLayout, QWidget, QCompleter,
@@ -25,7 +26,21 @@ from ui.categorization import (
     delete_user_category, PROTECTED_CATEGORIES,
 )
 from ui.plot_detection import apply_plot_column, _PLOTS_FILE, load_plot_numbers
-from ui.plots_widget import _ClipFrame, _BasePromptDialog, _ConfirmDialog
+from ui import icons
+from ui.buttons import PrimaryButton, SecondaryButton
+from ui.common import (
+    ClipFrame as _ClipFrame,
+    TooltipFilter as _TooltipFilter,
+    TREE_STYLE as _TREE_STYLE_COMMON,
+)
+from ui.dialogs import (
+    AlertDialog as _AlertDialog,
+    BaseDialog as _FramelessDialog,
+    ConfirmDialog as _ConfirmDialog,
+    PromptDialog as _BasePromptDialog,
+    exec_dialog as _exec_dialog,
+)
+from ui.theme import C, FS, menu_qss
 
 
 # =========================================================================== #
@@ -454,9 +469,7 @@ class _CellDelegate(QStyledItemDelegate):
     @classmethod
     def _icon_font(cls) -> QFont:
         if cls._ICON_FONT is None:
-            f = QFont("Material Icons")
-            f.setPixelSize(14)
-            cls._ICON_FONT = f
+            cls._ICON_FONT = icons.icon_font(14)
         return cls._ICON_FONT
 
     def paint(self, painter, option, index):
@@ -1416,7 +1429,6 @@ class _CatPillRow(QWidget):
         """)
         self._color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._color_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        from ui.plots_widget import _TooltipFilter
         self._color_tip = _TooltipFilter("Изменить цвет", self._color_btn)
         self._color_btn.installEventFilter(self._color_tip)
         hl.addWidget(self._color_btn)
@@ -1436,14 +1448,11 @@ class _CatPillRow(QWidget):
         """)
         hl.addWidget(self._lbl, stretch=1)
 
-        _lock_icon = chr(0xe897)
         if is_protected:
-            action_btn = QLabel(_lock_icon)
+            action_btn = QLabel(icons.icon_char("lock"))
             action_btn.setFixedSize(24, 24)
             action_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            icon_font = QFont("Material Symbols Rounded")
-            icon_font.setPixelSize(16)
-            action_btn.setFont(icon_font)
+            action_btn.setFont(icons.icon_font(16))
             action_btn.setStyleSheet(
                 "background: transparent; color: #9CA3AF; border: none;"
             )
@@ -1527,87 +1536,8 @@ class _CatPillRow(QWidget):
 #  Каркас кастомных диалогов вкладки — без нативного чрома ОС                 #
 # =========================================================================== #
 
-class _FramelessDialog(QDialog):
-    """Базовый класс диалогов «Детализации» с собственной сложной формой
-    (в отличие от _BasePromptDialog в ui.plots_widget, который несёт фиксированную
-    раскладку «заголовок+сообщение+кнопки»). Даёт белую скруглённую карточку
-    без стандартной рамки/шапки Windows — тот же приём (маска по скруглённому
-    прямоугольнику), что и у _BasePromptDialog."""
-
-    _RADIUS = 12
-    _BORDER = "#D5DCE4"
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-        self.setObjectName("framelessDialog")
-
-    def _frame_qss(self) -> str:
-        return (
-            f"QDialog#framelessDialog{{background:#FFFFFF;"
-            f"border:1px solid {self._BORDER};border-radius:{self._RADIUS}px;}}"
-        )
-
-    def _apply_mask(self):
-        sz = self.size()
-        if sz.width() <= 0 or sz.height() <= 0:
-            return
-        bmp = QBitmap(sz)
-        bmp.fill(Qt.GlobalColor.color0)
-        p = QPainter(bmp)
-        p.setBrush(Qt.GlobalColor.color1)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(self.rect(), self._RADIUS, self._RADIUS)
-        p.end()
-        self.setMask(QRegion(bmp))
-
-    def resizeEvent(self, a0):
-        super().resizeEvent(a0)
-        self._apply_mask()
-
-    def showEvent(self, a0):
-        super().showEvent(a0)
-        self._apply_mask()
-
-
-def _exec_dialog(dlg: QDialog, parent) -> int:
-    """exec() с затемняющим оверлеем и центрированием поверх parent/host —
-    единая точка входа для модальных вызовов диалогов вкладки (см. _show_centered
-    в ui.plots_widget)."""
-    dlg.adjustSize()
-    overlay = _BasePromptDialog._show_centered(dlg, parent)
-    try:
-        return dlg.exec()
-    finally:
-        if overlay is not None:
-            overlay.hide()
-            overlay.deleteLater()
-
-
-class _AlertDialog(_BasePromptDialog):
-    """Однокнопочное информационное окно — замена QMessageBox.warning/
-    information/critical, но в едином визуальном языке приложения."""
-
-    def __init__(self, title: str, message: str, *, ok_text: str = "Понятно", parent=None):
-        super().__init__(title, message, parent=parent)
-        self._add_button(
-            ok_text,
-            "QPushButton{background:#07414F;color:#FFFFFF;border:none;"
-            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
-            "QPushButton:hover{background:#0B5A6E;}",
-            self.accept)
-        self._finalize()
-
-    @staticmethod
-    def show_alert(parent, title: str, message: str, *, ok_text: str = "Понятно"):
-        dlg = _AlertDialog(title, message, ok_text=ok_text, parent=parent)
-        overlay = _BasePromptDialog._show_centered(dlg, parent)
-        try:
-            dlg.exec()
-        finally:
-            if overlay is not None:
-                overlay.hide()
-                overlay.deleteLater()
+# _FramelessDialog, _exec_dialog, _AlertDialog → ui.dialogs
+# (BaseDialog / exec_dialog / AlertDialog); импортируются в шапке модуля.
 
 
 class CategoryEditorPanel(_FramelessDialog):
@@ -1617,25 +1547,8 @@ class CategoryEditorPanel(_FramelessDialog):
     categoryRenamed   = pyqtSignal(str, str)   # (old_name, new_name)
 
     def _panel_style(self) -> str:
-        return self._frame_qss() + """
-        QPushButton#addCatBtn {
-            background: #07414F; color: white; border: none;
-            border-radius: 6px; padding: 7px 14px; font-size: 12px; font-weight: 600;
-        }
-        QPushButton#addCatBtn:hover { background: #0A5A6B; }
-        QLineEdit#newCatInput {
-            background: #F8F9FA; border: 1px solid #D5DCE4;
-            border-radius: 6px; color: #1F2937; padding: 7px 10px; font-size: 12px;
-        }
-        QLineEdit#newCatInput:focus { border: 1px solid #07414F; }
-        QScrollArea { background: transparent; border: none; }
+        return self.base_qss() + """
         QWidget#scrollContents { background: transparent; }
-        QLabel#panelTitle { color: #111827; font-size: 15px; font-weight: 700; }
-        QPushButton#btnPanelClose {
-            background: transparent; border: none; color: #9CA3AF;
-            font-size: 15px; font-weight: 600; border-radius: 12px;
-        }
-        QPushButton#btnPanelClose:hover { background: #F3F4F6; color: #374151; }
     """
 
     def __init__(self, categories: list[str], parent=None):
@@ -1659,18 +1572,7 @@ class CategoryEditorPanel(_FramelessDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        header = QHBoxLayout()
-        header.setSpacing(6)
-        title = QLabel("Категории", objectName="panelTitle")
-        header.addWidget(title)
-        header.addStretch()
-        btn_close = QPushButton("✕", objectName="btnPanelClose")
-        btn_close.setFixedSize(24, 24)
-        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_close.clicked.connect(self.close)
-        header.addWidget(btn_close)
-        layout.addLayout(header)
+        layout.addLayout(self.make_header("Категории", closable=True))
 
         self._scroll_contents = QWidget(objectName="scrollContents")
         self._list_layout = QVBoxLayout(self._scroll_contents)
@@ -1681,11 +1583,6 @@ class CategoryEditorPanel(_FramelessDialog):
         scroll.setWidget(self._scroll_contents)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            "QScrollBar:vertical { width: 6px; background: transparent; border: none; }"
-            "QScrollBar::handle:vertical { background: #C9D8E2; border-radius: 3px; min-height: 20px; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        )
         layout.addWidget(scroll, stretch=1)
 
         add_row = QHBoxLayout()
@@ -1693,7 +1590,7 @@ class CategoryEditorPanel(_FramelessDialog):
         self._new_input = QLineEdit(objectName="newCatInput")
         self._new_input.setPlaceholderText("Новая категория...")
         self._new_input.returnPressed.connect(self._on_add)
-        add_btn = QPushButton("Добавить", objectName="addCatBtn")
+        add_btn = PrimaryButton("Добавить")
         add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         add_btn.clicked.connect(self._on_add)
         add_row.addWidget(self._new_input, stretch=1)
@@ -1791,45 +1688,18 @@ class LoadSettingsDialog(_FramelessDialog):
     """Диалог настроек перед загрузкой файла выписки."""
 
     def _style(self) -> str:
-        return self._frame_qss() + """
-        QLabel  { background: transparent; color: #374151; }
-        QLabel#sectionLabel {
-            color: #9CA3AF; font-size: 11px; font-weight: 600;
-            letter-spacing: 0.5px; text-transform: uppercase;
-        }
-        QPushButton#fmtActive {
-            background: #07414F; color: #ffffff; border: none;
-            border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
-        }
-        QPushButton#fmtInactive {
-            background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-            border-radius: 6px; padding: 8px 20px; font-size: 13px;
-        }
-        QPushButton#fmtInactive:hover { background: #E5E7EB; color: #374151; }
-        QPushButton#btnPrimary {
-            background: #07414F; color: white; border: none;
-            border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
-        }
-        QPushButton#btnPrimary:hover  { background: #0B5A6E; }
-        QPushButton#btnPrimary:pressed { background: #062F38; }
-        QPushButton#btnSecondary {
-            background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-            border-radius: 6px; padding: 7px 16px; font-size: 13px;
-        }
-        QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
-        QCheckBox {
-            color: #374151; background: transparent; font-size: 13px; spacing: 8px;
-        }
-        QCheckBox::indicator {
-            width: 16px; height: 16px; border-radius: 4px;
-            border: 1px solid #D1D5DB; background: #F8F9FA;
-        }
-        QCheckBox::indicator:checked {
-            background: #07414F; border-color: #07414F;
-            image: url(none);
-        }
-        QCheckBox::indicator:hover { border-color: #07414F; }
-        QFrame#divider { background: #E5E7EB; max-height: 1px; }
+        return self.base_qss() + f"""
+        QPushButton#fmtActive {{
+            background: {C.BRAND}; color: #FFFFFF; border: none;
+            border-radius: 6px; padding: 8px 20px; font-size: {FS.BODY}px;
+            font-weight: 600;
+        }}
+        QPushButton#fmtInactive {{
+            background: {C.BG_SURFACE}; color: {C.TEXT_MUTED};
+            border: 1px solid {C.BORDER};
+            border-radius: 6px; padding: 8px 20px; font-size: {FS.BODY}px;
+        }}
+        QPushButton#fmtInactive:hover {{ background: {C.BG_HOVER}; color: {C.TEXT_BODY}; }}
     """
 
     def __init__(self, parent=None, has_existing_data: bool = False):
@@ -1847,9 +1717,7 @@ class LoadSettingsDialog(_FramelessDialog):
         lay.setContentsMargins(24, 24, 24, 20)
         lay.setSpacing(14)
 
-        title = QLabel("Загрузка детализации")
-        title.setStyleSheet("font-size:15px; font-weight:700; color:#111827;")
-        lay.addWidget(title)
+        lay.addLayout(self.make_header("Загрузка детализации"))
 
         div0 = QFrame(objectName="divider")
         div0.setFixedHeight(1)
@@ -1912,16 +1780,11 @@ class LoadSettingsDialog(_FramelessDialog):
         else:
             self.chk_merge = None
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
-        btn_cancel = QPushButton("Отмена",       objectName="btnSecondary")
-        btn_ok     = QPushButton("Выбрать файл", objectName="btnPrimary")
+        btn_cancel = SecondaryButton("Отмена")
+        btn_ok     = PrimaryButton("Выбрать файл")
         btn_cancel.clicked.connect(self.reject)
-        btn_ok    .clicked.connect(self.accept)
-        btn_row.addStretch()
-        btn_row.addWidget(btn_cancel)
-        btn_row.addWidget(btn_ok)
-        lay.addLayout(btn_row)
+        btn_ok.clicked.connect(self.accept)
+        lay.addLayout(self.make_button_row(btn_cancel, btn_ok))
 
     def _set_fmt(self, fmt: str):
         self._fmt = fmt
@@ -2109,6 +1972,20 @@ class _SplitRowWidget(QWidget):
         self.combo_plot.setCurrentText(str(data.get("Участок") or ""))
 
 
+# Кнопки «Разделить операцию» / «Добавить строку» — общий стиль
+# диалогов добавления/редактирования операции.
+_SPLIT_BTN_QSS = f"""
+    QPushButton#btnSplit, QPushButton#btnAddSplit {{
+        background: transparent; color: {C.BRAND}; border: 1px solid #B5C8D5;
+        border-radius: 6px; padding: 5px 14px; font-size: {FS.SMALL}px;
+        font-weight: 600; text-align: left;
+    }}
+    QPushButton#btnSplit:hover, QPushButton#btnAddSplit:hover {{
+        background: {C.BRAND_FAINT};
+    }}
+"""
+
+
 class AddRowDialog(_FramelessDialog):
     """Диалог ручного добавления операции в таблицу Детализации."""
 
@@ -2122,8 +1999,10 @@ class AddRowDialog(_FramelessDialog):
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setContentsMargins(24, 22, 24, 20)
         lay.setSpacing(14)
+
+        lay.addLayout(self.make_header("Добавить операцию"))
 
         form = QFormLayout()
         form.setSpacing(10)
@@ -2186,7 +2065,9 @@ class AddRowDialog(_FramelessDialog):
         self._split_rows_lay.setSpacing(2)
         split_lay.addLayout(self._split_rows_lay)
 
-        self._btn_add_split = QPushButton("＋  Добавить строку")
+        self._btn_add_split = QPushButton(" Добавить строку")
+        self._btn_add_split.setIcon(icons.get_icon("add", 14, color=C.BRAND))
+        self._btn_add_split.setIconSize(QSize(14, 14))
         self._btn_add_split.setObjectName("btnAddSplit")
         self._btn_add_split.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_add_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -2209,17 +2090,11 @@ class AddRowDialog(_FramelessDialog):
         )
         lay.addWidget(self._split_warning)
 
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._btn_save = btns.button(QDialogButtonBox.StandardButton.Ok)
-        self._btn_save.setText("Добавить")
-        btn_cancel = btns.button(QDialogButtonBox.StandardButton.Cancel)
-        btn_cancel.setText("Отмена")
-        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        btns.accepted.connect(self._on_accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
+        btn_cancel = SecondaryButton("Отмена")
+        btn_cancel.clicked.connect(self.reject)
+        self._btn_save = PrimaryButton("Добавить")
+        self._btn_save.clicked.connect(self._on_accept)
+        lay.addLayout(self.make_button_row(btn_cancel, self._btn_save))
         self._update_save_state()
 
     def _on_split_toggle(self):
@@ -2342,35 +2217,7 @@ class AddRowDialog(_FramelessDialog):
         return result
 
     def _apply_styles(self):
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel  { background: transparent; color: #374151; font-size: 13px; }
-            QLineEdit, QComboBox, QDateEdit {
-                background: #F8F9FA; border: 1px solid #D1D5DB;
-                border-radius: 5px; color: #374151; padding: 7px 10px; font-size: 13px;
-            }
-            QLineEdit:focus, QComboBox:focus, QDateEdit:focus { border: 1px solid #07414F; }
-            QPushButton#btnSecondary {
-                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-                border-radius: 6px; padding: 7px 14px; font-size: 13px;
-            }
-            QPushButton#btnSecondary:hover { background: #D1D5DB; color: #374151; }
-            QDialogButtonBox QPushButton {
-                background: #07414F; color: white; border: none;
-                border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
-            }
-            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
-            QDialogButtonBox QPushButton[text='Отмена'] {
-                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-            }
-            QPushButton#btnSplit, QPushButton#btnAddSplit {
-                background: transparent; color: #07414F; border: 1px solid #B5C8D5;
-                border-radius: 6px; padding: 5px 14px; font-size: 12px; font-weight: 600;
-                text-align: left;
-            }
-            QPushButton#btnSplit:hover, QPushButton#btnAddSplit:hover {
-                background: #E8F0F5;
-            }
-        """)
+        self.setStyleSheet(self.base_qss() + _SPLIT_BTN_QSS)
 
 
 # =========================================================================== #
@@ -2468,8 +2315,10 @@ class EditOperationDialog(_FramelessDialog):
 
     def _setup_ui(self):
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setContentsMargins(24, 22, 24, 20)
         lay.setSpacing(14)
+
+        lay.addLayout(self.make_header("Редактировать операцию"))
 
         form = QFormLayout()
         form.setSpacing(10)
@@ -2530,7 +2379,9 @@ class EditOperationDialog(_FramelessDialog):
         self._split_rows_lay.setSpacing(2)
         split_lay.addLayout(self._split_rows_lay)
 
-        self._btn_add_split = QPushButton("＋  Добавить строку")
+        self._btn_add_split = QPushButton(" Добавить строку")
+        self._btn_add_split.setIcon(icons.get_icon("add", 14, color=C.BRAND))
+        self._btn_add_split.setIconSize(QSize(14, 14))
         self._btn_add_split.setObjectName("btnAddSplit")
         self._btn_add_split.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_add_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -2553,17 +2404,11 @@ class EditOperationDialog(_FramelessDialog):
         )
         lay.addWidget(self._split_warning)
 
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._btn_save = btns.button(QDialogButtonBox.StandardButton.Ok)
-        self._btn_save.setText("Сохранить")
-        btn_cancel = btns.button(QDialogButtonBox.StandardButton.Cancel)
-        btn_cancel.setText("Отмена")
-        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        btns.accepted.connect(self._on_accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
+        btn_cancel = SecondaryButton("Отмена")
+        btn_cancel.clicked.connect(self.reject)
+        self._btn_save = PrimaryButton("Сохранить")
+        self._btn_save.clicked.connect(self._on_accept)
+        lay.addLayout(self.make_button_row(btn_cancel, self._btn_save))
         self._update_save_state()
 
     def _on_split_toggle(self):
@@ -2691,41 +2536,7 @@ class EditOperationDialog(_FramelessDialog):
         return result
 
     def _apply_styles(self):
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel  { background: transparent; color: #374151; font-size: 13px; }
-            QLineEdit, QComboBox, QDateEdit {
-                background: #F8F9FA; border: 1px solid #D1D5DB;
-                border-radius: 5px; color: #374151; padding: 7px 10px; font-size: 13px;
-            }
-            QLineEdit:focus, QComboBox:focus, QDateEdit:focus { border: 1px solid #07414F; }
-            QPushButton#btnSecondary {
-                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-                border-radius: 6px; padding: 7px 14px; font-size: 13px;
-            }
-            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
-            QDialogButtonBox QPushButton {
-                background: #07414F; color: white; border: none;
-                border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600;
-            }
-            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
-            QDialogButtonBox QPushButton:disabled {
-                background: #E5E7EB; color: #9CA3AF; border: none;
-            }
-            QDialogButtonBox QPushButton[text='Отмена'] {
-                background: #E5E7EB; color: #6B7280;
-            }
-            QDialogButtonBox QPushButton[text='Отмена']:hover {
-                background: #D1D5DB; color: #374151;
-            }
-            QPushButton#btnSplit, QPushButton#btnAddSplit {
-                background: transparent; color: #07414F; border: 1px solid #B5C8D5;
-                border-radius: 6px; padding: 5px 14px; font-size: 12px; font-weight: 600;
-                text-align: left;
-            }
-            QPushButton#btnSplit:hover, QPushButton#btnAddSplit:hover {
-                background: #E8F0F5;
-            }
-        """)
+        self.setStyleSheet(self.base_qss() + _SPLIT_BTN_QSS)
 
 
 # =========================================================================== #
@@ -3371,21 +3182,19 @@ class DetailWidget(QWidget):
 
         top_bar = QHBoxLayout()
         top_bar.addStretch()
-        self.btn_load = QPushButton("Загрузить файл")
-        self.btn_load.setObjectName("btnPrimary")
+        self.btn_load = PrimaryButton("Загрузить файл", icon="folder_open")
         self.btn_load.clicked.connect(self.load_file)
         top_bar.addWidget(self.btn_load)
 
-        btn_add_row = QPushButton("＋  Добавить операцию")
-        btn_add_row.setObjectName("btnSecondary")
+        btn_add_row = SecondaryButton("Добавить операцию", icon="add")
         btn_add_row.clicked.connect(self._add_row)
         top_bar.addWidget(btn_add_row)
 
-        btn_cat = QPushButton("Категории", objectName="btnSecondary")
+        btn_cat = SecondaryButton("Категории", icon="category")
         btn_cat.clicked.connect(self._show_cat_editor)
         top_bar.addWidget(btn_cat)
 
-        btn_excel = QPushButton("Экспорт в Excel", objectName="btnSecondary")
+        btn_excel = SecondaryButton("Экспорт в Excel", icon="excel")
         btn_excel.clicked.connect(self._export_excel)
         top_bar.addWidget(btn_excel)
 
@@ -3458,36 +3267,8 @@ class DetailWidget(QWidget):
 
     # QTreeView нуждается в собственных правилах: глобальный QSS целит в
     # QTableWidget#mainTable и на дерево не распространяется.
-    _TREE_STYLE = """
-        QTreeView#mainTable {
-            background: #FFFFFF; border: none;
-            color: #1F2937; font-size: 13px;
-            selection-background-color: #C9D8E2; selection-color: #07414F;
-            alternate-background-color: #F0F4F8;
-            outline: 0;
-        }
-        QTreeView#mainTable::item {
-            padding: 6px 10px; border-bottom: 1px solid #E3E8EF;
-        }
-        QTreeView#mainTable::item:hover { background: #DDE4EE; }
-        QTreeView#mainTable::item:selected { background: #C9D8E2; color: #07414F; }
-        QTreeView#mainTable::branch { background: transparent; }
-        QTreeView#mainTable::branch:has-children:!has-siblings:closed,
-        QTreeView#mainTable::branch:closed:has-children:has-siblings,
-        QTreeView#mainTable::branch:open:has-children:!has-siblings,
-        QTreeView#mainTable::branch:open:has-children:has-siblings { image: none; }
-        QTreeView#mainTable QScrollBar:vertical {
-            width: 8px; background: #FFFFFF; border: none;
-        }
-        QTreeView#mainTable QScrollBar::handle:vertical {
-            background: #C3CAD3; border-radius: 4px; min-height: 30px;
-        }
-        QTreeView#mainTable QScrollBar::handle:vertical:hover { background: #97A1AE; }
-        QTreeView#mainTable QScrollBar::add-line:vertical,
-        QTreeView#mainTable QScrollBar::sub-line:vertical { height: 0; }
-        QTreeView#mainTable QScrollBar::add-page:vertical,
-        QTreeView#mainTable QScrollBar::sub-page:vertical { background: #FFFFFF; }
-    """
+    # Единая копия стиля — ui.theme.tree_qss() (через ui.common.TREE_STYLE).
+    _TREE_STYLE = _TREE_STYLE_COMMON
 
     # ------------------------------------------ редактор категорий ---------- #
     def _show_cat_editor(self):
@@ -3776,6 +3557,10 @@ class DetailWidget(QWidget):
             self, "Открыть файл выписки", "", "Excel файлы (*.xlsx *.xls)")
         if not path:
             return
+        # Импорт большого файла ощутимо долгий (парсинг Excel + автокатегоризация
+        # + пересчёт) — показываем курсор занятости, чтобы окно не выглядело
+        # зависшим (U1 из аудита UI).
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             df = pd.read_excel(path, engine="openpyxl")
             cols = [c for c in df.columns
@@ -3840,6 +3625,7 @@ class DetailWidget(QWidget):
                     self.df_full = existing
 
                 if dup_count:
+                    QApplication.restoreOverrideCursor()
                     _AlertDialog.show_alert(
                         self, "Импорт завершён",
                         f"Добавлено новых операций: {len(new_rows)}.\n"
@@ -3848,6 +3634,7 @@ class DetailWidget(QWidget):
                         f"правой кнопкой мыши по строке — восстановить исходные "
                         f"данные повтора или оставить как есть)."
                     )
+                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             else:
                 self._manual_rows.clear()
                 self._manual_cells.clear()
@@ -3857,7 +3644,11 @@ class DetailWidget(QWidget):
             self.apply_filters()
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
+            QApplication.restoreOverrideCursor()
             _AlertDialog.show_alert(self, "Ошибка загрузки", f"Не удалось загрузить файл:\n{e}")
+        finally:
+            # Лишний restore при уже пустом стеке курсоров — no-op.
+            QApplication.restoreOverrideCursor()
 
     def load_dataframe(self, df: "pd.DataFrame"):
         """Восстанавливает DataFrame из сохранённого проекта без диалога выбора файла."""
@@ -4092,15 +3883,7 @@ class DetailWidget(QWidget):
         self.tree.setCurrentIndex(index)
 
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background: #F8F9FA; border: 1px solid #D1D5DB; color: #374151;
-                font-size: 13px; padding: 4px;
-            }
-            QMenu::item { padding: 8px 20px; border-radius: 4px; }
-            QMenu::item:selected { background: #E8F0F5; color: #07414F; }
-            QMenu::separator { height: 1px; background: #E5E7EB; margin: 4px 8px; }
-        """)
+        menu.setStyleSheet(menu_qss())
 
         if node.kind == "op":
             act_dup = QAction("Дублировать операцию", self)

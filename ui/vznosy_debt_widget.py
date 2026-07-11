@@ -12,13 +12,23 @@ from PyQt6.QtWidgets import (
 
 from core import energy
 from core.utils import fmt_money
-from ui.plots_widget import (
-    _SortHeaderView, _ClipFrame, _TREE_STYLE, _SB_W, _FlatTableModel,
-    _DEBT_COLOR_LIGHT, _is_visible, _is_owner, _owner_name,
+from ui.buttons import SecondaryButton
+from ui.common import (
+    SortHeaderView as _SortHeaderView,
+    ClipFrame as _ClipFrame,
+    FlatTableModel as _FlatTableModel,
+    TREE_STYLE as _TREE_STYLE,
+    SB_W as _SB_W,
 )
+from ui.theme import C
+from ui.dialogs import (
+    AlertDialog as _AlertDialog,
+    BaseDialog as _FramelessDialog,
+    exec_dialog as _exec_dialog,
+)
+from ui.plots_widget import _is_visible, _is_owner, _owner_name
 from ui.vznosy_card import VznosyCardDialog
 from ui.rates_widget import VznosyRatesWidget
-from ui.detail_widget import _FramelessDialog, _exec_dialog, _AlertDialog
 
 
 # ============================================================================ #
@@ -182,10 +192,9 @@ class _PeriodFilterButton(QWidget):
 # ============================================================================ #
 
 class _RatesDialog(_FramelessDialog):
-    """Кастомная (без нативного чрома) карточка для VznosyRatesWidget —
-    единственная точка стилизации служебных objectName-ов виджета
-    (pageTitle/filterFrame/btnPrimary и т.п.), которые вне контекста
-    QMainWindow не получают глобальный QSS приложения."""
+    """Кастомная (без нативного чрома) карточка для VznosyRatesWidget.
+    Стили страничных objectName-ов (pageTitle/filterFrame/…) и таблиц
+    приходят из общего блока BaseDialog (ui.theme.dialog_qss)."""
 
     def __init__(self, rates_widget: VznosyRatesWidget, parent=None):
         super().__init__(parent)
@@ -209,55 +218,6 @@ class _RatesDialog(_FramelessDialog):
         lay.addLayout(header)
 
         lay.addWidget(rates_widget, stretch=1)
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel { background: transparent; color: #374151; }
-            QLabel#pageTitle { font-size: 18px; font-weight: 700; color: #1F2937; }
-            QLabel#filterLabel { color: #9AA3AE; font-size: 13px; }
-            QLabel#statusLabel { color: #6B7280; font-size: 12px; }
-            QFrame#filterFrame {
-                background: #F8F9FA; border: 1px solid #E3E8EE; border-radius: 8px;
-            }
-            QLineEdit#searchInput {
-                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
-                color: #1F2937; padding: 7px 12px; font-size: 13px;
-            }
-            QLineEdit#searchInput:focus { border: 1px solid #07414F; }
-            QDateEdit#datePicker {
-                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
-                color: #1F2937; padding: 7px 10px; font-size: 13px;
-            }
-            QDateEdit#datePicker::drop-down { border: none; width: 18px; }
-            QPushButton#btnPrimary {
-                background: #07414F; color: #FFFFFF; border: none; border-radius: 6px;
-                padding: 8px 18px; font-size: 13px; font-weight: 600;
-            }
-            QPushButton#btnPrimary:hover   { background: #0B5A6E; }
-            QPushButton#btnPrimary:pressed { background: #062F38; }
-            QPushButton#btnSecondary {
-                background: #FFFFFF; color: #3C4654;
-                border: 1px solid #D5DCE4; border-radius: 6px;
-                padding: 7px 12px; font-size: 13px;
-            }
-            QPushButton#btnSecondary:hover { background: #F0F3F7; color: #1F2937; }
-            QPushButton#btnPanelClose {
-                background: transparent; border: none; color: #9CA3AF;
-                font-size: 15px; font-weight: 600; border-radius: 12px;
-            }
-            QPushButton#btnPanelClose:hover { background: #F3F4F6; color: #374151; }
-            QTableWidget#summaryTable {
-                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 8px;
-                gridline-color: #EAEDF1; color: #1F2937; font-size: 12px;
-                selection-background-color: #E8F0F5; selection-color: #07414F;
-            }
-            QTableWidget#summaryTable QHeaderView::section {
-                background: #EEF1F5; color: #6B7280; border: none;
-                border-right: 1px solid #E3E8EE; border-bottom: 2px solid #E3E8EE;
-                padding: 8px 10px; font-size: 12px; font-weight: 600;
-            }
-            QTableWidget#summaryTable::item {
-                padding: 4px 10px; border-bottom: 1px solid #EAEDF1;
-            }
-        """)
 
 
 # ============================================================================ #
@@ -291,10 +251,6 @@ class VznosyDebtWidget(QWidget):
             "текущей активной группы (договора). Если выключено — вся история "
             "участка, включая прежних собственников."
         )
-        self.chk_active_only.setStyleSheet(
-            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
-            "QCheckBox::indicator{width:15px;height:15px;}"
-        )
         self.chk_active_only.stateChanged.connect(self._rebuild)
         top.addWidget(self.chk_active_only)
 
@@ -312,32 +268,30 @@ class VznosyDebtWidget(QWidget):
         self.date_as_of.dateChanged.connect(self._rebuild)
         top.addWidget(self.date_as_of)
 
-        btn = QPushButton("🔄  Пересчитать", objectName="btnPrimary")
-        btn.clicked.connect(self._rebuild)
-        top.addWidget(btn)
-
-        self.btn_mass_pdf = QPushButton("📄  Квитанции должникам", objectName="btnSecondary")
+        # Кнопки «Пересчитать» больше нет: любое изменение фильтров/даты и так
+        # вызывает _rebuild (U2 из аудита UI).
+        self.btn_mass_pdf = SecondaryButton("Квитанции должникам", icon="receipt")
         self.btn_mass_pdf.clicked.connect(self._export_debtor_receipts)
         top.addWidget(self.btn_mass_pdf)
 
-        btn_rates = QPushButton("📅  Периоды", objectName="btnSecondary")
+        btn_rates = SecondaryButton("Периоды", icon="calendar")
         btn_rates.clicked.connect(self._open_rates_dialog)
         top.addWidget(btn_rates)
 
-        btn_excel = QPushButton("Экспорт в Excel", objectName="btnSecondary")
+        btn_excel = SecondaryButton("Экспорт в Excel", icon="excel")
         btn_excel.clicked.connect(self._export_excel)
         top.addWidget(btn_excel)
 
         lay.addLayout(top)
 
-        # Легенда
+        # Легенда — те же цвета, что и заливка строк (C.DEBT / C.DEBT_BG)
         legend = QHBoxLayout()
         legend.setSpacing(20)
         for color, text in [
-            ("#059669", "■  без долга / аванс"),
-            ("#f9a825", "■  небольшой долг"),
-            ("#ef6c00", "■  средний"),
-            ("#DC2626", "■  крупный"),
+            (C.DEBT["ok"],   "■  без долга / аванс"),
+            (C.DEBT["low"],  "■  небольшой долг"),
+            (C.DEBT["mid"],  "■  средний"),
+            (C.DEBT["high"], "■  крупный"),
         ]:
             lb = QLabel(text)
             lb.setStyleSheet(
@@ -544,7 +498,7 @@ class VznosyDebtWidget(QWidget):
             area_tip = ("Не указана площадь — начисление по тарифу за м² невозможно"
                         if bal.area_missing_warning else "")
 
-            color = vznosy.debt_color(debt, annual_avg=annual_avg)
+            level = vznosy.debt_level(debt, annual_avg=annual_avg)
 
             try:
                 plot_sort = float(str(plot).split(",")[0])
@@ -574,7 +528,7 @@ class VznosyDebtWidget(QWidget):
 
                 "_text_Долг / Аванс": fmt_money(debt),
                 "_sort_Долг / Аванс": debt,
-                "_bg_Долг / Аванс": _DEBT_COLOR_LIGHT.get(color, color),
+                "_bg_Долг / Аванс": C.DEBT_BG[level],
                 "_bold_Долг / Аванс": True,
             }
             rows.append(row)
@@ -677,20 +631,27 @@ class VznosyDebtWidget(QWidget):
 
         ok = 0
         errors = []
-        for plot, cur_name in debtors:
-            surname = cur_name.split()[0] if cur_name else ""
-            fname = f"Уч_{plot}_ЧВ"
-            if surname:
-                safe_surname = re.sub(r"[^\w\-]", "_", surname)
-                fname += f"_{safe_surname}"
-            fname += f"_{as_of.isoformat()}.pdf"
-            fname = fname.replace("/", "-")
-            path = os.path.join(folder, fname)
-            try:
-                receipt.save_vznosy_receipt_pdf(plot, self._df, path, as_of=as_of)
-                ok += 1
-            except Exception as e:
-                errors.append(f"уч. {plot}: {e}")
+        # Пакетная генерация PDF заметно долгая — курсор занятости, чтобы
+        # окно не выглядело зависшим (U1 из аудита UI).
+        from PyQt6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for plot, cur_name in debtors:
+                surname = cur_name.split()[0] if cur_name else ""
+                fname = f"Уч_{plot}_ЧВ"
+                if surname:
+                    safe_surname = re.sub(r"[^\w\-]", "_", surname)
+                    fname += f"_{safe_surname}"
+                fname += f"_{as_of.isoformat()}.pdf"
+                fname = fname.replace("/", "-")
+                path = os.path.join(folder, fname)
+                try:
+                    receipt.save_vznosy_receipt_pdf(plot, self._df, path, as_of=as_of)
+                    ok += 1
+                except Exception as e:
+                    errors.append(f"уч. {plot}: {e}")
+        finally:
+            QApplication.restoreOverrideCursor()
         if errors:
             _AlertDialog.show_alert(
                 self, "Квитанции",

@@ -10,16 +10,17 @@ import webbrowser
 from typing import Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QVBoxLayout, QWidget,
 )
 
-from ui.detail_widget import _FramelessDialog
+from ui.buttons import LinkButton, PrimaryButton, SecondaryButton
+from ui.dialogs import BaseDialog, exec_dialog
 from ui.license_dialog import LANDING_URL
+from ui.theme import C, FS
 
 
-class TrialNoticeDialog(_FramelessDialog):
+class TrialNoticeDialog(BaseDialog):
     """Возвращает Accepted, если пользователь активировал лицензию прямо отсюда."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -37,11 +38,7 @@ class TrialNoticeDialog(_FramelessDialog):
         root.setContentsMargins(24, 22, 24, 18)
         root.setSpacing(12)
 
-        title = QLabel("Вы используете ознакомительную версию", objectName="tnTitle")
-        f = QFont()
-        f.setPointSize(14)
-        f.setBold(True)
-        title.setFont(f)
+        title = QLabel("Вы используете ознакомительную версию", objectName="dlgTitle")
         title.setWordWrap(True)
         root.addWidget(title)
 
@@ -53,9 +50,7 @@ class TrialNoticeDialog(_FramelessDialog):
         body.setWordWrap(True)
         root.addWidget(body)
 
-        self._link_enter_key = QPushButton("Ввести лицензионный ключ", objectName="btnLink")
-        self._link_enter_key.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._link_enter_key.setFlat(True)
+        self._link_enter_key = LinkButton("Ввести лицензионный ключ")
         self._link_enter_key.clicked.connect(self._on_enter_key_clicked)
         root.addWidget(self._link_enter_key, alignment=Qt.AlignmentFlag.AlignLeft)
 
@@ -65,45 +60,21 @@ class TrialNoticeDialog(_FramelessDialog):
         bottom_row.setSpacing(10)
         bottom_row.addStretch()
 
-        self._btn_buy = QPushButton("Купить лицензию", objectName="btnSecondary")
-        self._btn_buy.setFixedHeight(34)
-        self._btn_buy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_buy = SecondaryButton("Купить лицензию")
         self._btn_buy.clicked.connect(self._on_buy_clicked)
         bottom_row.addWidget(self._btn_buy)
 
-        self._btn_continue = QPushButton("Продолжить", objectName="btnPrimary")
-        self._btn_continue.setFixedHeight(34)
+        self._btn_continue = PrimaryButton("Продолжить")
         self._btn_continue.setMinimumWidth(110)
         self._btn_continue.setDefault(True)
-        self._btn_continue.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_continue.clicked.connect(self.reject)
         bottom_row.addWidget(self._btn_continue)
 
         root.addLayout(bottom_row)
 
     def _apply_styles(self) -> None:
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel { background: transparent; }
-            QLabel#tnTitle { color: #1F2937; }
-            QLabel#tnBody { color: #6B7280; font-size: 13px; }
-            QPushButton#btnLink {
-                background: transparent; border: none; color: #07414F;
-                font-size: 13px; text-decoration: underline; text-align: left;
-                padding: 0px;
-            }
-            QPushButton#btnLink:hover { color: #0B5A6E; }
-            QPushButton#btnPrimary {
-                background: #07414F; color: #FFFFFF; border: none; border-radius: 6px;
-                padding: 6px 18px; font-size: 13px; font-weight: 600;
-            }
-            QPushButton#btnPrimary:hover   { background: #0B5A6E; }
-            QPushButton#btnPrimary:pressed { background: #062F38; }
-            QPushButton#btnSecondary {
-                background: #E5E7EB; color: #6B7280;
-                border: 1px solid #D1D5DB; border-radius: 6px;
-                padding: 6px 14px; font-size: 13px;
-            }
-            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
+        self.setStyleSheet(self.base_qss() + f"""
+            QLabel#tnBody {{ color: {C.TEXT_MUTED}; font-size: {FS.BODY}px; }}
         """)
 
     def _on_buy_clicked(self) -> None:
@@ -113,10 +84,9 @@ class TrialNoticeDialog(_FramelessDialog):
         webbrowser.open(LANDING_URL)
 
     def _on_enter_key_clicked(self) -> None:
-        from ui.detail_widget import _exec_dialog
         from ui.license_dialog import LicenseDialog
         dlg = LicenseDialog(self)
-        accepted = _exec_dialog(dlg, self) == dlg.DialogCode.Accepted
+        accepted = exec_dialog(dlg, self) == dlg.DialogCode.Accepted
         if accepted:
             self.activated = True
             self.accept()

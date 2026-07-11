@@ -1407,15 +1407,18 @@ def balance_for_active_group(plot: str, as_of: date, meters: dict, rates: list,
     )
 
 
-# ── палитра для UI ────────────────────────────────────────────────────
+# ── уровень долга для UI ─────────────────────────────────────────────
 
-def debt_color(debt: float, monthly_avg: float = 0.0) -> str:
-    """Возвращает hex-цвет для индикации уровня долга."""
+def debt_level(debt: float, monthly_avg: float = 0.0) -> str:
+    """Уровень долга: 'ok' | 'low' | 'mid' | 'high'.
+
+    Конкретные цвета подставляет UI (ui.theme.C.DEBT / C.DEBT_BG) —
+    ядро о палитре не знает."""
     if debt <= 0:
-        return "#2e7d32"        # аванс / ноль — зелёный
+        return "ok"             # аванс / ноль
     threshold = max(monthly_avg, 500.0)
     if debt <= threshold:
-        return "#f9a825"        # жёлтый — небольшой долг
+        return "low"            # небольшой долг
     if debt <= 3 * threshold:
-        return "#ef6c00"        # оранжевый
-    return "#c62828"            # красный — крупный долг
+        return "mid"
+    return "high"               # крупный долг

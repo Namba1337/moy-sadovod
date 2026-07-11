@@ -13,7 +13,25 @@ from PyQt6.QtWidgets import (
 )
 
 from core.utils import DATA_DIR
-from ui.plots_widget import _ConfirmDialog
+from ui.buttons import GhostButton, PrimaryButton
+from ui.dialogs import ConfirmDialog as _ConfirmDialog
+from ui.theme import C, menu_qss
+
+
+def _mark_invalid_input(inp: QLineEdit) -> None:
+    """Подсвечивает поле как ошибочное. Состояние полностью заменяется
+    (а не дописывается в конец styleSheet) и сбрасывается при первом же
+    изменении текста — исправленное значение не остаётся «красным»."""
+    inp.setStyleSheet(f"border: 1px solid {C.DANGER};")
+
+    def _reset(_=None, i=inp):
+        i.setStyleSheet("")
+        try:
+            i.textChanged.disconnect(_reset)
+        except TypeError:
+            pass
+
+    inp.textChanged.connect(_reset)
 
 
 class RatesWidget(QWidget):
@@ -57,8 +75,7 @@ class RatesWidget(QWidget):
         title = QLabel("Нормативы (тарифы на электроэнергию)", objectName="pageTitle")
         top.addWidget(title)
         top.addStretch()
-        btn_add = QPushButton("＋  Добавить тариф")
-        btn_add.setObjectName("btnPrimary")
+        btn_add = PrimaryButton("Добавить тариф", icon="add")
         btn_add.clicked.connect(self._add_rate)
         top.addWidget(btn_add)
         lay.addLayout(top)
@@ -100,13 +117,11 @@ class RatesWidget(QWidget):
         self.inp_note.setPlaceholderText("необязательно")
         form_lay.addWidget(self.inp_note, stretch=1)
 
-        btn_ok = QPushButton("Добавить")
-        btn_ok.setObjectName("btnPrimary")
+        btn_ok = PrimaryButton("Добавить")
         btn_ok.clicked.connect(self._confirm_add)
         form_lay.addWidget(btn_ok)
 
-        btn_cancel = QPushButton("✕")
-        btn_cancel.setObjectName("btnSecondary")
+        btn_cancel = GhostButton(icon="close", tooltip="Скрыть форму")
         btn_cancel.clicked.connect(lambda: self.form_frame.setVisible(False))
         form_lay.addWidget(btn_cancel)
 
@@ -198,7 +213,7 @@ class RatesWidget(QWidget):
         try:
             float(rate_text)
         except ValueError:
-            self.inp_rate.setStyleSheet(self.inp_rate.styleSheet() + "border:1px solid #DC2626;")
+            _mark_invalid_input(self.inp_rate)
             return
 
         date_str = self.inp_date.date().toString("yyyy-MM-dd")
@@ -237,13 +252,8 @@ class RatesWidget(QWidget):
         if row < 0:
             return
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu{background:#F8F9FA;border:1px solid #D1D5DB;color:#374151;
-                  font-size:13px;padding:4px;}
-            QMenu::item{padding:8px 20px;border-radius:4px;}
-            QMenu::item:selected{background:#EEF2FF;color:#DC2626;}
-        """)
-        act_del = QAction("удалить запись", self)
+        menu.setStyleSheet(menu_qss(danger=True))
+        act_del = QAction("Удалить запись", self)
         act_del.triggered.connect(lambda: self._delete_rate(row))
         menu.addAction(act_del)
         menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -317,8 +327,7 @@ class VznosyRatesWidget(QWidget):
         title = QLabel("Периоды членских взносов", objectName="pageTitle")
         top.addWidget(title)
         top.addStretch()
-        btn_add = QPushButton("＋  Добавить период")
-        btn_add.setObjectName("btnPrimary")
+        btn_add = PrimaryButton("Добавить период", icon="add")
         btn_add.clicked.connect(self._add_rate)
         top.addWidget(btn_add)
         lay.addLayout(top)
@@ -359,10 +368,6 @@ class VznosyRatesWidget(QWidget):
 
         self.chk_open_end = QCheckBox("Открытый")
         self.chk_open_end.setToolTip("Не указывать конечную дату (последний активный период)")
-        self.chk_open_end.setStyleSheet(
-            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
-            "QCheckBox::indicator{width:15px;height:15px;}"
-        )
         self.chk_open_end.stateChanged.connect(
             lambda s: self.inp_date_to.setEnabled(not bool(s))
         )
@@ -377,10 +382,6 @@ class VznosyRatesWidget(QWidget):
 
         self.chk_per_sqm = QCheckBox("₽/м²")
         self.chk_per_sqm.setToolTip("Сумма указана в рублях за м²")
-        self.chk_per_sqm.setStyleSheet(
-            "QCheckBox{color:#374151;background:transparent;font-size:12px;}"
-            "QCheckBox::indicator{width:15px;height:15px;}"
-        )
         self.chk_per_sqm.stateChanged.connect(self._on_toggle_per_sqm)
         form_lay.addWidget(self.chk_per_sqm)
 
@@ -398,13 +399,11 @@ class VznosyRatesWidget(QWidget):
         self.inp_note.setPlaceholderText("необязательно")
         form_lay.addWidget(self.inp_note, stretch=1)
 
-        btn_ok = QPushButton("Сохранить")
-        btn_ok.setObjectName("btnPrimary")
+        btn_ok = PrimaryButton("Сохранить")
         btn_ok.clicked.connect(self._confirm_add)
         form_lay.addWidget(btn_ok)
 
-        btn_cancel = QPushButton("✕")
-        btn_cancel.setObjectName("btnSecondary")
+        btn_cancel = GhostButton(icon="close", tooltip="Скрыть форму")
         btn_cancel.clicked.connect(lambda: self.form_frame.setVisible(False))
         form_lay.addWidget(btn_cancel)
 
@@ -535,7 +534,7 @@ class VznosyRatesWidget(QWidget):
             if v <= 0:
                 raise ValueError
         except ValueError:
-            target.setStyleSheet(target.styleSheet() + "border:1px solid #DC2626;")
+            _mark_invalid_input(target)
             return
 
         date_from_str = self.inp_date_from.date().toString("yyyy-MM-dd")
@@ -581,12 +580,7 @@ class VznosyRatesWidget(QWidget):
         if row < 0:
             return
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu{background:#F8F9FA;border:1px solid #D1D5DB;color:#374151;
-                  font-size:13px;padding:4px;}
-            QMenu::item{padding:8px 20px;border-radius:4px;}
-            QMenu::item:selected{background:#EEF2FF;color:#DC2626;}
-        """)
+        menu.setStyleSheet(menu_qss(danger=True))
         act_del = QAction("Удалить период", self)
         act_del.triggered.connect(lambda: self._delete_rate(row))
         menu.addAction(act_del)

@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from core.updater import APP_VERSION, ReleaseHistoryEntry, ReleaseHistoryFetcher
-from ui.detail_widget import _FramelessDialog
+from ui.dialogs import BaseDialog
+from ui.theme import C, FS
 from ui.update_dialog import _markdown_to_plain
 
 
@@ -40,7 +41,7 @@ class _ReleaseRow(QFrame):
         lay.addWidget(notes)
 
 
-class UpdateHistoryDialog(_FramelessDialog):
+class UpdateHistoryDialog(BaseDialog):
     """Окно со списком релизов приложения (GitHub Releases)."""
 
     def __init__(self, parent=None):
@@ -54,28 +55,21 @@ class UpdateHistoryDialog(_FramelessDialog):
         self._fetcher.errorOccurred.connect(self._on_error)
 
         self._setup_ui()
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel { background: transparent; color: #374151; }
-            QLabel#panelTitle { color: #111827; font-size: 15px; font-weight: 700; }
-            QPushButton#btnPanelClose {
-                background: transparent; border: none; color: #9CA3AF;
-                font-size: 15px; font-weight: 600; border-radius: 12px;
-            }
-            QPushButton#btnPanelClose:hover { background: #F3F4F6; color: #374151; }
-            QLabel#historyStatus { color: #9CA3AF; font-size: 12px; }
-            QScrollArea { background: transparent; border: none; }
-            QWidget#historyContents { background: transparent; }
-            QFrame#releaseRow {
-                background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
-            }
-            QLabel#releaseVersion { color: #07414F; font-size: 13px; font-weight: 700; }
-            QLabel#releaseDate { color: #9CA3AF; font-size: 11px; }
-            QLabel#releaseNotes { color: #374151; font-size: 12px; }
-            QLabel#releaseCurrentPill {
-                background: rgba(7,65,79,0.1); color: #07414F;
+        self.setStyleSheet(self.base_qss() + f"""
+            QLabel#historyStatus {{ color: {C.TEXT_FAINT}; font-size: {FS.SMALL}px; }}
+            QWidget#historyContents {{ background: transparent; }}
+            QFrame#releaseRow {{
+                background: {C.BG_SUBTLE}; border: 1px solid {C.BORDER_LIGHT};
+                border-radius: 8px;
+            }}
+            QLabel#releaseVersion {{ color: {C.BRAND}; font-size: {FS.BODY}px; font-weight: 700; }}
+            QLabel#releaseDate {{ color: {C.TEXT_FAINT}; font-size: {FS.CAPTION}px; }}
+            QLabel#releaseNotes {{ color: {C.TEXT_BODY}; font-size: {FS.SMALL}px; }}
+            QLabel#releaseCurrentPill {{
+                background: rgba(7,65,79,0.1); color: {C.BRAND};
                 border: 1px solid rgba(7,65,79,0.35); border-radius: 8px;
-                padding: 1px 8px; font-size: 11px; font-weight: 600;
-            }
+                padding: 1px 8px; font-size: {FS.CAPTION}px; font-weight: 600;
+            }}
         """)
         self._fetcher.fetch()
 
@@ -84,18 +78,7 @@ class UpdateHistoryDialog(_FramelessDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        header = QHBoxLayout()
-        header.setSpacing(6)
-        title = QLabel("История обновлений", objectName="panelTitle")
-        header.addWidget(title)
-        header.addStretch()
-        btn_close = QPushButton("✕", objectName="btnPanelClose")
-        btn_close.setFixedSize(24, 24)
-        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_close.clicked.connect(self.reject)
-        header.addWidget(btn_close)
-        layout.addLayout(header)
+        layout.addLayout(self.make_header("История обновлений", closable=True))
 
         self._status_lbl = QLabel("Загрузка списка релизов…", objectName="historyStatus")
         layout.addWidget(self._status_lbl)
@@ -109,11 +92,6 @@ class UpdateHistoryDialog(_FramelessDialog):
         scroll.setWidget(self._contents)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            "QScrollBar:vertical { width: 6px; background: transparent; border: none; }"
-            "QScrollBar::handle:vertical { background: #C9D8E2; border-radius: 3px; min-height: 20px; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        )
         layout.addWidget(scroll, stretch=1)
 
     def _clear_contents(self):

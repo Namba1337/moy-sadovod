@@ -25,6 +25,10 @@ from PyQt6.QtCore import (Qt, QPoint, QRect, QRectF, QTimer, pyqtSignal,
 from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPainter, QPixmap, QFontDatabase, QPalette, QBitmap, QPainterPath
 
 
+from ui.theme import C, FS, RAD, checkbox_qss, scrollbar_qss, summary_table_qss
+# QMessageBox остаётся только в аварийных обработчиках (_qt_msg_handler,
+# _excepthook): когда приложение сломано, нативное окно надёжнее кастомного.
+from ui.dialogs import AlertDialog as _AlertDialog, ConfirmDialog as _ConfirmDialog
 from ui.energy_card import MeterReplacementDialog, PlotCardDialog
 from ui.vznosy_card import VznosyCardDialog
 from ui.rates_widget import RatesWidget, VznosyRatesWidget
@@ -60,6 +64,8 @@ class _TitleBar(QWidget):
         self._version_btn.setFixedHeight(24)
         self._version_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._version_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._version_btn.setToolTip(
+            "Проверить обновления и открыть историю версий")
         self._version_btn.clicked.connect(window._on_update_pill_clicked)
         lyt.addWidget(self._version_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
         lyt.addSpacing(10)
@@ -770,13 +776,13 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         errors.append(f"Изображение карты: {e}")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить проект:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось сохранить проект:\n{e}")
             return
 
         msg = f"Проект сохранён:\n{path}"
         if errors:
             msg += "\n\nПредупреждения:\n" + "\n".join(errors)
-        QMessageBox.information(self, "Сохранено", msg)
+        _AlertDialog.show_alert(self, "Сохранено", msg)
 
     def _load_project(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -784,12 +790,11 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        reply = QMessageBox.question(
+        if not _ConfirmDialog.confirm(
             self, "Загрузка проекта",
             "Текущие данные будут заменены данными из файла.\nПродолжить?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+            confirm_text="Продолжить", danger=False,
+        ):
             return
 
         data_dir = Path(DATA_DIR)
@@ -816,7 +821,7 @@ class MainWindow(QMainWindow):
                         detail_df["Дата"] = pd.to_datetime(
                             detail_df["Дата"], unit="ms", errors="coerce")
                     except Exception as e:
-                        QMessageBox.warning(
+                        _AlertDialog.show_alert(
                             self, "Предупреждение",
                             f"Не удалось загрузить данные Детализации:\n{e}")
 
@@ -839,7 +844,7 @@ class MainWindow(QMainWindow):
                     with open(map_cfg, "w", encoding="utf-8") as f:
                         json.dump({"path": str(img_dest.resolve())}, f)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить проект:\n{e}")
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось загрузить проект:\n{e}")
             return
 
         # перезагружаем все виджеты из новых файлов
@@ -868,7 +873,7 @@ class MainWindow(QMainWindow):
             self.plots.refresh(None)
             self._plots_stale = False
 
-        QMessageBox.information(self, "Загружено", "Проект успешно загружен.")
+        _AlertDialog.show_alert(self, "Загружено", "Проект успешно загружен.")
 
     # ── Облачные обновления ─────────────────────────────────────────────
 
@@ -933,17 +938,20 @@ class MainWindow(QMainWindow):
         # При авто-проверке молча игнорируем — нет интернета, нет проблемы.
 
     def _apply_styles(self):
-        self.setStyleSheet("""
+        # QSS собирается из токенов темы (ui.theme.C/FS/RAD) через
+        # string.Template: в QSS полно фигурных скобок, f-строки здесь опасны.
+        from string import Template
+        qss = Template("""
             /* ── Global ───────────────────────────────────────── */
-            QMainWindow { background: #E9EDF3; }
+            QMainWindow { background: ${BG_WINDOW}; }
 
             /* ── Custom title bar ────────────────────────────── */
             QWidget#titleBar {
-                background: #E9EDF3;
+                background: ${BG_WINDOW};
             }
             QPushButton#btnVersionPill {
                 background: rgba(7,65,79,0.1); border: 1px solid rgba(7,65,79,0.35);
-                border-radius: 12px; color: #07414F; font-size: 12px; font-weight: 600;
+                border-radius: 12px; color: ${BRAND}; font-size: ${FS_SMALL}px; font-weight: 600;
                 padding: 2px 14px;
             }
             QPushButton#btnVersionPill:hover   { background: rgba(7,65,79,0.18); }
@@ -954,9 +962,9 @@ class MainWindow(QMainWindow):
             }
             QPushButton#btnChevron {
                 background: transparent; border: none;
-                color: #6B7686; border-radius: 6px; padding: 0px;
+                color: ${TEXT_MUTED}; border-radius: 6px; padding: 0px;
             }
-            QPushButton#btnChevron:hover { background: #DDE2EC; color: #3C4654; }
+            QPushButton#btnChevron:hover { background: ${NAV_HOVER}; color: ${TEXT_BODY}; }
             QPushButton#btnWinMin:hover  { background: rgba(0,0,0,9%); color: #1A1A1A; }
             QPushButton#btnWinMax:hover  { background: rgba(0,0,0,9%); color: #1A1A1A; }
             QPushButton#btnWinMin:pressed  { background: rgba(0,0,0,16%); }
@@ -965,168 +973,156 @@ class MainWindow(QMainWindow):
                 background: transparent; border: none;
                 color: #1A1A1A;
             }
-            QPushButton#btnWinClose:hover   { background: #C42B1C; color: #FFFFFF; }
-            QPushButton#btnWinClose:pressed { background: #B22418; color: #FFFFFF; }
+            QPushButton#btnWinClose:hover   { background: ${WIN_CLOSE_HOVER}; color: #FFFFFF; }
+            QPushButton#btnWinClose:pressed { background: ${WIN_CLOSE_PRESSED}; color: #FFFFFF; }
 
             /* ── Left navigation sidebar ──────────────────────── */
             QWidget#sideNav {
-                background: #E9EDF3;
+                background: ${BG_WINDOW};
             }
             QLabel#navLogo { background: transparent; }
             QWidget#navBtn { background: transparent; border-radius: 8px; }
-            QWidget#navBtn:hover { background: #DDE2EC; }
-            QWidget#navBtn[active="true"] { background: #07414F; }
-            QLabel#navIcon  { color: #6B7686; background: transparent; }
-            QLabel#navLabel { color: #3C4654; background: transparent; font-size: 14px; font-weight: 550; }
+            QWidget#navBtn:hover { background: ${NAV_HOVER}; }
+            QWidget#navBtn[active="true"] { background: ${BRAND}; }
+            QLabel#navIcon  { color: ${TEXT_MUTED}; background: transparent; }
+            QLabel#navLabel { color: ${TEXT_BODY}; background: transparent; font-size: 14px; font-weight: 550; }
             QWidget#navBtn[active="true"] QLabel#navIcon  { color: #FFFFFF; }
             QWidget#navBtn[active="true"] QLabel#navLabel {
                 color: #FFFFFF; font-weight: 600;
             }
 
             QWidget#btnNavAction {
-                background: #FFFFFF;
-                border: 1px solid #D5DCE4; border-radius: 8px;
+                background: ${BG_SURFACE};
+                border: 1px solid ${BORDER}; border-radius: 8px;
             }
             QWidget#btnNavAction:hover { background: #D7DCE8; }
             QWidget#btnNavAction:pressed { background: #CBD2E0; }
-            QLabel#actionLabel { color: #3C4654; background: transparent; font-size: 13px; font-weight: 600; }
+            QLabel#actionLabel { color: ${TEXT_BODY}; background: transparent; font-size: ${FS_BODY}px; font-weight: 600; }
 
             /* ── Content area ─────────────────────────────────── */
-            QWidget#bodyArea { background: #E9EDF3; }
+            QWidget#bodyArea { background: ${BG_WINDOW}; }
             QFrame#contentFrame {
-                background: #FFFFFF;
-                border: 1px solid #D5DCE4;
-                border-radius: 14px;
+                background: ${BG_SURFACE};
+                border: 1px solid ${BORDER};
+                border-radius: ${RAD_PAGE}px;
             }
             QStackedWidget#contentArea { background: transparent; }
 
             /* ── Page titles ─────────────────────────────────── */
             QLabel#pageTitle {
-                font-size: 20px; font-weight: 700;
-                color: #1F2937; background: transparent;
+                font-size: ${FS_H1}px; font-weight: 700;
+                color: ${TEXT}; background: transparent;
             }
 
             /* ── Dashboard «Главная» ──────────────────────────── */
             QScrollArea#homeScroll { background: transparent; border: none; }
             QWidget#homeContent { background: transparent; }
             QFrame#dashCard {
-                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 14px;
+                background: ${BG_SURFACE}; border: 1px solid ${BORDER}; border-radius: ${RAD_PAGE}px;
             }
             QLabel#cardTitleGreen {
-                color: #57A05C; background: transparent;
-                font-size: 17px; font-weight: 700;
+                color: ${INCOME}; background: transparent;
+                font-size: ${FS_H2}px; font-weight: 700;
             }
             QLabel#cardTitle {
-                color: #1F2937; background: transparent;
-                font-size: 15px; font-weight: 700;
+                color: ${TEXT}; background: transparent;
+                font-size: ${FS_H3}px; font-weight: 700;
             }
             QWidget#statCard {
-                background: #F6F8FA; border: 1px solid #E6EAEF; border-radius: 10px;
+                background: ${BG_SUBTLE}; border: 1px solid ${BORDER_LIGHT}; border-radius: 10px;
             }
-            QLabel#statIcon { color: #2F7D55; background: transparent; }
-            QLabel#statCaption { color: #6B7280; background: transparent; font-size: 12px; }
+            QLabel#statIcon { color: ${INCOME}; background: transparent; }
+            QLabel#statCaption { color: ${TEXT_MUTED}; background: transparent; font-size: ${FS_SMALL}px; }
             QLabel#statValue {
-                color: #1F2937; background: transparent;
+                color: ${TEXT}; background: transparent;
                 font-size: 22px; font-weight: 700;
             }
             QWidget#activityItem { background: transparent; border-radius: 8px; }
             QWidget#activityItem:hover { background: #F1F5F9; }
-            QLabel#activityCheck { color: #2E9E5B; background: transparent; }
-            QLabel#activityTitle { color: #1F2937; background: transparent; font-size: 12px; }
-            QLabel#activityDate { color: #9AA3AE; background: transparent; font-size: 11px; }
-            QLabel#footerText { color: #9AA3AE; background: transparent; font-size: 12px; }
+            QLabel#activityCheck { color: ${INCOME}; background: transparent; }
+            QLabel#activityTitle { color: ${TEXT}; background: transparent; font-size: ${FS_SMALL}px; }
+            QLabel#activityDate { color: ${TEXT_FAINT}; background: transparent; font-size: ${FS_CAPTION}px; }
+            QLabel#footerText { color: ${TEXT_FAINT}; background: transparent; font-size: ${FS_SMALL}px; }
             QPushButton#chartPeriodBtn {
-                background: #F6F8FA; color: #3C4654;
-                border: 1px solid #D5DCE4; border-radius: 6px;
-                padding: 5px 12px; font-size: 12px;
+                background: ${BG_SUBTLE}; color: ${TEXT_BODY};
+                border: 1px solid ${BORDER}; border-radius: ${RAD_CONTROL}px;
+                padding: 5px 12px; font-size: ${FS_SMALL}px;
             }
-            QPushButton#chartPeriodBtn:hover { background: #EEF1F5; }
+            QPushButton#chartPeriodBtn:hover { background: ${BG_HOVER}; }
             QPushButton#chartMenuBtn {
-                background: #F6F8FA; color: #6B7280;
-                border: 1px solid #D5DCE4; border-radius: 6px;
+                background: ${BG_SUBTLE}; color: ${TEXT_MUTED};
+                border: 1px solid ${BORDER}; border-radius: ${RAD_CONTROL}px;
             }
-            QPushButton#chartMenuBtn:hover { background: #EEF1F5; }
+            QPushButton#chartMenuBtn:hover { background: ${BG_HOVER}; }
 
             /* ── Filter bar ──────────────────────────────────── */
             QFrame#filterFrame {
-                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 8px;
+                background: ${BG_SURFACE}; border: 1px solid ${BORDER_LIGHT}; border-radius: ${RAD_FRAME}px;
             }
-            QLabel#filterLabel { color: #9AA3AE; background: transparent; font-size: 13px; }
+            QLabel#filterLabel { color: ${TEXT_FAINT}; background: transparent; font-size: ${FS_BODY}px; }
 
             /* ── Inputs ──────────────────────────────────────── */
             QLineEdit#searchInput {
-                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
-                color: #1F2937; padding: 7px 12px; font-size: 13px;
+                background: ${BG_SURFACE}; border: 1px solid ${BORDER}; border-radius: ${RAD_CONTROL}px;
+                color: ${TEXT}; padding: 7px 12px; font-size: ${FS_BODY}px;
             }
-            QLineEdit#searchInput:focus { border: 1px solid #07414F; }
+            QLineEdit#searchInput:focus { border: 1px solid ${BRAND}; }
             QComboBox#filterCombo {
-                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
-                color: #1F2937; padding: 7px 10px; font-size: 13px;
+                background: ${BG_SURFACE}; border: 1px solid ${BORDER}; border-radius: ${RAD_CONTROL}px;
+                color: ${TEXT}; padding: 7px 10px; font-size: ${FS_BODY}px;
             }
             QComboBox#filterCombo::drop-down { border: none; width: 18px; }
             QComboBox QAbstractItemView {
-                background: #FFFFFF; border: 1px solid #D5DCE4;
-                color: #1F2937; selection-background-color: #C9D8E2;
-                selection-color: #07414F;
+                background: ${BG_SURFACE}; border: 1px solid ${BORDER};
+                color: ${TEXT}; selection-background-color: ${BRAND_TINT};
+                selection-color: ${BRAND};
             }
             QDateEdit#datePicker {
-                background: #FFFFFF; border: 1px solid #D5DCE4; border-radius: 6px;
-                color: #1F2937; padding: 7px 10px; font-size: 13px;
+                background: ${BG_SURFACE}; border: 1px solid ${BORDER}; border-radius: ${RAD_CONTROL}px;
+                color: ${TEXT}; padding: 7px 10px; font-size: ${FS_BODY}px;
             }
             QDateEdit#datePicker::drop-down { border: none; width: 18px; }
 
-            /* ── Buttons ─────────────────────────────────────── */
+            /* ── Buttons (легаси-объекты; новые кнопки — ui.buttons) ── */
             QPushButton#btnPrimary {
-                background: #2F7D55; color: #FFFFFF; border: none; border-radius: 6px;
-                padding: 8px 18px; font-size: 13px; font-weight: 600;
+                background: ${BRAND}; color: #FFFFFF; border: none; border-radius: ${RAD_CONTROL}px;
+                padding: 7px 18px; font-size: ${FS_BODY}px; font-weight: 600;
             }
-            QPushButton#btnPrimary:hover   { background: #379061; }
-            QPushButton#btnPrimary:pressed { background: #266645; }
+            QPushButton#btnPrimary:hover   { background: ${BRAND_HOVER}; }
+            QPushButton#btnPrimary:pressed { background: ${BRAND_PRESSED}; }
             QPushButton#btnSecondary {
-                background: #FFFFFF; color: #3C4654;
-                border: 1px solid #D5DCE4; border-radius: 6px;
-                padding: 8px 14px; font-size: 13px;
+                background: ${BG_SURFACE}; color: ${TEXT_BODY};
+                border: 1px solid ${BORDER}; border-radius: ${RAD_CONTROL}px;
+                padding: 6px 14px; font-size: ${FS_BODY}px;
             }
-            QPushButton#btnSecondary:hover { background: #F0F3F7; color: #1F2937; }
+            QPushButton#btnSecondary:hover { background: ${BG_HOVER}; color: ${TEXT}; }
 
             /* ── Tables ──────────────────────────────────────── */
             QTableWidget#mainTable {
-                background: #F9FAFB; border: 1px solid #D8DDE6; border-radius: 8px;
-                gridline-color: #CDD3DC; color: #1F2937; font-size: 12px;
-                selection-background-color: #C9D8E2; selection-color: #07414F;
-                alternate-background-color: #E8ECF4;
+                background: ${BG_SUBTLE}; border: 1px solid ${BORDER}; border-radius: ${RAD_FRAME}px;
+                gridline-color: ${BORDER}; color: ${TEXT}; font-size: ${FS_SMALL}px;
+                selection-background-color: ${BRAND_TINT}; selection-color: ${BRAND};
+                alternate-background-color: ${BG_ALT_ROW};
             }
             QTableWidget#mainTable QHeaderView::section {
-                background: #E9EDF5; color: #4B5563; border: none;
-                border-right: 1px solid #CDD3DC; border-bottom: 2px solid #C4CBD7;
-                padding: 8px 10px; font-size: 12px; font-weight: 600;
+                background: ${TABLE_HEADER_BG}; color: ${TEXT_MUTED}; border: none;
+                border-right: 1px solid ${BORDER}; border-bottom: 2px solid ${BORDER};
+                padding: 8px 10px; font-size: ${FS_SMALL}px; font-weight: 600;
             }
             QTableWidget#mainTable::item {
-                padding: 5px 10px; border-bottom: 1px solid #D8DDE6;
+                padding: 5px 10px; border-bottom: 1px solid ${BORDER};
             }
             QTableWidget#mainTable::item:alternate {
-                background: #E8ECF4;
+                background: ${BG_ALT_ROW};
             }
             QTableWidget#mainTable::item:hover {
                 background: #DDE4EE;
             }
             QTableWidget#mainTable::item:selected {
-                background: #C9D8E2; color: #07414F;
+                background: ${BRAND_TINT}; color: ${BRAND};
             }
 
-            QTableWidget#summaryTable {
-                background: #FFFFFF; border: 1px solid #E3E8EE; border-radius: 8px;
-                gridline-color: #EAEDF1; color: #1F2937; font-size: 12px;
-                selection-background-color: #E4F0E9; selection-color: #2F7D55;
-            }
-            QTableWidget#summaryTable QHeaderView::section {
-                background: #EEF1F5; color: #6B7280; border: none;
-                border-right: 1px solid #E3E8EE; border-bottom: 2px solid #E3E8EE;
-                padding: 8px 10px; font-size: 12px; font-weight: 600;
-            }
-            QTableWidget#summaryTable::item {
-                padding: 4px 10px; border-bottom: 1px solid #EAEDF1;
-            }
+            ${SUMMARY_TABLE}
 
             /* ── Viewport backgrounds (Qt QSS quirk fix) ────── */
             QAbstractScrollArea { background: #F0F3F9; }
@@ -1139,34 +1135,38 @@ class MainWindow(QMainWindow):
             QAbstractScrollArea > QScrollBar { background: transparent; }
 
             /* ── Scrollbars ──────────────────────────────────── */
-            /* Трек прозрачный (без «дорожки»/тени под бегунком) — меньше
-               визуального шума, виден только сам бегунок. */
-            QScrollBar:vertical {
-                background: transparent; width: 8px; border: none;
-            }
-            QScrollBar::handle:vertical {
-                background: #C3CAD3; border-radius: 4px; min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover { background: #97A1AE; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
-            QScrollBar:horizontal {
-                background: transparent; height: 8px; border: none;
-            }
-            QScrollBar::handle:horizontal { background: #C3CAD3; border-radius: 4px; }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
+            ${SCROLLBARS}
+
+            /* ── Checkboxes ──────────────────────────────────── */
+            ${CHECKBOX}
 
             /* ── Status / summary labels ─────────────────────── */
-            QLabel#statusLabel  { color: #9AA3AE; background: transparent; font-size: 12px; }
+            QLabel#statusLabel  { color: ${TEXT_FAINT}; background: transparent; font-size: ${FS_SMALL}px; }
             QLabel#summaryIncome  {
-                color: #2E9E5B; background: transparent; font-size: 13px; font-weight: 600;
+                color: ${INCOME}; background: transparent; font-size: ${FS_BODY}px; font-weight: 600;
             }
             QLabel#summaryExpense {
-                color: #DC2626; background: transparent; font-size: 13px; font-weight: 600;
+                color: ${EXPENSE}; background: transparent; font-size: ${FS_BODY}px; font-weight: 600;
             }
-
-        """)
+        """).substitute(
+            BG_WINDOW=C.BG_WINDOW, BG_SURFACE=C.BG_SURFACE, BG_SUBTLE=C.BG_SUBTLE,
+            BG_HOVER=C.BG_HOVER, BG_ALT_ROW=C.BG_ALT_ROW,
+            BRAND=C.BRAND, BRAND_HOVER=C.BRAND_HOVER, BRAND_PRESSED=C.BRAND_PRESSED,
+            BRAND_TINT=C.BRAND_TINT,
+            TEXT=C.TEXT, TEXT_BODY=C.TEXT_BODY, TEXT_MUTED=C.TEXT_MUTED,
+            TEXT_FAINT=C.TEXT_FAINT,
+            BORDER=C.BORDER, BORDER_LIGHT=C.BORDER_LIGHT,
+            NAV_HOVER=C.NAV_HOVER, TABLE_HEADER_BG=C.TABLE_HEADER_BG,
+            INCOME=C.INCOME, EXPENSE=C.EXPENSE,
+            WIN_CLOSE_HOVER=C.WIN_CLOSE_HOVER, WIN_CLOSE_PRESSED=C.WIN_CLOSE_PRESSED,
+            FS_CAPTION=FS.CAPTION, FS_SMALL=FS.SMALL, FS_BODY=FS.BODY,
+            FS_H1=FS.H1, FS_H2=FS.H2, FS_H3=FS.H3,
+            RAD_CONTROL=RAD.CONTROL, RAD_FRAME=RAD.FRAME, RAD_PAGE=RAD.PAGE,
+            SUMMARY_TABLE=summary_table_qss(),
+            SCROLLBARS=scrollbar_qss(),
+            CHECKBOX=checkbox_qss(),
+        )
+        self.setStyleSheet(qss)
 
 
 _CRASH_LOG = Path(os.environ.get("APPDATA", Path.home())) / "MoySadovod" / "crash.log"
@@ -1267,27 +1267,27 @@ def main():
 
     palette = app.palette()
     palette.setColor(QPalette.ColorRole.Window,      QColor("#F0F3F9"))
-    palette.setColor(QPalette.ColorRole.Base,        QColor("#FFFFFF"))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#E8ECF4"))
-    palette.setColor(QPalette.ColorRole.WindowText,  QColor("#1F2937"))
-    palette.setColor(QPalette.ColorRole.Text,        QColor("#1F2937"))
+    palette.setColor(QPalette.ColorRole.Base,        QColor(C.BG_SURFACE))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(C.BG_ALT_ROW))
+    palette.setColor(QPalette.ColorRole.WindowText,  QColor(C.TEXT))
+    palette.setColor(QPalette.ColorRole.Text,        QColor(C.TEXT))
     palette.setColor(QPalette.ColorRole.Button,      QColor("#F0F3F9"))
-    palette.setColor(QPalette.ColorRole.ButtonText,  QColor("#1F2937"))
-    palette.setColor(QPalette.ColorRole.Highlight,      QColor("#07414F"))
+    palette.setColor(QPalette.ColorRole.ButtonText,  QColor(C.TEXT))
+    palette.setColor(QPalette.ColorRole.Highlight,      QColor(C.BRAND))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
-    palette.setColor(QPalette.ColorRole.ToolTipBase,    QColor("#FFFFFF"))
-    palette.setColor(QPalette.ColorRole.ToolTipText,    QColor("#374151"))
+    palette.setColor(QPalette.ColorRole.ToolTipBase,    QColor(C.BG_SURFACE))
+    palette.setColor(QPalette.ColorRole.ToolTipText,    QColor(C.TEXT_BODY))
     app.setPalette(palette)
 
-    app.setStyleSheet("""
-        QToolTip {
-            background: #FFFFFF;
-            color: #374151;
-            border: 1px solid #D1D5DB;
+    app.setStyleSheet(f"""
+        QToolTip {{
+            background: {C.BG_SURFACE};
+            color: {C.TEXT_BODY};
+            border: 1px solid {C.BORDER};
             border-radius: 4px;
             padding: 4px 8px;
-            font-size: 12px;
-        }
+            font-size: {FS.SMALL}px;
+        }}
     """)
 
     window = MainWindow()
