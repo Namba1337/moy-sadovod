@@ -19,6 +19,9 @@ Emoji (📄 ⚙ …), текстовые «＋»/«✕» и шрифт "Material
 """
 from __future__ import annotations
 
+import os
+import tempfile
+
 from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 
@@ -50,6 +53,7 @@ ICONS: dict[str, int] = {
     "copy":          0xE14D,  # content_copy
     "check":         0xE5CA,
     "expand_more":   0xE5CF,
+    "expand_less":   0xE5CE,
     "folder_open":   0xE2C8,
     "history":       0xE8B3,
     "tune":          0xE429,
@@ -123,3 +127,26 @@ def get_icon(name: str | int, size: int = 18, color: str = C.BRAND,
     p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, chr(cp))
     p.end()
     return QIcon(pm)
+
+
+def icon_png_path(name: str | int, size: int = 16, color: str = C.BRAND,
+                  fill: int = 0) -> str:
+    """Путь к PNG-файлу глифа — для QSS ``image: url(...)``, куда QIcon не
+    подставить (например ::down-arrow). Рендерится 1:1 без оверсэмплинга
+    (QSS не масштабирует image, а обрезает), кэшируется во временной папке.
+    Путь возвращается с прямыми слэшами — обратные QSS не понимает."""
+    cp = ICONS[name] if isinstance(name, str) else name
+    fname = f"{cp:04x}_{size}_{color.lstrip('#')}_{fill}.png"
+    path = os.path.join(tempfile.gettempdir(), "snt_helper_icons", fname)
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setFont(icon_font(size, fill))
+        p.setPen(QColor(color))
+        p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, chr(cp))
+        p.end()
+        pm.save(path, "PNG")
+    return path.replace("\\", "/")

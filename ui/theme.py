@@ -262,6 +262,49 @@ def summary_table_qss() -> str:
     """
 
 
+def calendar_qss() -> str:
+    """Всплывающий календарь QDateEdit (штатный QCalendarWidget).
+
+    Попап — отдельное top-level окно, глобальный QSS главного окна до него
+    не доходит, поэтому стиль вешается на сам QCalendarWidget точечно —
+    см. ui.common.style_date_popup (там же — QTextCharFormat-правки, которые
+    QSS не покрывает: красные выходные, строка Пн..Вс)."""
+    return f"""
+        QCalendarWidget QWidget#qt_calendar_navigationbar {{
+            background: {C.BG_SURFACE};
+            border-bottom: 1px solid {C.BORDER_LIGHT};
+        }}
+        QCalendarWidget QToolButton {{
+            background: transparent; border: none; border-radius: {RAD.CONTROL}px;
+            color: {C.TEXT}; font-size: {FS.BODY}px; font-weight: 600;
+            padding: 4px 8px; icon-size: 14px;
+        }}
+        QCalendarWidget QToolButton:hover {{ background: {C.BRAND_GHOST}; }}
+        QCalendarWidget QToolButton:pressed {{ background: {C.BRAND_TINT}; }}
+        QCalendarWidget QToolButton::menu-indicator {{ image: none; }}
+        QCalendarWidget QMenu {{
+            background: {C.BG_SURFACE}; border: 1px solid {C.BORDER};
+            color: {C.TEXT_BODY}; font-size: {FS.BODY}px; padding: 4px;
+        }}
+        QCalendarWidget QMenu::item {{ padding: 6px 14px; border-radius: 4px; }}
+        QCalendarWidget QMenu::item:selected {{ background: {C.BG_HOVER}; color: {C.TEXT}; }}
+        QCalendarWidget QSpinBox {{
+            background: {C.BG_SURFACE}; border: 1px solid {C.BORDER};
+            border-radius: 4px; color: {C.TEXT}; font-size: {FS.BODY}px;
+            padding: 2px 6px;
+            selection-background-color: {C.BRAND}; selection-color: {C.BG_SURFACE};
+        }}
+        QCalendarWidget QWidget {{ alternate-background-color: {C.BG_SURFACE}; }}
+        QCalendarWidget QAbstractItemView {{
+            background: {C.BG_SURFACE}; outline: 0;
+            color: {C.TEXT}; font-size: {FS.BODY}px;
+            selection-background-color: {C.BRAND};
+            selection-color: {C.BG_SURFACE};
+        }}
+        QCalendarWidget QAbstractItemView:disabled {{ color: {C.TEXT_FAINT}; }}
+    """
+
+
 def dialog_qss() -> str:
     """Общий блок для BaseDialog: подписи, поля ввода, чекбоксы, скроллбары,
     сводные таблицы. Кнопки сюда не входят — они стилизуют себя сами
