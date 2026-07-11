@@ -23,18 +23,21 @@ from PyQt6.QtGui import (
 )
 
 from core import dashboard
+from ui import icons
+from ui.theme import C, FS
 
-# ── Material Icons ──────────────────────────────────────────────────────
-_IC_BALANCE  = chr(0xe84f)
-_IC_COLLECT  = chr(0xe263)
-_IC_SPEND    = chr(0xe8a1)
-_IC_ELECTRO  = chr(0xe3e7)
-_IC_DEBT     = chr(0xe002)
-_IC_BARS     = chr(0xe26b)
-_IC_DONUT    = chr(0xe917)
+# ── Иконки (Material Symbols Rounded, см. ui.icons) ─────────────────────
+_IC_BALANCE  = icons.icon_char("balance")
+_IC_COLLECT  = icons.icon_char("collect")
+_IC_SPEND    = icons.icon_char("spend")
+_IC_ELECTRO  = icons.icon_char("flash")
+_IC_DEBT     = icons.icon_char("warning")
+_IC_BARS     = icons.icon_char("bars")
+_IC_DONUT    = icons.icon_char("donut")
 
-_C_INCOME  = "#2E9E5B"
-_C_EXPENSE = "#E0524A"
+_C_INCOME  = C.INCOME
+_C_EXPENSE = "#E0524A"  # приглушённый красный расходов на графиках
+                        # (чистый C.DANGER слишком «кричит» на заливках)
 
 _CAT_COLORS = {
     "Членские взносы":                   "#2F7D55",
@@ -56,53 +59,53 @@ _CAT_SHORT = {
     "Электроэнергия (от садоводов)":     "Электроэнергия (садоводы)",
 }
 
-_HOME_QSS = """
-QScrollArea#homeScroll { background: transparent; border: none; }
-QWidget#homeContent    { background: transparent; }
+_HOME_QSS = f"""
+QScrollArea#homeScroll {{ background: transparent; border: none; }}
+QWidget#homeContent    {{ background: transparent; }}
 
-QLabel#cardSubtitle { color: #9AA3AE; background: transparent; font-size: 12px; }
+QLabel#cardSubtitle {{ color: {C.TEXT_FAINT}; background: transparent; font-size: {FS.SMALL}px; }}
 
-QFrame#kpiCard {
-    background: #F6F8FA; border: 1px solid #E6EAEF; border-radius: 11px;
-}
-QLabel#kpiCaption  { color: #6B7280; background: transparent; font-size: 12px; }
-QLabel#kpiValue    { color: #1F2937; background: transparent; font-size: 16px; font-weight: 700; }
-QLabel#kpiSubtitle { color: #9AA3AE; background: transparent; font-size: 11px; }
-QLabel#kpiTrend    { background: transparent; font-size: 11px; font-weight: 700; }
+QFrame#kpiCard {{
+    background: {C.BG_SUBTLE}; border: 1px solid {C.BORDER_LIGHT}; border-radius: 11px;
+}}
+QLabel#kpiCaption  {{ color: {C.TEXT_MUTED}; background: transparent; font-size: {FS.SMALL}px; }}
+QLabel#kpiValue    {{ color: {C.TEXT}; background: transparent; font-size: 16px; font-weight: 700; }}
+QLabel#kpiSubtitle {{ color: {C.TEXT_FAINT}; background: transparent; font-size: {FS.CAPTION}px; }}
+QLabel#kpiTrend    {{ background: transparent; font-size: {FS.CAPTION}px; font-weight: 700; }}
 
-QLabel#periodLabel { color: #4B5563; background: transparent; font-size: 12px; }
-QLabel#legendText  { color: #6B7280; background: transparent; font-size: 12px; }
+QLabel#periodLabel {{ color: {C.TEXT_MUTED}; background: transparent; font-size: {FS.SMALL}px; }}
+QLabel#legendText  {{ color: {C.TEXT_MUTED}; background: transparent; font-size: {FS.SMALL}px; }}
 
-QLabel#sliceName   { color: #374151; background: transparent; font-size: 12px; }
-QLabel#slicePct    { color: #1F2937; background: transparent; font-size: 12px; font-weight: 700; }
-QLabel#sliceValue  { color: #9AA3AE; background: transparent; font-size: 11px; }
-QLabel#emptyHint   { color: #9AA3AE; background: transparent; font-size: 12px; }
+QLabel#sliceName   {{ color: {C.TEXT_BODY}; background: transparent; font-size: {FS.SMALL}px; }}
+QLabel#slicePct    {{ color: {C.TEXT}; background: transparent; font-size: {FS.SMALL}px; font-weight: 700; }}
+QLabel#sliceValue  {{ color: {C.TEXT_FAINT}; background: transparent; font-size: {FS.CAPTION}px; }}
+QLabel#emptyHint   {{ color: {C.TEXT_FAINT}; background: transparent; font-size: {FS.SMALL}px; }}
 
-QComboBox#periodCombo {
-    border: 1px solid #D1D5DB; border-radius: 6px;
-    padding: 3px 8px; font-size: 12px; color: #374151;
-    background: #FFFFFF; min-width: 110px;
-}
-QComboBox#periodCombo::drop-down { border: none; }
-QComboBox#periodCombo QAbstractItemView {
-    border: 1px solid #D1D5DB; border-radius: 6px; font-size: 12px;
-}
+QComboBox#periodCombo {{
+    border: 1px solid {C.BORDER}; border-radius: {6}px;
+    padding: 3px 8px; font-size: {FS.SMALL}px; color: {C.TEXT_BODY};
+    background: {C.BG_SURFACE}; min-width: 110px;
+}}
+QComboBox#periodCombo::drop-down {{ border: none; }}
+QComboBox#periodCombo QAbstractItemView {{
+    border: 1px solid {C.BORDER}; border-radius: 6px; font-size: {FS.SMALL}px;
+}}
 
-QPushButton#categoryBtn {
-    border: 1px solid #D1D5DB; border-radius: 6px;
-    padding: 2px 8px; font-size: 12px; color: #374151;
-    background: #FFFFFF;
-}
-QPushButton#categoryBtn:hover { background: #F3F4F6; }
+QPushButton#categoryBtn {{
+    border: 1px solid {C.BORDER}; border-radius: 6px;
+    padding: 2px 8px; font-size: {FS.SMALL}px; color: {C.TEXT_BODY};
+    background: {C.BG_SURFACE};
+}}
+QPushButton#categoryBtn:hover {{ background: {C.BG_HOVER}; }}
 """
 
 
 # ── Вспомогательные функции ────────────────────────────────────────────
 
 def _icon_font(px: int) -> QFont:
-    f = QFont("Material Icons")
-    f.setPixelSize(px)
-    return f
+    # Единый шрифт иконок приложения (раньше здесь был устаревший
+    # «Material Icons» с другим начертанием, чем в остальном UI).
+    return icons.icon_font(px)
 
 
 def _money(v, kop: bool = False) -> str:

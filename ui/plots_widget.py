@@ -42,15 +42,31 @@ _ROLE_COLORS = {
     "member":  ("#D6EBD5", "#2E7D32"),
 }
 
-_INPUT_SS = (
-    "QLineEdit{background:#F8F9FA; border:1px solid #D1D5DB;"
-    "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
-    "QLineEdit:focus{border:1px solid #07414F;}")
-_INPUT_ERROR_SS = (
-    "QLineEdit{background:#FEF2F2; border:1px solid #DC2626;"
-    "border-radius:4px; padding:4px 8px; font-size:12px; color:#1F2937;}"
-    "QLineEdit:focus{border:1px solid #DC2626;}")
-_FIELD_LABEL_SS = "font-size:10px; color:#9CA3AF; background:transparent;"
+# Общая инфраструктура вынесена в ui.common / ui.dialogs; здесь остаются
+# алиасы прежних приватных имён — их импортируют другие вкладки.
+from ui.common import (                                     # noqa: E402
+    AppTooltip as _AppTooltip,
+    TooltipFilter as _TooltipFilter,
+    FlatTableModel as _FlatTableModel,
+    SortHeaderView as _SortHeaderView,
+    ClipFrame as _ClipFrame,
+    BorderOverlay as _BorderOverlay,
+    TREE_STYLE as _TREE_STYLE,
+    SB_W as _SB_W,
+    INPUT_SS as _INPUT_SS,
+    INPUT_ERROR_SS as _INPUT_ERROR_SS,
+    FIELD_LABEL_SS as _FIELD_LABEL_SS,
+)
+from ui.dialogs import (                                    # noqa: E402
+    AlertDialog as _AlertDialog,
+    PromptDialog as _BasePromptDialog,
+    ConfirmDialog as _ConfirmDialog,
+    Save3WayDialog as _Save3WayDialog,
+    exec_dialog as _exec_dialog,
+)
+from ui.buttons import (                                    # noqa: E402
+    DangerButton, PrimaryButton, SecondaryButton,
+)
 
 
 # Базовые аксессоры — единый источник логики в core.ownership
@@ -66,43 +82,20 @@ def _is_visible(owner) -> bool:
     return False
 
 
+# Рендер иконок вынесен в ui.icons (единственная реализация оверсэмплинга);
+# здесь остаются тонкие обёртки под прежние сигнатуры.
+from ui.icons import icon_font as _icon_font_impl, get_icon as _get_icon_impl  # noqa: E402
+
+
 def _mat_font(pixel_size: int = 20, fill: int = 0) -> QFont:
     """Material Symbols Rounded с нужным FILL axis (0=outline, 1=filled)."""
-    f = QFont("Material Symbols Rounded")
-    f.setPixelSize(pixel_size)
-    try:
-        f.setVariableAxis(QFont.Tag(b"FILL"), float(fill))
-    except Exception:
-        pass
-    return f
-
-
-_ICON_OVERSAMPLE = 4  # запас разрешения, чтобы Qt всегда down-, а не upscale'ил
+    return _icon_font_impl(pixel_size, fill)
 
 
 def _mat_icon(codepoint: int, size: int = 16, fill: int = 0,
               color: str = "#07414F") -> QIcon:
-    """Рендерит символ Material Symbols в QIcon (для кнопок с текстом).
-
-    Пиксмап рисуется с запасом (devicePixelRatio=_ICON_OVERSAMPLE) — иначе
-    при масштабировании Windows >100% или при iconSize кнопки, не совпадающем
-    с size, Qt растягивает пиксель-в-пиксель низкое разрешение, и иконка
-    получается размытой. Оверсэмплинг гарантирует, что Qt всегда уменьшает
-    (а не увеличивает) картинку, что даёт чёткий результат при любом масштабе.
-    Вызывающий код должен выставить кнопке setIconSize(QSize(size, size)),
-    иначе пиксмап всё равно смасштабируется под чужой размер иконки.
-    """
-    px = size * _ICON_OVERSAMPLE
-    pm = QPixmap(px, px)
-    pm.setDevicePixelRatio(_ICON_OVERSAMPLE)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setFont(_mat_font(size, fill))
-    p.setPen(QColor(color))
-    p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, chr(codepoint))
-    p.end()
-    return QIcon(pm)
+    """Рендерит символ Material Symbols в QIcon — см. ui.icons.get_icon."""
+    return _get_icon_impl(codepoint, size, color=color, fill=fill)
 
 
 _F_STAR_OUTLINE  = _mat_font(20, fill=0)
@@ -365,261 +358,9 @@ def _ensure_single_primary(owners: list) -> bool:
     return False
 
 
-# ============================================================================ #
-#  Кастомная всплывашка — обходит нативный QToolTip Windows                   #
-# ============================================================================ #
+# _AppTooltip, _TooltipFilter → ui.common (импортируются выше).
+# _BasePromptDialog, _ConfirmDialog, _Save3WayDialog → ui.dialogs.
 
-class _AppTooltip:
-    """Синглтон-всплывашка с гарантированным светлым оформлением.
-
-    Используется вместо QToolTip, который на Windows 11 игнорирует стили Qt.
-    """
-    _w: "QLabel | None" = None
-
-    @classmethod
-    def _ensure(cls) -> "QLabel":
-        if cls._w is None:
-            w = QLabel()
-            w.setWindowFlags(
-                Qt.WindowType.FramelessWindowHint |
-                Qt.WindowType.WindowStaysOnTopHint
-            )
-            w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-            w.setContentsMargins(6, 4, 6, 4)
-            w.setStyleSheet(
-                "QLabel { background:#FFFFFF; color:#374151; "
-                "border:1px solid #D1D5DB; border-radius:4px; "
-                "font-size:12px; padding:4px 6px; }"
-            )
-            cls._w = w
-        return cls._w
-
-    @classmethod
-    def show_at(cls, text: str, global_pos: "QPoint"):
-        w = cls._ensure()
-        w.setText(text)
-        w.adjustSize()
-        w.move(global_pos.x() + 12, global_pos.y() + 16)
-        w.show()
-        w.raise_()
-
-    @classmethod
-    def hide(cls):
-        if cls._w is not None:
-            cls._w.hide()
-
-
-class _TooltipFilter(QObject):
-    """EventFilter — навешивает кастомную всплывашку на любой существующий виджет.
-
-    Передавайте виджет как parent, чтобы фильтр жил столько же, сколько виджет.
-    """
-
-    def __init__(self, tip: str, parent: "QWidget"):
-        super().__init__(parent)
-        self._tip = tip
-
-    def eventFilter(self, obj, event):
-        from PyQt6.QtGui import QCursor
-        if event.type() == QEvent.Type.Enter:
-            _AppTooltip.show_at(self._tip, QCursor.pos())
-        elif event.type() == QEvent.Type.Leave:
-            _AppTooltip.hide()
-        return False
-
-
-class _BasePromptDialog(QDialog):
-    """Общая база кастомных уточняющих окон (_ConfirmDialog, _Save3WayDialog) —
-    обходит нативный вид QMessageBox (Windows игнорирует Qt-стили для его
-    чрома). Единая ФИКСИРОВАННАЯ ширина у всех окон этого семейства — чтобы
-    короткое и длинное сообщение выглядели одним и тем же «прямоугольником»
-    (высота при этом свободно растёт под перенос текста), а не диалогом то
-    квадратной, то узкой вытянутой формы в зависимости от длины текста."""
-
-    _RADIUS = 12
-    _WIDTH = 380
-    _MARGIN_H = 24  # см. lay.setContentsMargins ниже — по 24px слева/справа
-
-    def __init__(self, title: str, message: str, *, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-        self.setObjectName("confirmDialog")
-        self.setStyleSheet(
-            f"QDialog#confirmDialog{{background:#FFFFFF;border-radius:{self._RADIUS}px;}}")
-        self.setModal(True)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(self._MARGIN_H, 22, self._MARGIN_H, 20)
-        lay.setSpacing(8)
-
-        # Ширина текста фиксируется явно (а не через setFixedWidth диалога) —
-        # иначе высота, посчитанная adjustSize() ДО применения итоговой
-        # ширины диалога, может не совпасть с реальным переносом текста.
-        _text_w = self._WIDTH - 2 * self._MARGIN_H
-
-        title_lbl = QLabel(title)
-        title_lbl.setStyleSheet(
-            "font-size:17px; font-weight:700; color:#111827; background:transparent;")
-        title_lbl.setWordWrap(True)
-        title_lbl.setFixedWidth(_text_w)
-        lay.addWidget(title_lbl)
-
-        msg_lbl = QLabel(message)
-        msg_lbl.setWordWrap(True)
-        msg_lbl.setFixedWidth(_text_w)
-        msg_lbl.setStyleSheet(
-            "font-size:13px; color:#6B7280; background:transparent;")
-        lay.addWidget(msg_lbl)
-
-        lay.addSpacing(10)
-
-        self._body_lay = lay
-        self._btn_row = QHBoxLayout()
-        self._btn_row.setSpacing(8)
-        self._btn_row.addStretch()
-        lay.addLayout(self._btn_row)
-
-    def _insert_widget(self, widget: QWidget):
-        """Вставляет widget между сообщением и строкой кнопок (для окон с
-        доп. содержимым — см. _NewGroupDialog)."""
-        self._body_lay.insertWidget(self._body_lay.count() - 1, widget)
-
-    def _add_button(self, text: str, style: str, slot) -> QPushButton:
-        btn = QPushButton(text)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(style)
-        btn.clicked.connect(slot)
-        self._btn_row.addWidget(btn)
-        return btn
-
-    def _finalize(self):
-        """Вызывается подклассом после добавления всех кнопок: фиксирует
-        итоговую ширину и подгоняет высоту/маску под содержимое."""
-        self.setFixedWidth(self._WIDTH)
-        self.adjustSize()
-        self._apply_mask()
-
-    def _apply_mask(self):
-        """Обрезает окно маской по скруглённому прямоугольнику — надёжнее,
-        чем WA_TranslucentBackground, который на Windows иногда не композит-
-        ится и оставляет видимым прямоугольник исходного (непрозрачного) окна."""
-        sz = self.size()
-        if sz.width() <= 0 or sz.height() <= 0:
-            return
-        bmp = QBitmap(sz)
-        bmp.fill(Qt.GlobalColor.color0)
-        p = QPainter(bmp)
-        p.setBrush(Qt.GlobalColor.color1)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(self.rect(), self._RADIUS, self._RADIUS)
-        p.end()
-        self.setMask(QRegion(bmp))
-
-    def resizeEvent(self, a0):
-        super().resizeEvent(a0)
-        self._apply_mask()
-
-    @staticmethod
-    def _show_centered(dlg: "_BasePromptDialog", parent):
-        """Затемняющий оверлей на хосте + центрирование поверх parent/host.
-        Общая обвязка для confirm()/ask() — вызывающий должен вручную
-        скрыть/удалить overlay после dlg.exec() (см. try/finally у вызовов)."""
-        host = parent.window() if parent is not None else None
-        overlay = None
-        if host is not None:
-            overlay = QWidget(host)
-            overlay.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            overlay.setStyleSheet("background: rgba(17, 24, 39, 0.45);")
-            overlay.setGeometry(host.rect())
-            overlay.show()
-            overlay.raise_()
-        if parent is not None:
-            geo = parent.geometry() if parent.isWindow() else host.geometry()
-            dlg.move(geo.center().x() - dlg.width() // 2,
-                     geo.center().y() - dlg.height() // 2)
-        return overlay
-
-
-class _ConfirmDialog(_BasePromptDialog):
-    """Окно подтверждения с двумя исходами: подтвердить / отмена."""
-
-    def __init__(self, title: str, message: str, *,
-                 confirm_text: str = "Удалить", cancel_text: str = "Отмена",
-                 parent=None):
-        super().__init__(title, message, parent=parent)
-        self._add_button(
-            cancel_text,
-            "QPushButton{background:#F3F4F6;color:#111827;border:none;"
-            "border-radius:6px;padding:7px 16px;font-size:13px;}"
-            "QPushButton:hover{background:#E5E7EB;}",
-            self.reject)
-        self._confirm_btn = self._add_button(
-            confirm_text,
-            "QPushButton{background:#DC2626;color:#FFFFFF;border:none;"
-            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
-            "QPushButton:hover{background:#B91C1C;}"
-            "QPushButton:disabled{background:#F3A6A6;color:#FFFFFF;}",
-            self.accept)
-        self._finalize()
-
-    @staticmethod
-    def confirm(parent, title: str, message: str, *,
-                confirm_text: str = "Удалить", cancel_text: str = "Отмена") -> bool:
-        dlg = _ConfirmDialog(title, message, confirm_text=confirm_text,
-                             cancel_text=cancel_text, parent=parent)
-        overlay = _BasePromptDialog._show_centered(dlg, parent)
-        try:
-            return dlg.exec() == QDialog.DialogCode.Accepted
-        finally:
-            if overlay is not None:
-                overlay.hide()
-                overlay.deleteLater()
-
-
-class _Save3WayDialog(_BasePromptDialog):
-    """Окно «Сохранить / Не сохранять / Отмена» для несохранённых правок —
-    тот же визуальный приём, что и _ConfirmDialog, но с тремя исходами."""
-
-    def __init__(self, title: str, message: str, *, parent=None):
-        super().__init__(title, message, parent=parent)
-        self.choice = "cancel"
-
-        def _pick(choice: str):
-            self.choice = choice
-            self.accept()
-
-        self._add_button(
-            "Отмена",
-            "QPushButton{background:transparent;color:#6B7280;border:none;"
-            "border-radius:6px;padding:7px 14px;font-size:13px;}"
-            "QPushButton:hover{background:#F3F4F6;}",
-            lambda: _pick("cancel"))
-        self._add_button(
-            "Не сохранять",
-            "QPushButton{background:#F3F4F6;color:#111827;border:none;"
-            "border-radius:6px;padding:7px 16px;font-size:13px;}"
-            "QPushButton:hover{background:#E5E7EB;}",
-            lambda: _pick("discard"))
-        self._add_button(
-            "Сохранить",
-            "QPushButton{background:#07414F;color:#FFFFFF;border:none;"
-            "border-radius:6px;padding:7px 16px;font-size:13px;font-weight:600;}"
-            "QPushButton:hover{background:#062F38;}",
-            lambda: _pick("save"))
-        self._finalize()
-
-    @staticmethod
-    def ask(parent, title: str, message: str) -> str:
-        """Возвращает 'save' | 'discard' | 'cancel'."""
-        dlg = _Save3WayDialog(title, message, parent=parent)
-        overlay = _BasePromptDialog._show_centered(dlg, parent)
-        try:
-            result = dlg.exec()
-            return dlg.choice if result == QDialog.DialogCode.Accepted else "cancel"
-        finally:
-            if overlay is not None:
-                overlay.hide()
-                overlay.deleteLater()
 
 
 class _NewGroupDialog(_ConfirmDialog):
@@ -637,7 +378,7 @@ class _NewGroupDialog(_ConfirmDialog):
                 min_since=None, confirm_text: str = "Создать",
                 cancel_text: str = "Отмена", parent=None):
         super().__init__(title, message, confirm_text=confirm_text,
-                         cancel_text=cancel_text, parent=parent)
+                         cancel_text=cancel_text, danger=False, parent=parent)
 
         date_col = QVBoxLayout()
         date_col.setSpacing(2)
@@ -709,7 +450,8 @@ class _QuickAddPlotDialog(_ConfirmDialog):
 
     def __init__(self, title: str, message: str, people: list,
                 existing_nums: set, *, parent=None):
-        super().__init__(title, message, confirm_text="Создать", parent=parent)
+        super().__init__(title, message, confirm_text="Создать", danger=False,
+                         parent=parent)
         self._existing_nums = existing_nums
 
         fields = QWidget()
@@ -824,552 +566,6 @@ class _QuickAddPlotDialog(_ConfirmDialog):
                 overlay.hide()
                 overlay.deleteLater()
 
-
-# ============================================================================ #
-#  Стиль дерева (используется QTreeView в energy_debt_widget/vznosy_debt_widget) #
-# ============================================================================ #
-
-_TREE_STYLE = """
-    QTreeView#mainTable {
-        background: #FFFFFF; border: none;
-        color: #1F2937; font-size: 13px;
-        selection-background-color: #C9D8E2; selection-color: #07414F;
-        alternate-background-color: #F0F4F8;
-        outline: 0;
-    }
-    QTreeView#mainTable::item {
-        padding: 6px 10px; border-bottom: 1px solid #E3E8EF;
-    }
-    QTreeView#mainTable::item:hover { background: #DDE4EE; }
-    QTreeView#mainTable::item:selected { background: #C9D8E2; color: #07414F; }
-    QTreeView#mainTable QScrollBar:vertical {
-        width: 12px; background: transparent; border: none;
-    }
-    QTreeView#mainTable QScrollBar::handle:vertical {
-        background: #B5C8D5; border-radius: 5px; min-height: 24px;
-        margin: 2px 2px 2px 2px;
-    }
-    QTreeView#mainTable QScrollBar::add-line:vertical,
-    QTreeView#mainTable QScrollBar::sub-line:vertical { height: 0; }
-    QTreeView#mainTable QScrollBar::add-page:vertical,
-    QTreeView#mainTable QScrollBar::sub-page:vertical { background: none; }
-"""
-
-_SB_W = 12  # ширина скроллбара — должна совпадать с QSS выше
-
-# Светлые фоновые варианты цветов долга для строк таблиц (debt_color → bg).
-_DEBT_COLOR_LIGHT = {
-    "#2e7d32": "#c8e6c9",
-    "#f9a825": "#fff9c4",
-    "#ef6c00": "#ffe0b2",
-    "#c62828": "#ffcdd2",
-}
-
-
-# ============================================================================ #
-#  Базовая плоская модель таблиц-долгов                                        #
-# ============================================================================ #
-
-class _FlatTableModel(QAbstractItemModel):
-    """Плоская модель для таблиц долгов. Подклассы задают ``COLUMNS``.
-
-    Строка — dict с ключами ``_text_/_sort_/_fg_/_bg_/_bold_/_tip_<col>``.
-    Используется вкладками «Членские взносы» и «Электроэнергия».
-    """
-
-    COLUMNS: list[str] = []
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._rows: list[dict] = []
-
-    def load(self, rows: list[dict]):
-        self.beginResetModel()
-        self._rows = list(rows)
-        self.endResetModel()
-
-    def top_nodes(self) -> list[dict]:
-        return self._rows
-
-    def index(self, row, column, parent=QModelIndex()):
-        if not self.hasIndex(row, column, parent):
-            return QModelIndex()
-        return self.createIndex(row, column, self._rows[row])
-
-    def parent(self, index):
-        return QModelIndex()
-
-    def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self._rows)
-
-    def columnCount(self, parent=QModelIndex()):
-        return len(self.COLUMNS)
-
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return None
-        row = self._rows[index.row()]
-        col = self.COLUMNS[index.column()]
-        if role == Qt.ItemDataRole.DisplayRole:
-            return row.get(f"_text_{col}", "")
-        if role == Qt.ItemDataRole.UserRole:
-            return row.get(f"_sort_{col}", 0.0)
-        if role == Qt.ItemDataRole.ForegroundRole:
-            fg = row.get(f"_fg_{col}")
-            return QColor(fg) if fg else None
-        if role == Qt.ItemDataRole.BackgroundRole:
-            bg = row.get(f"_bg_{col}")
-            return QColor(bg) if bg else None
-        if role == Qt.ItemDataRole.FontRole:
-            if row.get(f"_bold_{col}"):
-                f = QFont()
-                f.setBold(True)
-                return f
-        if role == Qt.ItemDataRole.ToolTipRole:
-            return row.get(f"_tip_{col}", "")
-        return None
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            if 0 <= section < len(self.COLUMNS):
-                return self.COLUMNS[section]
-        return None
-
-    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
-        if not (0 <= column < len(self.COLUMNS)):
-            return
-        col = self.COLUMNS[column]
-        sort_key = f"_sort_{col}"
-        self.layoutAboutToBeChanged.emit()
-        self._rows.sort(
-            key=lambda r: (r.get(sort_key) is None, r.get(sort_key, 0.0)),
-            reverse=(order == Qt.SortOrder.DescendingOrder),
-        )
-        self.layoutChanged.emit()
-
-
-# ============================================================================ #
-#  Вспомогательные виджеты для скруглённых контейнеров                        #
-# ============================================================================ #
-
-class _BorderOverlay(QWidget):
-    """Прозрачный виджет-ребёнок, рисует только скруглённую рамку поверх всего."""
-
-    def __init__(self, color: QColor, radius: int, parent: QWidget):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        self._color  = color
-        self._radius = radius
-        parent.installEventFilter(self)
-        self.setGeometry(parent.rect())
-        self.raise_()
-
-    def eventFilter(self, obj, event):
-        if obj is self.parent() and event.type() == QEvent.Type.Resize:
-            self.setGeometry(self.parent().rect())
-            self.raise_()
-        return False
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(self._color, 1))
-        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
-                                self._radius, self._radius)
-
-
-class _ClipFrame(QFrame):
-    """QFrame, который через setMask обрезает всё содержимое по скруглённому
-    прямоугольнику — фон, hover-выделения дочерних виджетов не вылезают за углы."""
-
-    def __init__(self, border_color: QColor, radius: int, parent=None):
-        super().__init__(parent)
-        self._radius = radius
-        self._overlay = None  # создаётся после добавления детей
-        self.setStyleSheet("background: transparent; border: none;")
-        self._border_color = border_color
-
-    def finish_setup(self):
-        """Вызвать после того, как все дочерние виджеты добавлены."""
-        self._overlay = _BorderOverlay(self._border_color, self._radius, self)
-        self._update_mask()
-
-    def _update_mask(self):
-        sz = self.size()
-        if sz.width() <= 0 or sz.height() <= 0:
-            return
-        bmp = QBitmap(sz)
-        bmp.fill(Qt.GlobalColor.color0)
-        p = QPainter(bmp)
-        p.setBrush(Qt.GlobalColor.color1)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(self.rect(), self._radius, self._radius)
-        p.end()
-        self.setMask(QRegion(bmp))
-
-    def resizeEvent(self, a0):
-        super().resizeEvent(a0)
-        self._update_mask()
-        if self._overlay:
-            self._overlay.setGeometry(self.rect())
-            self._overlay.raise_()
-
-
-# ============================================================================ #
-#  Шапка таблицы с кастомными стрелками сортировки                            #
-# ============================================================================ #
-
-class _SortHeaderView(QHeaderView):
-    """Шапка с синим фоном, стрелками сортировки и кнопкой удаления выбранных."""
-
-    deleteRequested = pyqtSignal()
-    searchChanged   = pyqtSignal(int, str)   # (col_logical, text)
-
-    _BG       = QColor("#C9D8E2")
-    _FG       = QColor("#07414F")
-    _BORDER   = QColor("#B5C8D5")
-    _ARR_ON   = QColor("#07414F")
-    _ARR_OFF  = QColor("#9AABB6")
-    _DEL_OFF  = QColor("#9CA3AF")   # нет выбора — серый
-    _DEL_ON   = QColor("#DC2626")   # есть выбор — красный
-    _DEL_HOV  = QColor("#B91C1C")   # наведение — тёмно-красный
-
-    _IC_CHARS = {chr(0xE73A), chr(0xF567), chr(0xF0DC)}  # иконки-индикаторы
-    _IC_COLOR = QColor("#F59E0B")
-
-    def __init__(self, parent=None):
-        super().__init__(Qt.Orientation.Horizontal, parent)
-        self.setSectionsClickable(True)
-        self.setSortIndicatorShown(False)
-        self.setFixedHeight(34)
-        self.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
-        self.setMouseTracking(True)
-        self._del_col        = -1
-        self._has_sel        = False
-        self._del_hovered    = False
-        self._fill_tag       = QFont.Tag.fromString("FILL")
-        self._col_indicators: dict[int, list] = {}   # col → [(lbl, cnt, tip), ...]
-        self._tip_col        = -1
-        self._tip_text       = ""
-        self._search_cols:   set  = set()
-        self._search_active: dict = {}
-        self._search_fields: dict = {}
-
-    # -- публичный API --------------------------------------------------------
-
-    def set_delete_col(self, col: int):
-        self._del_col = col
-
-    def _indicator_zones(self, logical_index: int, rect: QRect) -> list:
-        """Возвращает [(QRect, tooltip)] для каждого индикатора, справа налево."""
-        indicators = self._col_indicators.get(logical_index, [])
-        if not indicators:
-            return []
-        f_cnt = QFont(); f_cnt.setPixelSize(10); f_cnt.setBold(True)
-        fm    = QFontMetrics(f_cnt)
-        arr_w = 18
-        cur_x = rect.right() - arr_w - 6
-        zones = []
-        for lbl, cnt, tip in reversed(indicators):
-            lw   = 18 if lbl in self._IC_CHARS else fm.horizontalAdvance(lbl)
-            cw   = fm.horizontalAdvance(str(cnt))
-            zone = QRect(cur_x - cw - 2 - lw, rect.top(), lw + 2 + cw, rect.height())
-            zones.append((zone, tip))
-            cur_x -= lw + 2 + cw + 4
-        return zones
-
-    def set_has_selection(self, has: bool):
-        if self._has_sel != has:
-            self._has_sel = has
-            if not has:
-                self._del_hovered = False
-                self.viewport().unsetCursor()
-            self.viewport().update()
-
-    def add_search_col(self, col: int):
-        """Регистрирует столбец как поисковой и создаёт поле ввода."""
-        self._search_cols.add(col)
-        le = QLineEdit(self.viewport())
-        le.setPlaceholderText("Поиск...")
-        le.hide()
-        le.setStyleSheet(
-            "QLineEdit {"
-            "  background: rgba(255,255,255,0.45);"
-            "  border: 1px solid rgba(7,65,79,0.5);"
-            "  border-radius: 3px;"
-            "  color: #07414F;"
-            "  font-size: 12px;"
-            "  padding: 1px 4px;"
-            "}"
-        )
-        le.textChanged.connect(lambda text, c=col: self.searchChanged.emit(c, text))
-        self._search_fields[col] = le
-        self._search_active[col] = False
-
-    def _toggle_search(self, col: int):
-        now = not self._search_active.get(col, False)
-        self._search_active[col] = now
-        le = self._search_fields.get(col)
-        if le:
-            if now:
-                le.show()
-                le.setFocus()
-            else:
-                le.hide()
-                le.clear()
-        self.viewport().update()
-
-    def _compute_ind_left_x(self, logical: int, arr_left: int) -> int:
-        """Левая граница зоны индикаторов (= правая граница текста/поля)."""
-        indicators = self._col_indicators.get(logical, [])
-        if not indicators:
-            return arr_left - 2
-        f_cnt = QFont(); f_cnt.setPixelSize(10); f_cnt.setBold(True)
-        fm    = QFontMetrics(f_cnt)
-        total = sum(
-            (18 if lbl in self._IC_CHARS else fm.horizontalAdvance(lbl))
-            + 2 + fm.horizontalAdvance(str(cnt)) + 4
-            for lbl, cnt, _ in indicators
-        ) - 4
-        return arr_left - 2 - total - 6
-
-    def _search_icon_zone(self, logical: int, sec_rect: QRect) -> QRect:
-        """QRect иконки поиска или закрытия поиска для кликов/курсора."""
-        IC_W   = 22
-        ind_lx = self._compute_ind_left_x(logical, sec_rect.right() - 18 - 2)
-        if self._search_active.get(logical, False):
-            return QRect(ind_lx - IC_W - 4, sec_rect.top(), IC_W, sec_rect.height())
-        label  = str(self.model().headerData(
-            logical, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or "")
-        f      = QFont(); f.setPixelSize(12); f.setBold(True)
-        max_tw = max(0, ind_lx - sec_rect.left() - IC_W - 16)
-        tw     = min(QFontMetrics(f).horizontalAdvance(label), max_tw)
-        si_x   = min(sec_rect.left() + 10 + tw + 4, ind_lx - IC_W - 4)
-        return QRect(si_x, sec_rect.top(), IC_W, sec_rect.height())
-
-    # -- mouse events ---------------------------------------------------------
-
-    def mouseMoveEvent(self, event):
-        pos  = event.position().toPoint()
-        x    = pos.x()
-        hand = False
-
-        # -- кнопка удаления --
-        if self._del_col >= 0 and self._has_sel:
-            sec_x = self.sectionViewportPosition(self._del_col)
-            sec_w = self.sectionSize(self._del_col)
-            hov   = sec_x <= x < sec_x + sec_w
-            if hov != self._del_hovered:
-                self._del_hovered = hov
-                self.viewport().update()
-            if hov:
-                hand = True
-        else:
-            if self._del_hovered:
-                self._del_hovered = False
-                self.viewport().update()
-
-        # -- иконки поиска --
-        if not hand:
-            logical = self.logicalIndexAt(x)
-            if logical in self._search_cols:
-                sec_x    = self.sectionViewportPosition(logical)
-                sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
-                if self._search_icon_zone(logical, sec_rect).contains(pos):
-                    hand = True
-
-        if hand:
-            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-            self.viewport().unsetCursor()
-
-        # -- тултипы индикаторов --
-        tip_col, tip_txt = -1, ""
-        logical = self.logicalIndexAt(x)
-        if logical >= 0:
-            sec_x    = self.sectionViewportPosition(logical)
-            sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
-            for zone, tip in self._indicator_zones(logical, sec_rect):
-                if zone.contains(pos):
-                    tip_col, tip_txt = logical, tip
-                    break
-        if tip_col != self._tip_col or tip_txt != self._tip_text:
-            self._tip_col  = tip_col
-            self._tip_text = tip_txt
-            if tip_col >= 0:
-                _AppTooltip.show_at(tip_txt, self.viewport().mapToGlobal(pos))
-            else:
-                _AppTooltip.hide()
-
-        super().mouseMoveEvent(event)
-
-    def leaveEvent(self, event):
-        if self._del_hovered:
-            self._del_hovered = False
-            self.viewport().update()
-        self.viewport().unsetCursor()
-        if self._tip_col >= 0:
-            self._tip_col  = -1
-            self._tip_text = ""
-            _AppTooltip.hide()
-        super().leaveEvent(event)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            pos = event.position().toPoint()
-            x   = pos.x()
-
-            if self._del_col >= 0 and self._has_sel:
-                sec_x = self.sectionViewportPosition(self._del_col)
-                sec_w = self.sectionSize(self._del_col)
-                if sec_x <= x < sec_x + sec_w:
-                    self.deleteRequested.emit()
-                    return
-
-            logical = self.logicalIndexAt(x)
-            if logical in self._search_cols:
-                sec_x    = self.sectionViewportPosition(logical)
-                sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
-                if self._search_icon_zone(logical, sec_rect).contains(pos):
-                    self._toggle_search(logical)
-                    return
-
-        super().mousePressEvent(event)
-
-    # -- paint ----------------------------------------------------------------
-
-    def paintSection(self, painter: QPainter, rect: QRect, logical_index: int):
-        if not rect.isValid():
-            return
-        painter.save()
-        painter.fillRect(rect, self._BG)
-
-        painter.setPen(QPen(self._BORDER, 1))
-        painter.drawLine(rect.right(), rect.top() + 4, rect.right(), rect.bottom() - 4)
-
-        model = self.model()
-        label = (
-            str(model.headerData(logical_index, Qt.Orientation.Horizontal,
-                                 Qt.ItemDataRole.DisplayRole) or "")
-            if model else ""
-        )
-        if label:
-            # Одиночный символ Material Symbols — рисуем как иконку, без стрелок
-            if len(label) == 1 and 0xE000 <= ord(label) <= 0xF8FF:
-                f_ic = QFont("Material Symbols Rounded")
-                f_ic.setPixelSize(18)
-                if logical_index == self._del_col:
-                    if not self._has_sel:
-                        color = self._DEL_OFF
-                        fill  = 0.0
-                    elif self._del_hovered:
-                        color = self._DEL_HOV
-                        fill  = 1.0
-                    else:
-                        color = self._DEL_ON
-                        fill  = 0.0
-                    f_ic.setVariableAxis(self._fill_tag, fill)
-                    painter.setPen(color)
-                else:
-                    painter.setPen(self._FG)
-                painter.setFont(f_ic)
-                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
-            else:
-                arr_w    = 18
-                arr_rect = QRect(rect.right() - arr_w - 2, rect.top(), arr_w, rect.height())
-
-                # Индикаторы (справа налево, перед стрелками сортировки)
-                indicators = self._col_indicators.get(logical_index, [])
-                ind_left_x = arr_rect.left() - 2
-                if indicators:
-                    f_ic  = QFont("Material Symbols Rounded"); f_ic.setPixelSize(14)
-                    f_cnt = QFont(); f_cnt.setPixelSize(10); f_cnt.setBold(True)
-                    fm    = QFontMetrics(f_cnt)
-                    cur_x = ind_left_x
-                    for lbl, cnt, _ in reversed(indicators):
-                        lw    = 18 if lbl in self._IC_CHARS else fm.horizontalAdvance(lbl)
-                        cw    = fm.horizontalAdvance(str(cnt))
-                        lbl_r = QRect(cur_x - cw - 2 - lw, rect.top(), lw, rect.height())
-                        cnt_r = QRect(cur_x - cw, rect.top(), cw, rect.height())
-                        painter.setFont(f_ic if lbl in self._IC_CHARS else f_cnt)
-                        painter.setPen(self._IC_COLOR)
-                        painter.drawText(lbl_r, Qt.AlignmentFlag.AlignCenter, lbl)
-                        painter.setFont(f_cnt)
-                        painter.drawText(cnt_r, Qt.AlignmentFlag.AlignCenter, str(cnt))
-                        cur_x -= lw + 2 + cw + 4
-                    ind_left_x = cur_x - 4
-
-                # Стрелки сортировки
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                cx = arr_rect.left() + arr_rect.width() // 2
-                cy = arr_rect.top() + arr_rect.height() // 2
-                is_sorted = (self.sortIndicatorSection() == logical_index)
-                asc  = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
-                desc = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(self._ARR_ON if asc else self._ARR_OFF)
-                painter.drawPolygon(QPolygon([
-                    QPoint(cx - 4, cy - 1), QPoint(cx + 4, cy - 1), QPoint(cx, cy - 6),
-                ]))
-                painter.setBrush(self._ARR_ON if desc else self._ARR_OFF)
-                painter.drawPolygon(QPolygon([
-                    QPoint(cx - 4, cy + 1), QPoint(cx + 4, cy + 1), QPoint(cx, cy + 6),
-                ]))
-
-                # Заголовок / поле поиска
-                IC_W      = 22
-                is_srch   = logical_index in self._search_cols
-                is_active = self._search_active.get(logical_index, False)
-
-                if is_srch and is_active:
-                    off_x    = ind_left_x - IC_W - 4
-                    off_rect = QRect(off_x, rect.top(), IC_W, rect.height())
-                    le       = self._search_fields[logical_index]
-                    le_h     = 22
-                    le_rect  = QRect(rect.left() + 8,
-                                     rect.top() + (rect.height() - le_h) // 2,
-                                     max(0, off_x - rect.left() - 10),
-                                     le_h)
-                    le.setGeometry(le_rect)
-                    if not le.isVisible():
-                        le.show()
-                        le.setFocus()
-                    f_ico = QFont("Material Symbols Rounded"); f_ico.setPixelSize(18)
-                    painter.setFont(f_ico)
-                    painter.setPen(self._FG)
-                    painter.drawText(off_rect, Qt.AlignmentFlag.AlignCenter, chr(0xEA76))
-                else:
-                    if is_srch:
-                        le = self._search_fields.get(logical_index)
-                        if le and le.isVisible():
-                            le.hide()
-
-                    if is_srch:
-                        title_max_w = max(0, ind_left_x - rect.left() - IC_W - 16)
-                    else:
-                        title_max_w = max(0, ind_left_x - rect.left() - 6)
-
-                    text_rect = QRect(rect.left() + 10, rect.top(), title_max_w, rect.height())
-                    painter.setPen(self._FG)
-                    f = QFont(); f.setPixelSize(12); f.setBold(True)
-                    painter.setFont(f)
-                    painter.drawText(text_rect,
-                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                                     label)
-
-                    if is_srch:
-                        fm_t  = QFontMetrics(f)
-                        tw    = min(fm_t.horizontalAdvance(label), title_max_w)
-                        si_x  = min(rect.left() + 10 + tw + 4, ind_left_x - IC_W - 4)
-                        si_r  = QRect(si_x, rect.top(), IC_W, rect.height())
-                        f_ico = QFont("Material Symbols Rounded"); f_ico.setPixelSize(18)
-                        painter.setFont(f_ico)
-                        painter.setPen(self._FG)
-                        painter.drawText(si_r, Qt.AlignmentFlag.AlignCenter, chr(0xE8B6))
-
-        painter.restore()
 
 
 # ============================================================================ #
@@ -1664,6 +860,104 @@ class _PlotRowDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class _FilterTabButton(QPushButton):
+    """Вкладка-фильтр списка участков: «Текст [иконка] · счётчик» с нижним
+    подчёркиванием активного состояния.
+
+    Рисуется вручную по двум причинам: QPushButton не умеет иконку между
+    текстом и счётчиком, а QSS font-weight:700 активной вкладки не попадает
+    в sizeHint — жирный текст обрезался справа. Ширина резервируется по
+    жирному начертанию и контент центрируется, поэтому при переключении
+    вкладки ничего не режется и соседи не прыгают.
+    """
+
+    _PAD_H, _PAD_TOP, _PAD_BOT = 2, 4, 8   # поля как в прежнем QSS padding
+    _UNDERLINE = 2                          # прежний border-bottom
+    _ICON_PX = 15                           # размер глифа-иконки
+    _GAP = 4                                # зазор текст—иконка
+
+    _CL_CHECKED = QColor("#07414F")
+    _CL_HOVER   = QColor("#374151")
+    _CL_NORMAL  = QColor("#6B7280")
+
+    def __init__(self, label: str, icon_cp: int | None = None, parent=None):
+        super().__init__(parent)
+        self._label = label
+        self._icon_cp = icon_cp
+        self._count = ""
+        self._icon_cache: dict[tuple[str, int], QPixmap] = {}
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        f = QFont(self.font())
+        f.setPixelSize(13)
+        f.setWeight(QFont.Weight.Normal)
+        self._f_norm = f
+        fb = QFont(f)
+        fb.setWeight(QFont.Weight.Bold)
+        self._f_bold = fb
+
+    def set_count(self, n: int):
+        self._count = f" · {n}"
+        self.updateGeometry()
+        self.update()
+
+    def _content_width(self, fm: QFontMetrics) -> int:
+        w = fm.horizontalAdvance(self._label) + fm.horizontalAdvance(self._count)
+        if self._icon_cp is not None:
+            w += self._GAP + self._ICON_PX
+        return w
+
+    def sizeHint(self) -> QSize:
+        fm = QFontMetrics(self._f_bold)   # резерв ширины под жирное начертание
+        return QSize(self._PAD_H * 2 + self._content_width(fm),
+                     self._PAD_TOP + fm.height() + self._PAD_BOT + self._UNDERLINE)
+
+    minimumSizeHint = sizeHint
+
+    def _icon_pm(self, color: str, fill: int) -> QPixmap:
+        key = (color, fill)
+        pm = self._icon_cache.get(key)
+        if pm is None:
+            pm = _mat_icon(self._icon_cp, self._ICON_PX, fill=fill,
+                           color=color).pixmap(self._ICON_PX, self._ICON_PX)
+            self._icon_cache[key] = pm
+        return pm
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.update()
+
+    def paintEvent(self, event):
+        checked = self.isChecked()
+        color = (self._CL_CHECKED if checked
+                 else self._CL_HOVER if self.underMouse() else self._CL_NORMAL)
+        font = self._f_bold if checked else self._f_norm
+        fm = QFontMetrics(font)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setFont(font)
+        p.setPen(color)
+        x = max(0, (self.width() - self._content_width(fm)) // 2)
+        base = self._PAD_TOP + fm.ascent()
+        p.drawText(x, base, self._label)
+        x += fm.horizontalAdvance(self._label)
+        if self._icon_cp is not None:
+            x += self._GAP
+            icon_y = self._PAD_TOP + (fm.height() - self._ICON_PX) // 2
+            p.drawPixmap(x, icon_y, self._icon_pm(color.name(), 1 if checked else 0))
+            x += self._ICON_PX
+        if self._count:
+            p.drawText(x, base, self._count)
+        if checked:
+            p.fillRect(0, self.height() - self._UNDERLINE, self.width(),
+                       self._UNDERLINE, self._CL_CHECKED)
+        p.end()
+
+
 # ============================================================================ #
 #  PlotsWidget                                                                 #
 # ============================================================================ #
@@ -1779,36 +1073,42 @@ class PlotsWidget(QWidget):
             b.clicked.connect(handler)
             return b
 
+        # Массовые операции над выбранными участками — в одном ряду с
+        # «Импорт»/«Добавить», слева от них. Активны только при выборе строк
+        # (см. _refresh_toolbar); в disabled-состоянии Qt сам гасит иконку.
+        self._btn_bulk_save = _hdr_icon_btn("Сохранить выбранные", self._on_bulk_save_stub)
+        self._btn_bulk_save.setEnabled(False)
+        list_hdr.addWidget(self._btn_bulk_save)
+        self._btn_bulk_delete = _hdr_icon_btn("Удалить выбранные", self._bulk_delete)
+        self._btn_bulk_delete.setEnabled(False)
+        self._btn_bulk_delete.setStyleSheet(
+            "QPushButton{background:transparent;border:none;border-radius:6px;}"
+            "QPushButton:hover{background:#FEF2F2;}"
+            "QPushButton:disabled{background:transparent;}")
+        list_hdr.addWidget(self._btn_bulk_delete)
         self._btn_import = _hdr_icon_btn("Импорт из Excel", self._import_from_excel)
         list_hdr.addWidget(self._btn_import)
         self._btn_add = _hdr_icon_btn("Добавить участок", self._add_plot)
         list_hdr.addWidget(self._btn_add)
         QTimer.singleShot(0, self._refresh_icons)
 
-        # ── Вкладки-фильтры: Все / Должники / Должники ЧВ / Должники Эл ──────
+        # ── Вкладки-фильтры: Все / Должники / Должники 💰 / Должники ⚡ ───────
+        # Долги по взносам и электричеству различаются иконкой после слова
+        # (money_bag / bolt), а не текстовым суффиксом «ЧВ»/«Эл».
         tabs_row = QHBoxLayout()
         tabs_row.setContentsMargins(0, 4, 0, 0)
         tabs_row.setSpacing(20)
         self._tab_group = QButtonGroup(self)
         self._tab_group.setExclusive(True)
-        self._tab_buttons: dict[str, QPushButton] = {}
+        self._tab_buttons: dict[str, _FilterTabButton] = {}
         self._TAB_LABELS = {
-            "all":            "Все",
-            "debtors":        "Должники",
-            "debtors_vznosy": "Должники ЧВ",
-            "debtors_energy": "Должники Эл",
+            "all":            ("Все", None),
+            "debtors":        ("Должники", None),
+            "debtors_vznosy": ("Должники", 0xF3EE),  # money_bag
+            "debtors_energy": ("Должники", 0xEA0B),  # bolt
         }
-        for mode, label in self._TAB_LABELS.items():
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet(
-                "QPushButton{background:transparent;border:none;"
-                "border-bottom:2px solid transparent;padding:4px 2px 8px 2px;"
-                "font-size:13px;color:#6B7280;}"
-                "QPushButton:hover:!checked{color:#374151;}"
-                "QPushButton:checked{color:#07414F;font-weight:700;"
-                "border-bottom:2px solid #07414F;}")
+        for mode, (label, icon_cp) in self._TAB_LABELS.items():
+            btn = _FilterTabButton(label, icon_cp)
             btn.clicked.connect(lambda checked, m=mode: self._on_filter_tab(m))
             self._tab_group.addButton(btn)
             self._tab_buttons[mode] = btn
@@ -1822,45 +1122,37 @@ class PlotsWidget(QWidget):
         tb_l = QHBoxLayout(toolbar)
         tb_l.setContentsMargins(0, 4, 0, 4)
         tb_l.setSpacing(8)
-        _SS_TB_ICON_BTN = (
-            "QPushButton{background:transparent;border:none;border-radius:6px;}"
-            "QPushButton:hover{background:#EBF4F6;}"
-            "QPushButton:disabled{background:transparent;}")
 
-        # Заглушка — массовое сохранение выбранных участков (пока не реализовано).
-        self._btn_bulk_save = QPushButton()
-        self._btn_bulk_save.setFixedSize(28, 28)
-        self._btn_bulk_save.setIconSize(QSize(18, 18))
-        self._btn_bulk_save.setIcon(_mat_icon(0xE161, 18, color="#07414F"))  # save
-        self._btn_bulk_save.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_bulk_save.setEnabled(False)
-        self._btn_bulk_save.clicked.connect(self._on_bulk_save_stub)
-        self._btn_bulk_save.installEventFilter(
-            _TooltipFilter("Сохранить выбранные", self._btn_bulk_save))
-        self._btn_bulk_save.setStyleSheet(_SS_TB_ICON_BTN)
-        tb_l.addWidget(self._btn_bulk_save)
+        # Поиск — слева, тянется на всю свободную ширину ряда (stretch=1 ниже).
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Поиск по номеру или ФИО")
+        self._search.setClearButtonEnabled(True)
+        self._search.setMinimumWidth(220)
+        # Свой стиль вместо нативного: «подбородок» (нижняя линия), на фокусе —
+        # бирюзовый вместо системно-синего. Толщина одинаковая, чтобы текст не прыгал.
+        self._search.setStyleSheet(
+            "QLineEdit{background:transparent;border:none;border-bottom:2px solid #D1D5DB;"
+            "border-radius:0;padding:6px 2px;font-size:13px;color:#1F2937;}"
+            "QLineEdit:focus{border-bottom:2px solid #07414F;}")
+        self._search.textChanged.connect(self._on_search_text)
+        tb_l.addWidget(self._search, stretch=1)
 
-        self._btn_bulk_delete = QPushButton("Удалить")
-        self._btn_bulk_delete.setIcon(_mat_icon(0xE92B, 18, color="#DC2626"))  # delete
-        self._btn_bulk_delete.setIconSize(QSize(18, 18))
-        self._btn_bulk_delete.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_bulk_delete.setEnabled(False)
-        self._btn_bulk_delete.clicked.connect(self._bulk_delete)
-        self._btn_bulk_delete.installEventFilter(
-            _TooltipFilter("Удалить выбранные", self._btn_bulk_delete))
-        self._btn_bulk_delete.setStyleSheet(
-            "QPushButton{background:transparent;border:none;border-radius:6px;"
-            "padding:4px 10px 4px 6px;font-size:12px;color:#DC2626;}"
-            "QPushButton:hover{background:#FEF2F2;}"
-            "QPushButton:disabled{color:#FCA5A5;background:transparent;}")
-        tb_l.addWidget(self._btn_bulk_delete)
+        self._count_lbl = QLabel("")
+        self._count_lbl.setStyleSheet("font-size:12px; color:#9CA3AF; background:transparent;")
+        tb_l.addWidget(self._count_lbl)
 
-        # Переключатель «Показывать переплату» — включён по умолчанию; при
-        # выключении отрицательный долг (переплата) в таблице заменяется на 0,00.
+        self._selected_lbl = QLabel("")
+        self._selected_lbl.setStyleSheet(
+            "font-size:12px; color:#07414F; background:transparent; font-weight:600;")
+        tb_l.addWidget(self._selected_lbl)
+
+        # Переключатель «Показывать переплату» — справа; включён по умолчанию,
+        # при выключении отрицательный долг (переплата) в таблице заменяется
+        # на 0,00. Иконка — Material-тумблер toggle_on/toggle_off.
         self._chk_overpay = QPushButton(" Показывать переплату")
         self._chk_overpay.setCheckable(True)
         self._chk_overpay.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._chk_overpay.setIconSize(QSize(18, 18))
+        self._chk_overpay.setIconSize(QSize(20, 20))
         self._chk_overpay.setStyleSheet(
             "QPushButton{background:transparent;border:none;border-radius:6px;"
             "padding:4px 8px;font-size:12px;color:#374151;}"
@@ -1870,30 +1162,6 @@ class PlotsWidget(QWidget):
         self._chk_overpay.toggled.connect(self._on_toggle_overpay)
         tb_l.addWidget(self._chk_overpay)
 
-        self._selected_lbl = QLabel("")
-        self._selected_lbl.setStyleSheet(
-            "font-size:12px; color:#07414F; background:transparent; font-weight:600;")
-        tb_l.addWidget(self._selected_lbl)
-        tb_l.addStretch()
-
-        self._count_lbl = QLabel("")
-        self._count_lbl.setStyleSheet("font-size:12px; color:#9CA3AF; background:transparent;")
-        tb_l.addWidget(self._count_lbl)
-
-        # Поиск — справа, после «Удалить».
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("Поиск по номеру или ФИО")
-        self._search.setClearButtonEnabled(True)
-        self._search.setFixedWidth(220)
-        # Свой стиль вместо нативного: «подбородок» (нижняя линия), на фокусе —
-        # бирюзовый вместо системно-синего. Толщина одинаковая, чтобы текст не прыгал.
-        self._search.setStyleSheet(
-            "QLineEdit{background:transparent;border:none;border-bottom:2px solid #D1D5DB;"
-            "border-radius:0;padding:6px 2px;font-size:13px;color:#1F2937;}"
-            "QLineEdit:focus{border-bottom:2px solid #07414F;}")
-        self._search.textChanged.connect(self._on_search_text)
-        tb_l.addWidget(self._search)
-
         self._toolbar = toolbar
 
         # Капшен колонок (геометрия ~ как в делегате)
@@ -1901,15 +1169,20 @@ class PlotsWidget(QWidget):
         cap.setStyleSheet("background:transparent;")
         cap_l = QHBoxLayout(cap)
         cap_l.setContentsMargins(_PlotRowDelegate._PAD, 0, _PlotRowDelegate._PAD, 0)
-        cap_l.setSpacing(8)
-        # Master-чекбокс
+        # Spacing 0: зазоры колонок задаются явными addSpacing(8) ровно там,
+        # где их рисует делегат (_PlotRowDelegate.paint) — между чекбоксом и №
+        # зазора нет, автоматический spacing сдвигал все заголовки на 8px.
+        cap_l.setSpacing(0)
+        # Master-чекбокс: глиф прижат влево, как в строках (_cb_rect — 18px
+        # от левого края слота шириной _CB_W, а не по центру слота).
         _cb_font = QFont("Material Symbols Rounded")
         _cb_font.setPixelSize(18)
         self._master_cb = QLabel(chr(0xE835))  # check_box_outline_blank
         self._master_cb.setFont(_cb_font)
         self._master_cb.setStyleSheet("color:#C3CAD3; background:transparent;")
         self._master_cb.setFixedSize(_PlotRowDelegate._CB_W, _PlotRowDelegate._CB_W)
-        self._master_cb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._master_cb.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._master_cb.setCursor(Qt.CursorShape.PointingHandCursor)
         self._master_cb.mousePressEvent = self._on_master_cb_click
         cap_l.addWidget(self._master_cb)
@@ -1929,8 +1202,11 @@ class PlotsWidget(QWidget):
             c.mousePressEvent = lambda e, k=key: self._on_header_click(k)
         self._refresh_sort_headers()
         cap_l.addWidget(cap_num)
+        cap_l.addSpacing(8)
         cap_l.addWidget(cap_name, stretch=1)
+        cap_l.addSpacing(8)
         cap_l.addWidget(cap_vz)
+        cap_l.addSpacing(8)
         cap_l.addWidget(cap_en)
         # Заглушка под скроллбар — чтобы колонки капшена совпали с данными
         # (делегат рисует в вьюпорте, уже на ширину желоба). Ширина выставляется
@@ -2121,7 +1397,9 @@ class PlotsWidget(QWidget):
         self._btn_add.setIcon(_mat_icon(0xF8EB, 22, color="#9CA3AF"))
 
     def _refresh_icons(self):
-        """Обновить иконки кнопок «Импорт» и «Добавить» одновременно."""
+        """Обновить иконки всех кнопок шапки списка одновременно."""
+        self._btn_bulk_save.setIcon(_mat_icon(0xE161, 22, color="#9CA3AF"))    # save
+        self._btn_bulk_delete.setIcon(_mat_icon(0xE92B, 22, color="#DC2626"))  # delete
         self._btn_import.setIcon(_mat_icon(0xEAF3, 22, color="#9CA3AF"))
         self._refresh_add_icon()
 
@@ -2167,9 +1445,10 @@ class PlotsWidget(QWidget):
 
     def _refresh_overpay_icon(self):
         checked = self._chk_overpay.isChecked()
-        cp = 0xE834 if checked else 0xE835  # check_box / check_box_outline_blank
+        cp = 0xE9F6 if checked else 0xE9F5  # toggle_on / toggle_off
         self._chk_overpay.setIcon(
-            _mat_icon(cp, 18, color="#07414F" if checked else "#9CA3AF"))
+            _mat_icon(cp, 20, fill=1 if checked else 0,
+                      color="#07414F" if checked else "#9CA3AF"))
 
     def _on_toggle_overpay(self, checked: bool):
         self._refresh_overpay_icon()
@@ -2192,7 +1471,7 @@ class PlotsWidget(QWidget):
             "debtors_energy": sum(1 for p in base_plots if self._is_debtor(p, "energy")),
         }
         for mode, btn in self._tab_buttons.items():
-            btn.setText(f"{self._TAB_LABELS[mode]} · {counts[mode]}")
+            btn.set_count(counts[mode])
 
     def _on_header_click(self, col: str):
         if self._sort_col == col:
@@ -2422,7 +1701,7 @@ class PlotsWidget(QWidget):
         try:
             df = pd.read_excel(path, dtype=str)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка чтения файла", str(e))
+            _AlertDialog.show_alert(self, "Ошибка чтения файла", str(e))
             return
 
         col_num = None
@@ -2444,7 +1723,7 @@ class PlotsWidget(QWidget):
                 col_email = col
 
         if col_num is None or col_name is None:
-            QMessageBox.warning(
+            _AlertDialog.show_alert(
                 self, "Неверный формат",
                 f"Не удалось найти нужные столбцы.\n"
                 f"Ожидается: «№ участка» и «Ф.И.О.»\n"
@@ -2512,26 +1791,29 @@ class PlotsWidget(QWidget):
                         pass
 
         if not imported:
-            QMessageBox.warning(self, "Пустой файл", "В файле не найдено данных об участках.")
+            _AlertDialog.show_alert(self, "Пустой файл", "В файле не найдено данных об участках.")
             return
 
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Импорт участков")
-        msg.setText(
-            f"Найдено {len(imported)} участков в файле.\n\n"
-            "Как импортировать?"
+        dlg = _BasePromptDialog(
+            "Импорт участков",
+            f"Найдено {len(imported)} участков в файле.\n\nКак импортировать?",
+            parent=self,
         )
-        btn_replace = msg.addButton("Заменить всё", QMessageBox.ButtonRole.DestructiveRole)
-        btn_merge   = msg.addButton("Добавить новые", QMessageBox.ButtonRole.AcceptRole)
-        btn_cancel  = msg.addButton("Отмена",        QMessageBox.ButtonRole.RejectRole)
-        msg.setDefaultButton(btn_merge)
-        msg.exec()
+        choice = {"value": "cancel"}
 
-        clicked = msg.clickedButton()
-        if clicked is btn_cancel:
+        def _pick(value: str):
+            choice["value"] = value
+            dlg.accept()
+
+        dlg._add_button("Отмена", SecondaryButton, lambda: _pick("cancel"))
+        dlg._add_button("Заменить всё", DangerButton, lambda: _pick("replace"))
+        dlg._add_button("Добавить новые", PrimaryButton, lambda: _pick("merge"))
+        dlg._finalize()
+        _exec_dialog(dlg, self)
+        if choice["value"] == "cancel":
             return
 
-        if clicked is btn_replace:
+        if choice["value"] == "replace":
             new_plots = []
             for num, entry in imported.items():
                 _ensure_single_primary(entry["owners"])
@@ -2571,10 +1853,9 @@ class PlotsWidget(QWidget):
 
         self._save()
         self._rebuild_table()
-        QMessageBox.information(
+        _AlertDialog.show_alert(
             self, "Импорт завершён",
-            f"Импортировано {len(imported)} участков."
-        )
+            f"Импортировано {len(imported)} участков.")
 
     def _add_plot(self):
         """Быстрое добавление участка через модальное окно (номер/площадь/
@@ -2862,12 +2143,12 @@ class _DocFieldWidget(QFrame):
 
     def _on_open(self):
         if not self._path or not os.path.exists(self._path):
-            QMessageBox.warning(self, "Ошибка", "Файл не найден")
+            _AlertDialog.show_alert(self, "Ошибка", "Файл не найден")
             return
         try:
             os.startfile(self._path)
         except Exception:
-            QMessageBox.warning(self, "Ошибка", "Не удалось открыть файл")
+            _AlertDialog.show_alert(self, "Ошибка", "Не удалось открыть файл")
 
     def delete_path(self):
         self._path = ""
@@ -4908,7 +4189,7 @@ class PlotEditDialog(QWidget):
             return
         num = self.inp_num.text().strip()
         if not num:
-            QMessageBox.warning(self, "Ошибка", "Укажите номер участка")
+            _AlertDialog.show_alert(self, "Ошибка", "Укажите номер участка")
             return
         area_raw = self.inp_area.text().strip().replace(",", ".")
         if area_raw:
@@ -4917,11 +4198,11 @@ class PlotEditDialog(QWidget):
                 if v <= 0:
                     raise ValueError
             except ValueError:
-                QMessageBox.warning(self, "Ошибка",
+                _AlertDialog.show_alert(self, "Ошибка",
                                     "Площадь должна быть положительным числом")
                 return
         if not self._has_named_owner():
-            QMessageBox.warning(self, "Ошибка",
+            _AlertDialog.show_alert(self, "Ошибка",
                                 "В активной группе должно быть хотя бы одно лицо с заполненным ФИО")
             return
         self._build_result()

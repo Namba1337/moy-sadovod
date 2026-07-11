@@ -7,7 +7,7 @@ from datetime import date
 from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
+    QCheckBox, QComboBox, QDateEdit, QDialog, QFileDialog,
     QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
@@ -15,8 +15,14 @@ from PyQt6.QtWidgets import (
 
 from core import energy
 from core.utils import fmt_money
-from ui.detail_widget import _FramelessDialog, _exec_dialog, _AlertDialog
-from ui.plots_widget import _ConfirmDialog
+from ui.buttons import GhostButton, PrimaryButton, SecondaryButton
+from ui.dialogs import (
+    AlertDialog as _AlertDialog,
+    BaseDialog as _FramelessDialog,
+    ConfirmDialog as _ConfirmDialog,
+    exec_dialog as _exec_dialog,
+)
+from ui.theme import C, FS
 
 
 def _next_period_start(today: date | None = None) -> date:
@@ -44,9 +50,7 @@ class _PdfPeriodDialog(_FramelessDialog):
         layout.setContentsMargins(20, 20, 20, 18)
         layout.setSpacing(12)
 
-        title = QLabel("Период квитанции")
-        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
-        layout.addWidget(title)
+        layout.addLayout(self.make_header("Период квитанции"))
 
         info = QLabel("Укажите период для квитанции.\n"
                       "Оставьте «Весь период» для полной истории.")
@@ -87,35 +91,16 @@ class _PdfPeriodDialog(_FramelessDialog):
         self._zero_cb = QCheckBox("Без учёта задолженности прошлых периодов")
         layout.addWidget(self._zero_cb)
 
-        buttons = QDialogButtonBox(self)
-        self._btn_period = buttons.addButton("За период", QDialogButtonBox.ButtonRole.AcceptRole)
-        self._btn_all = buttons.addButton("Весь период", QDialogButtonBox.ButtonRole.ResetRole)
-        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-        buttons.rejected.connect(self.reject)
+        btn_cancel = SecondaryButton("Отмена")
+        btn_cancel.clicked.connect(self.reject)
+        self._btn_all = SecondaryButton("Весь период")
         self._btn_all.clicked.connect(self._accept_all)
+        self._btn_period = PrimaryButton("За период")
         self._btn_period.clicked.connect(self.accept)
-        layout.addWidget(buttons)
+        layout.addLayout(self.make_button_row(
+            btn_cancel, self._btn_all, self._btn_period))
 
         self._use_since = True
-
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel { background: transparent; color: #374151; font-size: 13px; }
-            QComboBox, QSpinBox {
-                background: #F8F9FA; border: 1px solid #D1D5DB;
-                border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
-            }
-            QComboBox:focus, QSpinBox:focus { border: 1px solid #07414F; }
-            QCheckBox { color: #374151; background: transparent; font-size: 13px; }
-            QDialogButtonBox QPushButton {
-                background: #E5E7EB; color: #374151; border: 1px solid #D1D5DB;
-                border-radius: 6px; padding: 7px 16px; font-size: 13px;
-            }
-            QDialogButtonBox QPushButton:hover { background: #D1D5DB; }
-            QDialogButtonBox QPushButton[text='За период'] {
-                background: #07414F; color: white; border: none; font-weight: 600;
-            }
-            QDialogButtonBox QPushButton[text='За период']:hover { background: #0B5A6E; }
-        """)
 
     def _accept_all(self):
         self._use_since = False
@@ -154,9 +139,7 @@ class MeterReplacementDialog(_FramelessDialog):
         lay.setContentsMargins(20, 20, 20, 18)
         lay.setSpacing(12)
 
-        title = QLabel(f"Замена счётчика на участке {plot}")
-        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
-        lay.addWidget(title)
+        lay.addLayout(self.make_header(f"Замена счётчика на участке {plot}"))
 
         form = QFormLayout()
         form.setSpacing(8)
@@ -181,32 +164,11 @@ class MeterReplacementDialog(_FramelessDialog):
 
         lay.addLayout(form)
 
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        btns.accepted.connect(self._on_accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
-
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel { background: transparent; color: #374151; font-size: 13px; }
-            QLineEdit, QDateEdit {
-                background: #F8F9FA; border: 1px solid #D1D5DB;
-                border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
-            }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #07414F; }
-            QDialogButtonBox QPushButton {
-                background: #07414F; color: white; border: none;
-                border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
-            }
-            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
-            QDialogButtonBox QPushButton[text='Отмена'] {
-                background: #E5E7EB; color: #6B7280;
-            }
-        """)
+        btn_cancel = SecondaryButton("Отмена")
+        btn_cancel.clicked.connect(self.reject)
+        btn_save = PrimaryButton("Сохранить")
+        btn_save.clicked.connect(self._on_accept)
+        lay.addLayout(self.make_button_row(btn_cancel, btn_save))
 
     def _on_accept(self):
         try:
@@ -273,9 +235,8 @@ class BillingTypeDialog(_FramelessDialog):
         lay.setContentsMargins(20, 20, 20, 18)
         lay.setSpacing(12)
 
-        title = QLabel(f"Тип расчёта за электроэнергию — участок {self._plot}")
-        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
-        lay.addWidget(title)
+        lay.addLayout(self.make_header(
+            f"Тип расчёта за электроэнергию — участок {self._plot}"))
 
         self.cb_billing = QComboBox()
         for bt in energy.BILLING_TYPES:
@@ -385,14 +346,11 @@ class BillingTypeDialog(_FramelessDialog):
         fd.addRow(note_d)
         lay.addWidget(self._g_direct)
 
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        btns.accepted.connect(self._on_accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
+        btn_cancel = SecondaryButton("Отмена")
+        btn_cancel.clicked.connect(self.reject)
+        btn_save = PrimaryButton("Сохранить")
+        btn_save.clicked.connect(self._on_accept)
+        lay.addLayout(self.make_button_row(btn_cancel, btn_save))
 
         self.cb_billing.currentIndexChanged.connect(self._on_billing_changed)
         self._on_billing_changed()
@@ -495,7 +453,7 @@ class BillingTypeDialog(_FramelessDialog):
                     _AlertDialog.show_alert(
                         self, "Расчётный метод",
                         "Укажите норматив мощности на участке, либо задайте "
-                        "значение по умолчанию в «⚙ Настройки» на вкладке "
+                        "значение по умолчанию в «Настройки» на вкладке "
                         "«Электроэнергия».")
                     return
                 else:
@@ -543,29 +501,7 @@ class BillingTypeDialog(_FramelessDialog):
         self.accept()
 
     def _apply_styles(self):
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel  { background: transparent; color: #374151; font-size: 13px; }
-            QLineEdit, QDateEdit {
-                background: #F8F9FA; border: 1px solid #D1D5DB;
-                border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
-            }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #07414F; }
-            QComboBox {
-                background: #F8F9FA; border: 1px solid #D1D5DB; border-radius: 5px;
-                padding: 7px 10px; font-size: 13px; color: #374151;
-            }
-            QComboBox::drop-down { border: none; width: 20px; }
-            QComboBox QAbstractItemView {
-                background: #FFFFFF; border: 1px solid #D1D5DB;
-                color: #374151; selection-background-color: #E8F0F5;
-            }
-            QDialogButtonBox QPushButton {
-                background: #07414F; color: white; border: none;
-                border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
-            }
-            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
-            QDialogButtonBox QPushButton[text='Отмена'] { background: #E5E7EB; color: #6B7280; }
-        """)
+        self.setStyleSheet(self.base_qss())
 
 
 class PlotCardDialog(_FramelessDialog):
@@ -643,7 +579,7 @@ class PlotCardDialog(_FramelessDialog):
         self.le_value.returnPressed.connect(self._on_add_reading)
         eh.addWidget(self.le_value)
 
-        btn_add = QPushButton("Сохранить", objectName="btnPrimary")
+        btn_add = PrimaryButton("Сохранить")
         btn_add.clicked.connect(self._on_add_reading)
         eh.addWidget(btn_add)
         eh.addStretch()
@@ -703,64 +639,31 @@ class PlotCardDialog(_FramelessDialog):
 
         # ── Кнопки внизу ───────────────────────────────────────────
         bottom = QHBoxLayout()
-        self.btn_billing = QPushButton("⚙  Тип расчёта")
-        self.btn_billing.setObjectName("btnSecondary")
+        self.btn_billing = SecondaryButton("Тип расчёта", icon="settings")
         self.btn_billing.clicked.connect(self._on_billing_type)
         bottom.addWidget(self.btn_billing)
 
-        self.btn_replace = QPushButton("Зарегистрировать замену счётчика")
-        self.btn_replace.setObjectName("btnSecondary")
+        self.btn_replace = SecondaryButton("Зарегистрировать замену счётчика")
         self.btn_replace.clicked.connect(self._on_replace)
         bottom.addWidget(self.btn_replace)
 
-        self.btn_pdf = QPushButton("📄  Сохранить PDF-квитанцию")
-        self.btn_pdf.setObjectName("btnSecondary")
+        self.btn_pdf = SecondaryButton("Сохранить PDF-квитанцию", icon="pdf")
         self.btn_pdf.clicked.connect(self._on_pdf)
         bottom.addWidget(self.btn_pdf)
 
         bottom.addStretch()
 
-        btn_close = QPushButton("Закрыть")
-        btn_close.setObjectName("btnPrimary")
+        # «Закрыть» — не главное действие карточки, а её закрытие: secondary.
+        btn_close = SecondaryButton("Закрыть")
         btn_close.clicked.connect(self.accept)
         bottom.addWidget(btn_close)
         lay.addLayout(bottom)
 
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel  { background: transparent; color: #374151; }
-            QFrame#entryBox {
-                background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
-            }
-            QPushButton#btnPrimary {
-                background: #07414F; color: white; border: none; border-radius: 6px;
-                padding: 8px 18px; font-size: 13px; font-weight: 600;
-            }
-            QPushButton#btnPrimary:hover  { background: #0B5A6E; }
-            QPushButton#btnSecondary {
-                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-                border-radius: 6px; padding: 7px 14px; font-size: 13px;
-            }
-            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
-            QLineEdit#searchInput, QComboBox#filterCombo {
-                background: #F8F9FA; border: 1px solid #D1D5DB; border-radius: 6px;
-                color: #374151; padding: 6px 10px; font-size: 13px;
-            }
-            QLineEdit#searchInput:focus { border: 1px solid #07414F; }
-            QComboBox#filterCombo::drop-down { border: none; width: 18px; }
-            QComboBox QAbstractItemView {
-                background: #F8F9FA; border: 1px solid #D1D5DB;
-                color: #374151; selection-background-color: #E8F0F5;
-            }
-            QTableWidget#summaryTable {
-                background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
-                gridline-color: #F3F4F6; color: #374151; font-size: 12px;
-                selection-background-color: #E8F0F5; selection-color: #07414F;
-            }
-            QTableWidget#summaryTable QHeaderView::section {
-                background: #F9FAFB; color: #07414F; border: none;
-                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #07414F;
-                padding: 6px 8px; font-size: 12px; font-weight: 600;
-            }
+        self.setStyleSheet(self.base_qss() + f"""
+            QFrame#entryBox {{
+                background: {C.BG_SUBTLE}; border: 1px solid {C.BORDER_LIGHT};
+                border-radius: 8px;
+            }}
         """)
 
     # ── Перестройка таблицы ──────────────────────────────────────────────
@@ -1074,7 +977,7 @@ class PlotCardDialog(_FramelessDialog):
                     self._set_banner(
                         f"Показания не переданы уже {mwr} мес. подряд — по порядку "
                         "действий СНТ пора переходить на расчётный метод "
-                        "(кнопка «⚙ Тип расчёта» ниже).",
+                        "(кнопка «Тип расчёта» ниже).",
                         "#991B1B", "#FEF2F2", "#FCA5A5",
                     )
             elif energy.waiting_for_readings(self._plot, meters):
@@ -1130,28 +1033,15 @@ class PlotCardDialog(_FramelessDialog):
         self.table.setCellWidget(r, 1, edit)
 
     def _install_delete_button(self, r: int, year: int, month: int):
-        btn = QPushButton("✕")
-        btn.setFixedSize(26, 22)
-        btn.setToolTip(f"Удалить показание за {month:02d}.{year}")
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(
-            "QPushButton{background:transparent;color:#9CA3AF;border:none;"
-            "border-radius:4px;font-size:12px;font-weight:bold;}"
-            "QPushButton:hover{background:#FEE2E2;color:#B91C1C;}"
-        )
+        btn = GhostButton(icon="delete", size=22, icon_size=14, danger=True,
+                          tooltip=f"Удалить показание за {month:02d}.{year}")
         btn.clicked.connect(lambda _, y=year, m=month: self._on_delete_reading(y, m))
         self.table.setCellWidget(r, 9, btn)
 
     def _install_delete_replacement_button(self, r: int, repl_date: str):
-        btn = QPushButton("✕")
-        btn.setFixedSize(26, 22)
-        btn.setToolTip(f"Удалить запись о замене счётчика от {repl_date}")
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(
-            "QPushButton{background:transparent;color:#B45309;border:none;"
-            "border-radius:4px;font-size:12px;font-weight:bold;}"
-            "QPushButton:hover{background:#FEF3C7;color:#92400E;}"
-        )
+        btn = GhostButton(icon="delete", size=22, icon_size=14,
+                          color=C.WARNING, hover_bg=C.WARNING_BG,
+                          tooltip=f"Удалить запись о замене счётчика от {repl_date}")
         btn.clicked.connect(lambda _, d=repl_date: self._on_delete_replacement(d))
         self.table.setCellWidget(r, 9, btn)
 

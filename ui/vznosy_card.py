@@ -6,7 +6,7 @@ from datetime import date
 from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
+    QComboBox, QDateEdit, QDialog, QFileDialog,
     QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTabWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
@@ -14,8 +14,14 @@ from PyQt6.QtWidgets import (
 
 from core import energy
 from core.utils import fmt_money
-from ui.detail_widget import _FramelessDialog, _exec_dialog, _AlertDialog
-from ui.plots_widget import _ConfirmDialog
+from ui.buttons import GhostButton, PrimaryButton, SecondaryButton
+from ui.dialogs import (
+    AlertDialog as _AlertDialog,
+    BaseDialog as _FramelessDialog,
+    ConfirmDialog as _ConfirmDialog,
+    exec_dialog as _exec_dialog,
+)
+from ui.theme import C, FS
 
 
 class VznosyAdjustmentDialog(_FramelessDialog):
@@ -42,9 +48,7 @@ class VznosyAdjustmentDialog(_FramelessDialog):
         lay.setContentsMargins(20, 20, 20, 18)
         lay.setSpacing(12)
 
-        title = QLabel(f"Корректировка ЧВ на участке {plot}")
-        title.setStyleSheet("font-size:14px;font-weight:700;color:#111827;")
-        lay.addWidget(title)
+        lay.addLayout(self.make_header(f"Корректировка ЧВ на участке {plot}"))
 
         form = QFormLayout()
         form.setSpacing(8)
@@ -78,32 +82,11 @@ class VznosyAdjustmentDialog(_FramelessDialog):
 
         lay.addLayout(form)
 
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        btns.accepted.connect(self._on_accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
-
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel { background: transparent; color: #374151; font-size: 13px; }
-            QLineEdit, QDateEdit, QComboBox, QSpinBox {
-                background: #F8F9FA; border: 1px solid #D1D5DB;
-                border-radius: 5px; color: #374151; padding: 6px 8px; font-size: 13px;
-            }
-            QLineEdit:focus, QDateEdit:focus { border: 1px solid #07414F; }
-            QDialogButtonBox QPushButton {
-                background: #07414F; color: white; border: none;
-                border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600;
-            }
-            QDialogButtonBox QPushButton:hover { background: #0B5A6E; }
-            QDialogButtonBox QPushButton[text='Отмена'] {
-                background: #E5E7EB; color: #6B7280;
-            }
-        """)
+        btn_cancel = SecondaryButton("Отмена")
+        btn_cancel.clicked.connect(self.reject)
+        btn_save = PrimaryButton("Сохранить")
+        btn_save.clicked.connect(self._on_accept)
+        lay.addLayout(self.make_button_row(btn_cancel, btn_save))
 
         self._on_kind_changed()
 
@@ -281,56 +264,40 @@ class VznosyCardDialog(_FramelessDialog):
 
         # ── Кнопки внизу ──────────────────────────────────────────
         bottom = QHBoxLayout()
-        btn_adj = QPushButton("Корректировка начислений", objectName="btnSecondary")
+        btn_adj = SecondaryButton("Корректировка начислений", icon="tune")
         btn_adj.clicked.connect(lambda: self._add_adjustment("charge_override"))
         bottom.addWidget(btn_adj)
 
-        btn_pdf = QPushButton("📄  Сохранить PDF-квитанцию", objectName="btnSecondary")
+        btn_pdf = SecondaryButton("Сохранить PDF-квитанцию", icon="pdf")
         btn_pdf.clicked.connect(self._on_pdf)
         bottom.addWidget(btn_pdf)
 
         bottom.addStretch()
-        btn_close = QPushButton("Закрыть", objectName="btnPrimary")
+        # «Закрыть» — не главное действие карточки, а её закрытие: secondary.
+        btn_close = SecondaryButton("Закрыть")
         btn_close.clicked.connect(self.accept)
         bottom.addWidget(btn_close)
         lay.addLayout(bottom)
 
-        self.setStyleSheet(self._frame_qss() + """
-            QLabel  { background: transparent; color: #374151; }
-            QPushButton#btnPrimary {
-                background: #07414F; color: white; border: none; border-radius: 6px;
-                padding: 8px 18px; font-size: 13px; font-weight: 600;
-            }
-            QPushButton#btnPrimary:hover  { background: #0B5A6E; }
-            QPushButton#btnSecondary {
-                background: #E5E7EB; color: #6B7280; border: 1px solid #D1D5DB;
-                border-radius: 6px; padding: 7px 14px; font-size: 13px;
-            }
-            QPushButton#btnSecondary:hover { background: #E5E7EB; color: #374151; }
-            QTableWidget#summaryTable {
-                background: #F8F9FA; border: 1px solid #E5E7EB; border-radius: 8px;
-                gridline-color: #F3F4F6; color: #374151; font-size: 12px;
-                selection-background-color: #E8F0F5; selection-color: #07414F;
-            }
-            QTableWidget#summaryTable QHeaderView::section {
-                background: #F9FAFB; color: #07414F; border: none;
-                border-right: 1px solid #E5E7EB; border-bottom: 2px solid #07414F;
-                padding: 6px 8px; font-size: 12px; font-weight: 600;
-            }
-            QTabWidget#vznosyTabs::pane {
-                border: 1px solid #E5E7EB; border-radius: 6px; background: #FFFFFF;
-            }
-            QTabBar::tab {
-                background: #F3F4F6; color: #6B7280; border: 1px solid #E5E7EB;
+        self.setStyleSheet(self.base_qss() + f"""
+            QTabWidget#vznosyTabs::pane {{
+                border: 1px solid {C.BORDER_LIGHT}; border-radius: 6px;
+                background: {C.BG_SURFACE};
+            }}
+            QTabBar::tab {{
+                background: {C.BG_HOVER}; color: {C.TEXT_MUTED};
+                border: 1px solid {C.BORDER_LIGHT};
                 border-bottom: none; border-top-left-radius: 6px;
                 border-top-right-radius: 6px; padding: 8px 16px;
-                font-size: 12px; font-weight: 500; margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background: #FFFFFF; color: #07414F; font-weight: 700;
-                border-bottom: 2px solid #07414F;
-            }
-            QTabBar::tab:hover:!selected { background: #E5E7EB; color: #374151; }
+                font-size: {FS.SMALL}px; font-weight: 500; margin-right: 2px;
+            }}
+            QTabBar::tab:selected {{
+                background: {C.BG_SURFACE}; color: {C.BRAND}; font-weight: 700;
+                border-bottom: 2px solid {C.BRAND};
+            }}
+            QTabBar::tab:hover:!selected {{
+                background: {C.BORDER_LIGHT}; color: {C.TEXT_BODY};
+            }}
         """)
 
     def _rebuild(self):
@@ -354,7 +321,7 @@ class VznosyCardDialog(_FramelessDialog):
         # Баннер о площади
         if bal.area_missing_warning:
             self.warning_lbl.setText(
-                "⚠ Для этого участка не указана площадь — тариф «за м²» не применён. "
+                "Для этого участка не указана площадь — тариф «за м²» не применён. "
                 "Откройте вкладку «Участки» и укажите площадь."
             )
             self.warning_lbl.setVisible(True)
@@ -500,15 +467,8 @@ class VznosyCardDialog(_FramelessDialog):
                     it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
                 self.adj_table.setItem(r, c, it)
 
-            btn = QPushButton("✕")
-            btn.setFixedSize(26, 22)
-            btn.setToolTip("Удалить корректировку")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet(
-                "QPushButton{background:transparent;color:#9CA3AF;border:none;"
-                "border-radius:4px;font-size:12px;font-weight:bold;}"
-                "QPushButton:hover{background:#FEE2E2;color:#B91C1C;}"
-            )
+            btn = GhostButton(icon="delete", tooltip="Удалить корректировку",
+                              size=22, icon_size=14, danger=True)
             btn.clicked.connect(lambda _, i=orig_idx: self._delete_adjustment(i))
             self.adj_table.setCellWidget(r, 5, btn)
             self.adj_table.setRowHeight(r, 28)
