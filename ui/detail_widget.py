@@ -3752,6 +3752,13 @@ class DetailWidget(QWidget):
 
         self.tree = MainTableTreeView(objectName="mainTable")
         self.tree.setModel(self.model)
+        # sort() делает beginResetModel/endResetModel — после сброса QTreeView
+        # схлопывает все строки, и дочерние split-строки визуально пропадают.
+        # Разбивка всегда развёрнута (кнопки Показать/Свернуть нет), поэтому
+        # разворачиваем заново при каждом сбросе. ВАЖНО: подключать строго
+        # ПОСЛЕ setModel() — слоты вызываются в порядке подключения, и
+        # expandAll должен сработать после того, как view обработал сброс.
+        self.model.modelReset.connect(self.tree.expandAll)
         self.tree.setUniformRowHeights(True)
         # Стрелка/＋/корзина живут в служебном столбце-делегате, поэтому штатную
         # «ёлочку» дерева отключаем, а отступ обнуляем — геометрия кнопок едина.
