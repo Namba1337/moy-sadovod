@@ -70,6 +70,7 @@ from ui.dialogs import (                                    # noqa: E402
 from ui.buttons import (                                    # noqa: E402
     DangerButton, PrimaryButton, SecondaryButton,
 )
+from ui.theme import SCROLLBAR_W, scrollbar_qss             # noqa: E402
 
 
 # Базовые аксессоры — единый источник логики в core.ownership
@@ -1117,6 +1118,12 @@ class PlotsWidget(QWidget):
 
     DATA_FILE = os.path.join(DATA_DIR, "snt_plots.json")
 
+    # «Выбрано: N» — серый (неактивный вид), пока ничего не отмечено, и
+    # бирюзовый жирный, когда есть выбор. Тот же стиль переиспользуется в
+    # «Операциях» (ui/detail_widget.py) для единого визуального языка.
+    _SELECTED_LBL_OFF_SS = "font-size:12px; color:#9CA3AF; background:transparent; font-weight:600;"
+    _SELECTED_LBL_ON_SS  = "font-size:12px; color:#07414F; background:transparent; font-weight:600;"
+
     def __init__(self):
         super().__init__()
         # Прозрачный фон страницы — чтобы проступал белый contentFrame (окно вкладки).
@@ -1279,7 +1286,13 @@ class PlotsWidget(QWidget):
         tb_l.setContentsMargins(0, 4, 0, 4)
         tb_l.setSpacing(8)
 
-        # Поиск — слева, тянется на всю свободную ширину ряда (stretch=1 ниже).
+        # «Выбрано: N» — слева от поиска, видим всегда (серый при 0, чтобы
+        # не мигать/не прыгать соседним виджетам при появлении-исчезновении).
+        self._selected_lbl = QLabel("Выбрано: 0")
+        self._selected_lbl.setStyleSheet(self._SELECTED_LBL_OFF_SS)
+        tb_l.addWidget(self._selected_lbl)
+
+        # Поиск — тянется на всю свободную ширину ряда (stretch=1 ниже).
         self._search = QLineEdit()
         self._search.setPlaceholderText("Поиск по номеру или ФИО")
         self._search.setClearButtonEnabled(True)
@@ -1293,15 +1306,6 @@ class PlotsWidget(QWidget):
             "QLineEdit:focus{border-bottom:2px solid #07414F;}")
         self._search.textChanged.connect(self._on_search_text)
         tb_l.addWidget(self._search, stretch=1)
-
-        self._count_lbl = QLabel("")
-        self._count_lbl.setStyleSheet("font-size:12px; color:#9CA3AF; background:transparent;")
-        tb_l.addWidget(self._count_lbl)
-
-        self._selected_lbl = QLabel("")
-        self._selected_lbl.setStyleSheet(
-            "font-size:12px; color:#07414F; background:transparent; font-weight:600;")
-        tb_l.addWidget(self._selected_lbl)
 
         # Переключатель «Показывать переплату» — справа; включён по умолчанию,
         # при выключении отрицательный долг (переплата) в таблице заменяется
@@ -1396,14 +1400,7 @@ class PlotsWidget(QWidget):
         # рендерится вне зависимости от тонкостей альфа-композитинга Qt.
         self.list_view.setStyleSheet(
             "QListView{background:transparent;border:none;outline:0;}"
-            "QListView QScrollBar:vertical{background:#FFFFFF;width:8px;border:none;}"
-            "QListView QScrollBar::handle:vertical{"
-            "background:#C3CAD3;border-radius:4px;min-height:30px;}"
-            "QListView QScrollBar::handle:vertical:hover{background:#97A1AE;}"
-            "QListView QScrollBar::add-line:vertical,"
-            "QListView QScrollBar::sub-line:vertical{height:0;}"
-            "QListView QScrollBar::add-page:vertical,"
-            "QListView QScrollBar::sub-page:vertical{background:#FFFFFF;}")
+            + scrollbar_qss(track="#FFFFFF"))
         # Перебиваем глобальное правило QAbstractScrollArea>QWidget (тонирует вьюпорт)
         self.list_view.viewport().setStyleSheet("background:transparent;")
         self._list_sb_style = QStyleFactory.create("Fusion")
@@ -1474,16 +1471,10 @@ class PlotsWidget(QWidget):
         self._drawer_sb_style = QStyleFactory.create("Fusion")
         if self._drawer_sb_style is not None:
             self._drawer_vsb.setStyle(self._drawer_sb_style)
-        self._drawer_vsb.setFixedWidth(8)
-        self._drawer_vsb.setStyleSheet("""
-            QScrollBar:vertical { background: transparent; width: 8px; border: none; }
-            QScrollBar::handle:vertical {
-                background: #C3CAD3; border-radius: 4px; min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover { background: #97A1AE; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
-        """)
+        self._drawer_vsb.setFixedWidth(SCROLLBAR_W)
+        # standalone-бар не потомок QAbstractScrollArea, transparent-трек
+        # здесь работает честно (см. докстринг выше).
+        self._drawer_vsb.setStyleSheet(scrollbar_qss())
         self._drawer_vsb.setVisible(False)
         sb_col.addWidget(self._drawer_vsb)
         drawer_lyt.addLayout(sb_col)
@@ -1599,7 +1590,9 @@ class PlotsWidget(QWidget):
 
     def _refresh_toolbar(self):
         n = len(self.list_model.get_selected_nums())
-        self._selected_lbl.setText(f"Выбрано: {n}" if n else "")
+        self._selected_lbl.setText(f"Выбрано: {n}")
+        self._selected_lbl.setStyleSheet(
+            self._SELECTED_LBL_ON_SS if n else self._SELECTED_LBL_OFF_SS)
         self._btn_bulk_delete.setEnabled(n > 0)
 
     def _export_to_excel(self):
@@ -1981,8 +1974,6 @@ class PlotsWidget(QWidget):
         self.list_model.set_debt_cache(self._debt_cache)
         self._refresh_master_cb()
         self._refresh_toolbar()
-        total, shown = len(self._plots), len(plots)
-        self._count_lbl.setText(f"{shown} из {total}" if shown < total else str(total))
 
     def _on_search_text(self, text: str):
         self._search_text = text.strip().lower()
