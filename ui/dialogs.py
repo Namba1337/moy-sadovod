@@ -19,8 +19,8 @@
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QBitmap, QPainter, QRegion
+from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
@@ -31,7 +31,13 @@ from ui.theme import C, FS, RAD, dialog_qss
 
 class BaseDialog(QDialog):
     """Базовый класс всех диалогов: белая скруглённая карточка без
-    стандартной рамки/шапки Windows (маска по скруглённому прямоугольнику).
+    стандартной рамки/шапки Windows.
+
+    Карточку (фон + рамка + скругление) рисует paintEvent с антиалиасингом
+    на прозрачном окне. Раньше углы вырезала 1-битная setMask-маска — она
+    давала грязную «лесенку» без сглаживания (тот же отказ от маски, что и
+    _RoundedFrame в main.py). QSS-фон здесь не работает: на top-level
+    QDialog с WA_TranslucentBackground Qt его просто не рисует.
 
     Подклассы могут дополнять стиль: ``self.setStyleSheet(self.base_qss() +
     "…свои правила…")`` — свои правила добавляются ПОСЛЕ общих и потому
@@ -39,15 +45,29 @@ class BaseDialog(QDialog):
     """
 
     _RADIUS = RAD.DIALOG
-    _BORDER = C.BORDER
+    _BORDER = C.BORDER          # None/"" у подкласса → карточка без рамки
     _DRAG_ZONE = 44   # высота зоны у верхнего края, за которую окно тянется
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setObjectName("framelessDialog")
         self._drag_off = None
         self.setStyleSheet(self.base_qss())
+
+    def paintEvent(self, a0):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Полупиксельный сдвиг — центр 1px-рамки на границе, иначе она
+        # срезается краем окна.
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        if self._BORDER:
+            p.setPen(QPen(QColor(self._BORDER)))
+        else:
+            p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(C.BG_SURFACE))
+        p.drawRoundedRect(rect, self._RADIUS, self._RADIUS)
 
     # -- стиль -------------------------------------------------------------
 
@@ -61,28 +81,11 @@ class BaseDialog(QDialog):
     # Совместимость: исторические подклассы вызывали _frame_qss().
     _frame_qss = base_qss
 
-    # -- маска скругления ----------------------------------------------------
+    # -- маска скругления (упразднена) ---------------------------------------
 
     def _apply_mask(self):
-        sz = self.size()
-        if sz.width() <= 0 or sz.height() <= 0:
-            return
-        bmp = QBitmap(sz)
-        bmp.fill(Qt.GlobalColor.color0)
-        p = QPainter(bmp)
-        p.setBrush(Qt.GlobalColor.color1)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(self.rect(), self._RADIUS, self._RADIUS)
-        p.end()
-        self.setMask(QRegion(bmp))
-
-    def resizeEvent(self, a0):
-        super().resizeEvent(a0)
-        self._apply_mask()
-
-    def showEvent(self, a0):
-        super().showEvent(a0)
-        self._apply_mask()
+        """No-op. Скругление рисует QSS на прозрачном окне; маска больше
+        не применяется. Метод сохранён: его зовут исторические подклассы."""
 
     # -- перетаскивание за верхнюю зону --------------------------------------
 
@@ -151,10 +154,10 @@ class PromptDialog(BaseDialog):
 
     _WIDTH = 380
     _MARGIN_H = 24  # см. lay.setContentsMargins ниже — по 24px слева/справа
+    _BORDER = None  # прежний вид семейства: без рамки (только скругление)
 
     def __init__(self, title: str, message: str, *, parent=None):
         super().__init__(parent)
-        # Прежний вид семейства: без рамки (только скругление + оверлей).
         self.setObjectName("confirmDialog")
         self.setStyleSheet(
             f"QDialog#confirmDialog{{background:{C.BG_SURFACE};"

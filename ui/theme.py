@@ -120,6 +120,9 @@ CONTROL_HEIGHT = 32
 # заглушки в шапках таблиц долгов (ui.common.SB_W).
 TREE_SCROLLBAR_W = 12
 
+# Ширина обычных скроллбаров (scrollbar_qss) — панели, списки, диалоги.
+SCROLLBAR_W = 6
+
 
 # ──────────────────────────────────────────────────────────────────────────
 #  QSS-фабрики
@@ -178,27 +181,41 @@ def menu_qss(danger: bool = False) -> str:
     """
 
 
-def scrollbar_qss(width: int = 8, track: str = "transparent") -> str:
-    """Скроллбары: трек прозрачный, виден только бегунок."""
+def scrollbar_qss(width: int = SCROLLBAR_W, track: str = "transparent") -> str:
+    """Скроллбары: капсульный бегунок на всю ширину желоба.
+
+    ЕДИНСТВЕННЫЙ источник стиля скроллбаров — подключён и в глобальный QSS
+    главного окна (main.py), и в dialog_qss() (стиль всех BaseDialog).
+
+    НЕ писать локальные правила QScrollBar «частично»: непереопределённые
+    свойства (например margin) наследуются из этого блока при каскаде,
+    ручка сужается, и Qt молча отбрасывает border-radius больше половины
+    ширины — торцы становятся острыми. Нужен другой трек (например сплошной
+    цвет вместо transparent внутри QScrollArea, где сквозь прозрачность
+    просвечивает базовый фон #F0F3F9) — вызывать scrollbar_qss(track=...)
+    целиком, а не копировать правила.
+    """
+    r = width // 2
     return f"""
         QScrollBar:vertical {{
             background: {track}; width: {width}px; border: none;
         }}
         QScrollBar::handle:vertical {{
-            background: {C.SCROLL_HANDLE}; border-radius: {max(2, width // 2 - 2)}px;
-            min-height: 30px; margin: 2px;
+            background: {C.SCROLL_HANDLE}; border-radius: {r}px;
+            min-height: 30px; margin: 0;
         }}
         QScrollBar::handle:vertical:hover {{ background: {C.SCROLL_HANDLE_HOVER}; }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: {track}; }}
         QScrollBar:horizontal {{
             background: {track}; height: {width}px; border: none;
         }}
         QScrollBar::handle:horizontal {{
-            background: {C.SCROLL_HANDLE}; border-radius: {max(2, width // 2 - 2)}px;
+            background: {C.SCROLL_HANDLE}; border-radius: {r}px;
+            min-width: 30px; margin: 0;
         }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
-        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: none; }}
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: {track}; }}
     """
 
 
@@ -217,7 +234,9 @@ def tree_qss() -> str:
         QTreeView#mainTable::item {{
             padding: 6px 10px; border-bottom: 1px solid {C.BORDER_LIGHT};
         }}
-        QTreeView#mainTable::item:hover {{ background: #DDE4EE; }}
+        /* Ховер строки целиком намеренно не подсвечиваем (просили убрать —
+           конфликтовал/мигал с точечными hover-эффектами внутри ячеек,
+           см. _CategoryDelegate.paint). */
         QTreeView#mainTable::item:selected {{
             background: {C.BRAND_TINT}; color: {C.BRAND};
         }}
@@ -230,7 +249,10 @@ def tree_qss() -> str:
             width: {TREE_SCROLLBAR_W}px; background: transparent; border: none;
         }}
         QTreeView#mainTable QScrollBar::handle:vertical {{
-            background: #B5C8D5; border-radius: 5px; min-height: 24px; margin: 2px;
+            /* margin 2px сужает ручку до {TREE_SCROLLBAR_W - 4}px — радиус
+               не больше её половины, иначе Qt отбросит скругление. */
+            background: #B5C8D5; border-radius: {(TREE_SCROLLBAR_W - 4) // 2}px;
+            min-height: 24px; margin: 2px;
         }}
         QTreeView#mainTable QScrollBar::add-line:vertical,
         QTreeView#mainTable QScrollBar::sub-line:vertical {{ height: 0; }}
