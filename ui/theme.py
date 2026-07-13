@@ -116,11 +116,9 @@ class FS:
 # Высота стандартной кнопки/поля (задаётся паддингами, это справочная величина)
 CONTROL_HEIGHT = 32
 
-# Ширина скроллбара главных таблиц (QTreeView). Должна совпадать с шириной
-# заглушки в шапках таблиц долгов (ui.common.SB_W).
-TREE_SCROLLBAR_W = 12
-
-# Ширина обычных скроллбаров (scrollbar_qss) — панели, списки, диалоги.
+# Ширина скроллбаров (scrollbar_qss) — панели, списки, диалоги и главные
+# таблицы (QTreeView) единообразно; должна совпадать с шириной заглушки в
+# шапках таблиц долгов (ui.common.SB_W).
 SCROLLBAR_W = 6
 
 
@@ -246,18 +244,17 @@ def tree_qss() -> str:
         QTreeView#mainTable::branch:open:has-children:!has-siblings,
         QTreeView#mainTable::branch:open:has-children:has-siblings {{ image: none; }}
         QTreeView#mainTable QScrollBar:vertical {{
-            width: {TREE_SCROLLBAR_W}px; background: transparent; border: none;
+            width: {SCROLLBAR_W}px; background: {C.BG_SURFACE}; border: none;
         }}
         QTreeView#mainTable QScrollBar::handle:vertical {{
-            /* margin 2px сужает ручку до {TREE_SCROLLBAR_W - 4}px — радиус
-               не больше её половины, иначе Qt отбросит скругление. */
-            background: #B5C8D5; border-radius: {(TREE_SCROLLBAR_W - 4) // 2}px;
-            min-height: 24px; margin: 2px;
+            background: {C.SCROLL_HANDLE}; border-radius: {SCROLLBAR_W // 2}px;
+            min-height: 30px; margin: 0;
         }}
+        QTreeView#mainTable QScrollBar::handle:vertical:hover {{ background: {C.SCROLL_HANDLE_HOVER}; }}
         QTreeView#mainTable QScrollBar::add-line:vertical,
         QTreeView#mainTable QScrollBar::sub-line:vertical {{ height: 0; }}
         QTreeView#mainTable QScrollBar::add-page:vertical,
-        QTreeView#mainTable QScrollBar::sub-page:vertical {{ background: none; }}
+        QTreeView#mainTable QScrollBar::sub-page:vertical {{ background: {C.BG_SURFACE}; }}
     """
 
 

@@ -43,6 +43,8 @@ ICONS: dict[str, int] = {
 
     # Действия
     "add":           0xE145,
+    "split":         0xF06D,  # splitscreen
+    "split_add":     0xF4FD,  # splitscreen_add
     "close":         0xE5CD,
     "delete":        0xE92B,  # delete_forever (проверен в бою)
     "save":          0xE161,

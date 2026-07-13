@@ -110,12 +110,15 @@ def _save_raw(data: dict):
 
 
 def load_user_categories() -> list[str]:
-    """Загружает список категорий из файла, при отсутствии — встроенные.
-    Защищённые категории всегда присутствуют в начале списка."""
+    """Загружает список категорий из файла. При отсутствии файла список
+    состоит только из обязательных (PROTECTED_CATEGORIES) — остальные
+    категории появляются, когда пользователь добавит их в редакторе или
+    когда автокатегоризация реально присвоит их при импорте
+    (categorize_row -> _ensure_category). _DEFAULT_CATEGORY_COLORS — лишь
+    пресеты цветов на этот случай, не стартовый список."""
     raw = _load_raw()
     cats = raw.get("categories")
-    base = list(cats) if isinstance(cats, list) and cats \
-        else list(_DEFAULT_CATEGORY_COLORS.keys())
+    base = list(cats) if isinstance(cats, list) and cats else []
     # Дедупликация, сохраняя порядок
     seen = set()
     deduped = []
@@ -210,6 +213,18 @@ def _ensure_category(name: str):
         save_user_categories(list(ALL_CATEGORIES))
 
 
+def ensure_categories(names) -> None:
+    """Добавляет в ALL_CATEGORIES (и в файл) все категории из names, которых
+    там ещё нет — синхронизация списка с категориями, реально встречающимися
+    в загруженных данных (см. DetailWidget.load_dataframe). Благодаря ей
+    snt_categories.json — восстановимый кэш: после его удаления список
+    пересоберётся из данных проекта (теряются только пользовательские цвета
+    и категории, ещё не присвоенные ни одной операции)."""
+    for name in names:
+        if name:
+            _ensure_category(str(name))
+
+
 def categorize_row(row: dict) -> str:
     text      = str(row.get("Назначение", "")).lower()
     contragent = str(row.get("Контрагент", "")).lower()
@@ -269,7 +284,11 @@ def categorize_row(row: dict) -> str:
     else:
         result = "Прочее"
 
-    _ensure_category(result)
+    # «Членские взносы + Электроэнергия» — транзитная подсказка: сразу после
+    # импорта разворачивается в сплит (ui/detail_widget._mixed_to_breakdown)
+    # и в данных не задерживается — в список категорий её не добавляем.
+    if result != "Членские взносы + Электроэнергия":
+        _ensure_category(result)
     return result
 
 

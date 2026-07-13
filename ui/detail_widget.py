@@ -1,31 +1,30 @@
 import hashlib
 import json
-import os
 import time
 
 import pandas as pd
 from PyQt6.QtCore import (
-    Qt, QDate, QEvent, QPoint, QRect, QRectF, QSize, QModelIndex,
-    QAbstractItemModel, QTimer, pyqtSignal,
+    Qt, QDate, QEvent, QPoint, QRect, QRectF, QRegularExpression, QSize,
+    QModelIndex, QAbstractItemModel, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QAction, QBitmap, QBrush, QColor, QFont, QFontMetrics, QPainter, QPen,
-    QPolygon, QRegion,
+    QAction, QBrush, QColor, QFont, QFontMetrics, QPainter, QPen,
+    QPolygon, QRegularExpressionValidator,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDateEdit, QDialog,
-    QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QAbstractItemView, QApplication, QButtonGroup, QDialog,
+    QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
     QPushButton, QScrollArea, QStyle, QStyleFactory, QStyledItemDelegate, QStyleOptionViewItem,
-    QTreeView, QVBoxLayout, QWidget, QCompleter,
+    QVBoxLayout, QWidget,
 )
 
 from ui.categorization import (
-    CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization,
+    CATEGORY_COLORS, ALL_CATEGORIES, apply_categorization, ensure_categories,
     save_user_categories, save_user_category_color, rename_user_category,
     delete_user_category, PROTECTED_CATEGORIES, NO_CATEGORY_LABEL,
 )
-from ui.plot_detection import apply_plot_column, _PLOTS_FILE, load_plot_numbers
+from ui.plot_detection import apply_plot_column, load_plot_numbers
 from ui import icons
 from ui.buttons import LinkButton, PrimaryButton, SecondaryButton
 from ui.plots_widget import _FilterTabButton
@@ -33,6 +32,7 @@ from ui.common import (
     AppTooltip as _AppTooltip,
     CalendarArrowFlip,
     ClipFrame as _ClipFrame,
+    MainTableTreeView,
     NoJumpDateEdit,
     TooltipFilter as _TooltipFilter,
     TREE_STYLE as _TREE_STYLE_COMMON,
@@ -113,6 +113,39 @@ def _dump_breakdown(items: list) -> str:
     return json.dumps(items, ensure_ascii=False)
 
 
+def _mixed_to_breakdown(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Разворачивает авто-категорию _MIXED_CAT в готовый сплит 50/50 —
+    ровно такой же, как по кнопке разделения в таблице: две дочерние
+    строки «Членские взносы» / «Электроэнергия (от садоводов)», сумма
+    делится поровну в копейках, вторая строка — остаток. Категория
+    родителя очищается — смешанная категория в данных не задерживается.
+    Ожидает df после _ensure_meta_columns (колонка _breakdown есть)."""
+    if "Категория" not in df.columns:
+        return df
+    mask = df["Категория"] == _MIXED_CAT
+    if not mask.any():
+        return df
+    if df["_breakdown"].dtype != "object":
+        df["_breakdown"] = df["_breakdown"].astype("object")
+    for idx in df.index[mask]:
+        # Не пустая строка, а системная «Без категории»: если пользователь
+        # позже удалит сплит, операция вернётся к этой категории-заглушке,
+        # а не к пустой ячейке.
+        df.at[idx, "Категория"] = NO_CATEGORY_LABEL
+        if _parse_breakdown(df.at[idx, "_breakdown"]):
+            continue    # разбивка уже есть (повторный импорт) — не трогаем
+        total = _to_num(df.at[idx, "Сумма"]) or 0.0
+        halves = _split_amount_evenly(total, 2)
+        plot = str(df.at[idx, "Участок"]) if "Участок" in df.columns else ""
+        df.at[idx, "_breakdown"] = _dump_breakdown([
+            {"Сумма": halves[0], "Категория": _MIXED_SPLIT_CATS[0],
+             "Участок": plot},
+            {"Сумма": halves[1], "Категория": _MIXED_SPLIT_CATS[1],
+             "Участок": plot, _SPLIT_REMAINDER_KEY: True},
+        ])
+    return df
+
+
 # =========================================================================== #
 #  Парсинг и форматирование значений                                          #
 # =========================================================================== #
@@ -132,17 +165,23 @@ def _to_num(v):
         return None
 
 
-def _parse_money(text: str) -> float:
-    n = _to_num(text)
-    return float("nan") if n is None else n
-
-
-def _fmt_money(num: float) -> str:
+def _fmt_money(num: float, show_zero: bool = False) -> str:
     if num > 0:
         return f"{num:,.2f} ₽".replace(",", " ")
     if num < 0:
         return f"−{abs(num):,.2f} ₽".replace(",", " ")
-    return ""
+    return f"{0.0:,.2f} ₽".replace(",", " ") if show_zero else ""
+
+
+def _split_amount_evenly(total: float, n: int) -> list[float]:
+    """Делит сумму на n частей поровну (в копейках), остаток копеек уходит
+    первым частям. Сумма частей всегда точно равна total (без дрейфа float)."""
+    if n <= 0:
+        return []
+    sign = -1 if total < 0 else 1
+    cents = round(abs(total) * 100)
+    base, rem = divmod(cents, n)
+    return [sign * (base + (1 if i < rem else 0)) / 100 for i in range(n)]
 
 
 def _num_edit_str(num: float) -> str:
@@ -184,14 +223,29 @@ _DEFAULT_ROW_COLOR = QColor(55, 55, 60)
 _MULTI_OP_LABEL = "Мультиоперация"
 _MULTI_CAT_LABEL = "Несколько категорий"
 _MULTI_PLOT_LABEL = "Несколько участков"
-# Служебный столбец кнопки редактирования. Хранится последним в модели.
-_EDIT_COL = "\x00edit"
+# Авто-категория-подсказка «взносы и электричество одним платежом».
+# В данных не задерживается: при импорте сразу разворачивается в сплит
+# 50/50 (_mixed_to_breakdown), при экспорте старых данных, где она ещё
+# осталась верхнеуровневой, — в две строки (_export_excel).
+_MIXED_CAT = "Членские взносы + Электроэнергия"
+_MIXED_SPLIT_CATS = ("Членские взносы", "Электроэнергия (от садоводов)")
 # Служебный столбец чекбокса выбора строк.
 _CHECK_COL = "\x00check"
-# Колонки, отображаемые в строке-ветке (split). «Контрагент» — копия из операции.
-_SPLIT_DISPLAY_COLS = ("Контрагент", "Сумма", "Категория", "Участок")
+# Служебный столбец иконок управления сплитом (между «Назначение» и «Сумма»).
+_SPLIT_COL = "\x00split"
+# Колонки, отображаемые в строке-ветке (split). Дата/Контрагент/Назначение
+# дублировать незачем — их несёт родительская операция.
+_SPLIT_DISPLAY_COLS = ("Сумма", "Категория", "Участок")
 # Из них реально редактируемые в ветке.
 _SPLIT_EDIT_COLS = ("Сумма", "Категория", "Участок")
+# Ключ в data дочерней строки — маркер «строки-остатка» (см. _is_split_remainder).
+# ХРАНИТСЯ ЯВНО, а не вычисляется по позиции в списке: строки внутри операции
+# пересортировываются вместе со всей таблицей при клике по любому столбцу
+# заголовка (_apply_sort_internal сортирует не только root.children, но и
+# op.children тем же ключом) — если бы «последняя строка» определялась по
+# индексу в списке, сортировка таблицы произвольно передавала бы статус
+# «остатка» другой строке.
+_SPLIT_REMAINDER_KEY = "_remainder"
 
 
 class _Node:
@@ -236,9 +290,12 @@ class OperationsTreeModel(QAbstractItemModel):
     def load(self, columns: list[str], records: list[tuple]):
         """records: список (df_idx, data_dict, breakdown_list)."""
         self.beginResetModel()
-        # Чекбокс выбора — первым столбцом (как в «Участках»), карандаш
-        # редактирования — по-прежнему последним.
-        self._columns = [_CHECK_COL] + list(columns) + [_EDIT_COL]
+        # Чекбокс выбора — первым столбцом (как в «Участках»).
+        # Столбец иконок сплита — перед «Сумма» (дерево строится от неё же).
+        cols = list(columns)
+        split_at = cols.index("Сумма") if "Сумма" in cols else len(cols)
+        cols.insert(split_at, _SPLIT_COL)
+        self._columns = [_CHECK_COL] + cols
         root = _Node("root", {})
         for df_idx, data, breakdown in records:
             op = _Node("op", data, df_idx=df_idx, parent=root)
@@ -302,7 +359,7 @@ class OperationsTreeModel(QAbstractItemModel):
         col = self._columns[index.column()]
 
         # Служебные столбцы — всё рисует делегат, модель данных не отдаёт.
-        if col in (_EDIT_COL, _CHECK_COL):
+        if col in (_CHECK_COL, _SPLIT_COL):
             return None
 
         if role == MANUAL_ROLE:
@@ -315,33 +372,28 @@ class OperationsTreeModel(QAbstractItemModel):
             if node.kind == "split" and col not in _SPLIT_DISPLAY_COLS:
                 return ""
             if role == Qt.ItemDataRole.DisplayRole and node.kind == "op" and node.children:
-                if col == "Участок":
-                    plots = set()
-                    for ch in node.children:
-                        p = str(ch.data.get("Участок", "")).strip()
-                        if p:
-                            plots.add(p)
-                    if len(plots) == 1:
-                        return plots.pop()
-                    if len(plots) == 0:
+                # Родительская строка сплита показывает агрегат по детям:
+                # единственное общее значение, «Мультиоперация» (нигде не
+                # заполнено) или «Несколько …» (значения разошлись).
+                if col in ("Участок", "Категория"):
+                    values = {v for ch in node.children
+                              if (v := str(ch.data.get(col, "")).strip())}
+                    if len(values) == 1:
+                        return values.pop()
+                    if not values:
                         return _MULTI_OP_LABEL
-                    return _MULTI_PLOT_LABEL
-                if col == "Категория":
-                    cats = set()
-                    for ch in node.children:
-                        c = str(ch.data.get("Категория", "")).strip()
-                        if c:
-                            cats.add(c)
-                    if len(cats) == 1:
-                        return cats.pop()
-                    if len(cats) == 0:
-                        return _MULTI_OP_LABEL
-                    return _MULTI_CAT_LABEL
+                    return _MULTI_PLOT_LABEL if col == "Участок" else _MULTI_CAT_LABEL
             val = node.data.get(col)
             if col == "Сумма":
                 num = _to_num(val)
                 if role == Qt.ItemDataRole.EditRole:
                     return "" if num is None else _num_edit_str(num)
+                # Дочерние строки сплита: 0 — валидное распределённое
+                # значение (например, весь бюджет ушёл в другие строки), а
+                # не «пусто» — иначе клампинг до предела родителя выглядит
+                # как поломка (строка-остаток внезапно становится пустой).
+                if node.kind == "split":
+                    return "" if num is None else _fmt_money(num, show_zero=True)
                 return "" if not num else _fmt_money(num)
             if col == "Дата":
                 ts = _to_ts(val)
@@ -384,8 +436,8 @@ class OperationsTreeModel(QAbstractItemModel):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             if 0 <= section < len(self._columns):
                 name = self._columns[section]
-                if name == _EDIT_COL:   return chr(0xE3C9)
                 if name == _CHECK_COL:  return ""
+                if name == _SPLIT_COL:  return chr(0xF06D)
                 if name == "Участок":   return "№ уч."
                 return name
         return None
@@ -397,7 +449,7 @@ class OperationsTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         col = self._columns[index.column()]
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if col in (_EDIT_COL, _CHECK_COL):
+        if col in (_CHECK_COL, _SPLIT_COL):
             return f
         if node.kind == "op":
             # Категория и Участок недоступны для редактирования у строк с дочерними
@@ -406,8 +458,19 @@ class OperationsTreeModel(QAbstractItemModel):
             else:
                 f |= Qt.ItemFlag.ItemIsEditable
         elif col in _SPLIT_EDIT_COLS:
-            f |= Qt.ItemFlag.ItemIsEditable
+            # «Сумма» последней дочерней строки — не сумма, а остаток
+            # (total - сумма остальных строк), считается автоматически и
+            # вручную не редактируется — так сумма детей всегда равна
+            # сумме родительской операции.
+            if col == "Сумма" and self._is_split_remainder(node):
+                pass
+            else:
+                f |= Qt.ItemFlag.ItemIsEditable
         return f
+
+    @staticmethod
+    def _is_split_remainder(node) -> bool:
+        return node.kind == "split" and bool(node.data.get(_SPLIT_REMAINDER_KEY))
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
         if role != Qt.ItemDataRole.EditRole or not index.isValid():
@@ -418,8 +481,48 @@ class OperationsTreeModel(QAbstractItemModel):
         col = self._columns[index.column()]
         text = str(value).strip()
 
+        # Все столбцы, кроме «Участок», обязательны к заполнению — пустое
+        # значение не сохраняем, ячейка остаётся с прежними данными.
+        if col != "Участок" and not text:
+            return False
+
+        remainder_row = None   # строка-остаток, которую нужно тоже перерисовать
+
         if col == "Сумма":
-            node.data["Сумма"] = _parse_money(text)
+            num = _to_num(text)
+            if num is None:
+                return False
+            if node.kind == "split" and node.parent is not None:
+                # Дочерняя сумма не может превышать сумму родителя. Если у
+                # сплита есть явно помеченная строка-остаток (см.
+                # _SPLIT_REMAINDER_KEY) — предел ещё жёстче: остаток бюджета
+                # после остальных редактируемых строк, а сама строка-остаток
+                # пересчитывается автоматически.
+                siblings = node.parent.children
+                total = _to_num(node.parent.data.get("Сумма")) or 0.0
+                remainder_node = next(
+                    (c for c in siblings if c is not node and self._is_split_remainder(c)),
+                    None,
+                )
+                if remainder_node is not None:
+                    editable = [c for c in siblings if c is not remainder_node]
+                    others = sum((_to_num(c.data.get("Сумма")) or 0.0)
+                                 for c in editable if c is not node)
+                    cap = round(total - others, 2)
+                else:
+                    cap = total
+                if total >= 0:
+                    num = max(0.0, min(num, max(cap, 0.0)))
+                else:
+                    num = min(0.0, max(num, min(cap, 0.0)))
+                num = round(num, 2)
+                node.data["Сумма"] = num
+                if remainder_node is not None:
+                    editable_sum = sum((_to_num(c.data.get("Сумма")) or 0.0) for c in editable)
+                    remainder_node.data["Сумма"] = round(total - editable_sum, 2)
+                    remainder_row = remainder_node.row()
+            else:
+                node.data["Сумма"] = num
         elif col == "Дата":
             ts = _parse_date(text)
             if ts is None:
@@ -432,12 +535,16 @@ class OperationsTreeModel(QAbstractItemModel):
         left = self.index(index.row(), 0, index.parent())
         right = self.index(index.row(), self.columnCount() - 1, index.parent())
         self.dataChanged.emit(left, right)
+        if remainder_row is not None:
+            r_left = self.index(remainder_row, 0, index.parent())
+            r_right = self.index(remainder_row, self.columnCount() - 1, index.parent())
+            self.dataChanged.emit(r_left, r_right)
         self.cellEdited.emit(node, col)
         return True
 
     # -- сортировка --------------------------------------------------------- #
     def sort(self, column, order=Qt.SortOrder.AscendingOrder):
-        if 0 <= column < len(self._columns) and self._columns[column] in (_EDIT_COL, _CHECK_COL):
+        if 0 <= column < len(self._columns) and self._columns[column] in (_CHECK_COL, _SPLIT_COL):
             return
         self._sort_col = column
         self._sort_order = order
@@ -455,8 +562,6 @@ class OperationsTreeModel(QAbstractItemModel):
                 op.children.sort(key=lambda n: n.orig_idx)
             return
         col = self._columns[self._sort_col]
-        if col == _EDIT_COL:
-            return
         reverse = self._sort_order == Qt.SortOrder.DescendingOrder
 
         def key(node):
@@ -484,6 +589,14 @@ class _CellDelegate(QStyledItemDelegate):
 
     _CHAR = ""
     _ICON_FONT: QFont | None = None
+
+    # Палитра строк для наследников, рисующих ячейку вручную, — те же
+    # цвета, что у QSS-строк таблицы (tree_qss в ui/theme.py).
+    _BG       = QColor("#FFFFFF")
+    _BG_ALT   = QColor("#F0F4F8")
+    _BG_HOVER = QColor("#DDE4EE")
+    _BG_SEL   = QColor("#C9D8E2")
+    _BORDER   = QColor("#E3E8EF")
 
     @classmethod
     def _icon_font(cls) -> QFont:
@@ -541,6 +654,132 @@ class _CellDelegate(QStyledItemDelegate):
     def updateEditorGeometry(self, editor, option, index):
         # Тот же приём, что и в _CategoryDelegate/_PlotDelegate — жёстко
         # привязываем редактор к границам ячейки.
+        editor.setGeometry(option.rect)
+
+
+class _DateCellDelegate(_CellDelegate):
+    """Делегат колонки «Дата»: инлайн-редактор — тот же дата-пикер
+    (NoJumpDateEdit + календарь в теме приложения), что и в диалогах
+    Добавить/Редактировать операцию и в попапе фильтра периода
+    (_PeriodFilterPopup)."""
+
+    def createEditor(self, parent, option, index):
+        editor = NoJumpDateEdit(parent, calendarPopup=True)
+        editor.setDisplayFormat("dd.MM.yyyy")
+        style_date_popup(editor)
+        arr_dn = icons.icon_png_path("expand_more", 12, color="#6B7280")
+        arr_up = icons.icon_png_path("expand_less", 12, color="#6B7280")
+        editor.setStyleSheet(
+            "QDateEdit{background:#FFFFFF;border:1px solid #07414F;border-radius:4px;"
+            "padding:0 6px;font-size:13px;color:#1F2937;}"
+            "QDateEdit::drop-down{subcontrol-origin:padding;subcontrol-position:right;"
+            "width:18px;border:none;border-left:1px solid #D5DCE4;background:transparent;"
+            "border-top-right-radius:4px;border-bottom-right-radius:4px;}"
+            "QDateEdit::drop-down:hover{background:#F3F4F6;}"
+            f"QDateEdit::down-arrow{{image:url({arr_dn});width:12px;height:12px;}}"
+            f'QDateEdit[calOpen="true"]::down-arrow{{image:url({arr_up});}}')
+        CalendarArrowFlip(editor)
+        editor.setMaximumWidth(option.rect.width())
+        return editor
+
+    def setEditorData(self, editor, index):
+        text = str(index.data(Qt.ItemDataRole.EditRole) or "").strip()
+        ts = _parse_date(text) if text else None
+        editor.setDate(QDate(ts.year, ts.month, ts.day) if ts is not None else QDate.currentDate())
+
+    def setModelData(self, editor, model, index):
+        d = editor.date()
+        model.setData(index, f"{d.day():02d}.{d.month():02d}.{d.year()}",
+                       Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
+
+class _SumCellDelegate(_CellDelegate):
+    """Делегат колонки «Сумма»: тот же формат ввода, что и в диалогах
+    Добавить/Редактировать операцию — свободный текст с допустимыми для
+    суммы символами (цифры, разделитель дробной части, минус для списаний).
+
+    Дерево сплита строится от этой же колонки (раньше — от «Контрагент»,
+    см. историю _BranchColumnDelegate): у op-строк (с детьми и без) фон/
+    границу/цвет уже рисует QSS (tree_qss в ui/theme.py) через обычный
+    super().paint(), кастомная отрисовка нужна только split-строкам —
+    линия дерева слева + сумма с цветом по знаку."""
+
+    _AMOUNT_RE = QRegularExpression(r"^-?\d{0,9}([.,]\d{0,2})?$")
+
+    _LINE_COLOR = QColor("#B5C8D5")
+    _TXT_SEL    = QColor("#07414F")
+    _TRUNK_X    = 12
+    _SPLIT_PAD  = 24
+
+    def paint(self, painter, option, index):
+        node = index.internalPointer()
+        if node is None or node.kind != "split":
+            super().paint(painter, option, index)
+            return
+
+        rect = option.rect
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
+        bg = self._BG_SEL if selected else (self._BG_ALT if is_alt else self._BG)
+        painter.fillRect(rect, bg)
+        painter.setPen(QPen(self._BORDER, 1))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+        model_obj = index.model()
+        is_last = index.row() == model_obj.rowCount(index.parent()) - 1
+        midy = rect.top() + rect.height() // 2
+        cx = rect.left() + self._TRUNK_X
+        painter.setPen(QPen(self._LINE_COLOR, 1))
+        painter.drawLine(cx, rect.top(), cx, midy if is_last else rect.bottom())
+        painter.drawLine(cx, midy, cx + 10, midy)
+
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        if text:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setFont(option.font)
+            fg = self._TXT_SEL if selected else index.data(Qt.ItemDataRole.ForegroundRole)
+            painter.setPen(fg if isinstance(fg, QColor) else self._TXT_SEL)
+            txt_rect = rect.adjusted(self._SPLIT_PAD, 0, -10, 0)
+            elided = painter.fontMetrics().elidedText(
+                str(text), Qt.TextElideMode.ElideRight, txt_rect.width())
+            painter.drawText(
+                txt_rect,
+                int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
+                elided,
+            )
+
+        if index.data(MANUAL_ROLE):
+            painter.setFont(self._icon_font())
+            painter.setPen(QColor(255, 255, 255, 180) if selected else QColor("#9CA3AF"))
+            painter.drawText(
+                rect.adjusted(0, 0, -4, 0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                self._CHAR,
+            )
+        painter.restore()
+
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        editor.setStyleSheet(self._EDITOR_SS)
+        editor.setValidator(QRegularExpressionValidator(self._AMOUNT_RE, editor))
+        editor.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        editor.setMaximumWidth(option.rect.width())
+        return editor
+
+    def setEditorData(self, editor, index):
+        editor.setText(str(index.data(Qt.ItemDataRole.EditRole) or ""))
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.text(), Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
         editor.setGeometry(option.rect)
 
 
@@ -669,14 +908,8 @@ class _DetailCheckDelegate(QStyledItemDelegate):
 class _CategoryDelegate(_CellDelegate):
     """Делегат колонки «Категория»: рисует цветной овальный badge;
     при редактировании открывает popup выбора категории (_CategoryPillButton /
-    _SingleCatPopup) — те же пилюли, что и в диалогах Добавить/Редактировать."""
+    _SingleCatPopup)."""
 
-    # Цвета фона/hover/выделения совпадают с _TREE_STYLE
-    _BG       = QColor("#FFFFFF")
-    _BG_ALT   = QColor("#F0F4F8")
-    _BG_HOVER = QColor("#DDE4EE")
-    _BG_SEL   = QColor("#C9D8E2")
-    _BORDER   = QColor("#E3E8EF")
     _TXT_SEL  = QColor("#07414F")
     _ARROW_W  = 16   # шеврон раскрытия — ВНУТРИ пилюли у её правого края
 
@@ -687,8 +920,8 @@ class _CategoryDelegate(_CellDelegate):
         self._items = items
         # Qt для QTreeView отдаёт State_MouseOver на ВСЮ строку (все колонки
         # сразу), а не на конкретную ячейку под курсором — поэтому ховер
-        # пилюли отслеживаем сами, тем же приёмом, что и зона кнопки
-        # «Свернуть/Показать» в _BranchColumnDelegate ниже.
+        # пилюли отслеживаем сами, тем же приёмом, что и иконки в
+        # _SplitColumnDelegate.
         self._view = parent
         self._hover_index = QModelIndex()
         if parent is not None:
@@ -810,7 +1043,6 @@ class _CategoryDelegate(_CellDelegate):
 
         rect = option.rect
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
         is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
         if selected:
@@ -854,7 +1086,6 @@ class _CategoryDelegate(_CellDelegate):
 
         rect = option.rect
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
         is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
         if selected:
@@ -948,40 +1179,25 @@ class _CategoryDelegate(_CellDelegate):
         editor.setGeometry(option.rect)
 
 
-class _CategoryPillButton(QWidget):
-    """Кнопка-пилюля для выбора категории.
+class _PillCellEditorBase(QWidget):
+    """Общая база пилюль-редакторов ячейки таблицы («Категория»/«Участок»).
 
-    Внешне: нейтральная кнопка «Все категории ▾» → при выборе категории
-    превращается в цветной овал с её цветом из CATEGORY_COLORS.
-
-    Реализует подмножество API QComboBox, чтобы существующий код работал
-    без изменений: currentText(), blockSignals(), clear(), addItem(),
-    addItems(), findText(), setCurrentIndex().
+    Содержит общую механику двух редакторов: прозрачную кнопку-триггер,
+    ручную отрисовку капсулы/текста/шеврона в компакт-режиме (см.
+    комментарий в _CategoryPillButton.__init__ — почему рисуем сами, а не
+    через QSS) и жизненный цикл попапа выбора (_show_popup → userPicked /
+    popupDismissed). Наследник реализует _open_menu() (создание и показ
+    своего попапа) и _apply_selection() (применение выбранного индекса).
     """
 
-    currentTextChanged = pyqtSignal()
-    userPicked = pyqtSignal()          # категория выбрана ЖИВЫМ кликом в popup
+    userPicked = pyqtSignal()          # значение выбрано ЖИВЫМ кликом в popup
     popupDismissed = pyqtSignal()      # popup закрыт без выбора (клик мимо)
-    editCategoriesRequested = pyqtSignal()
 
-    _NEUTRAL = "Все категории"
-
-    def __init__(self, neutral_label: str = "Все категории", parent=None, *,
-                 auto_open: bool = False, show_edit_button: bool = False):
+    def __init__(self, parent=None, *, auto_open: bool = False,
+                 compact: bool = False):
         super().__init__(parent)
-        self._NEUTRAL = neutral_label
-        self._items: list[str] = []
-        self._current_idx: int = 0
-        self._show_edit_button = show_edit_button
+        self._compact = compact
         self._picked_in_popup = False
-        # auto_open=True — это редактор ячейки таблицы (_CategoryDelegate),
-        # а не поле формы. QSS border-radius (даже заведомо огромный) не
-        # авто-клэмпится Qt до капсулы, как в CSS браузеров — реальную
-        # форму получить можно только ручной отрисовкой, той же, что и в
-        # _CategoryDelegate.paint(). Поэтому в компакт-режиме кнопка
-        # становится полностью прозрачной (только кликабельна), а овал,
-        # текст и шеврон рисует paintEvent САМОГО _CategoryPillButton.
-        self._compact = auto_open
         self._pill_bg = QColor("#FFFFFF")
         self._pill_bd = QColor("#D5DCE4")
         self._pill_tx = QColor("#1F2937")
@@ -990,25 +1206,12 @@ class _CategoryPillButton(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-
         self._btn = QPushButton()
-        self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._btn.clicked.connect(self._open_menu)
-        if self._compact:
-            # Пустая QPushButton даже без текста/паддингов сохраняет
-            # нативный минимальный размер стиля (Windows/Fusion) — через
-            # layout он раздувает ВЕСЬ _CategoryPillButton выше высоты
-            # строки, которую задаёт editor.setGeometry(option.rect).
-            # Явный minimumSize(0,0) отменяет это (в отличие от
-            # minimumSizeHint(), explicit minimumSize побеждает в layout).
-            self._btn.setMinimumSize(0, 0)
         lay.addWidget(self._btn)
 
-        self._update_display()
         if auto_open:
             # Редактор ячейки таблицы: popup открывается сразу, без
-            # дополнительного клика по самой кнопке (см. _CategoryDelegate).
+            # дополнительного клика по самой кнопке (см. делегаты).
             QTimer.singleShot(0, self._open_menu)
 
     def paintEvent(self, event):
@@ -1041,6 +1244,75 @@ class _CategoryPillButton(QWidget):
         arrow_rect = QRect(pill.right() - arrow_w, pill.top(), arrow_w, pill.height())
         p.setFont(_CellDelegate._icon_font())
         p.drawText(arrow_rect, Qt.AlignmentFlag.AlignCenter, chr(0xE5CF))  # expand_more
+
+    # ---- механика попапа --------------------------------------------------- #
+
+    def _open_menu(self):
+        raise NotImplementedError
+
+    def _apply_selection(self, idx: int):
+        raise NotImplementedError
+
+    def _show_popup(self, popup):
+        self._picked_in_popup = False
+        popup.itemSelected.connect(self._on_popup_selected)
+        popup.hidden.connect(self._on_popup_hidden)
+        popup.show_at(self._btn.mapToGlobal(self._btn.rect().bottomLeft() + QPoint(0, 2)))
+
+    def _on_popup_selected(self, idx: int):
+        self._picked_in_popup = True
+        self._apply_selection(idx)
+        self.userPicked.emit()
+
+    def _on_popup_hidden(self):
+        if not self._picked_in_popup:
+            self.popupDismissed.emit()
+
+
+class _CategoryPillButton(_PillCellEditorBase):
+    """Кнопка-пилюля для выбора категории.
+
+    Внешне: нейтральная кнопка «Все категории ▾» → при выборе категории
+    превращается в цветной овал с её цветом из CATEGORY_COLORS.
+
+    Реализует подмножество API QComboBox, чтобы существующий код работал
+    без изменений: currentText(), blockSignals(), clear(), addItem(),
+    addItems(), findText(), setCurrentIndex().
+    """
+
+    currentTextChanged = pyqtSignal()
+    editCategoriesRequested = pyqtSignal()
+
+    _NEUTRAL = "Все категории"
+
+    def __init__(self, neutral_label: str = "Все категории", parent=None, *,
+                 auto_open: bool = False, show_edit_button: bool = False):
+        # auto_open=True — это редактор ячейки таблицы (_CategoryDelegate),
+        # а не поле формы. QSS border-radius (даже заведомо огромный) не
+        # авто-клэмпится Qt до капсулы, как в CSS браузеров — реальную
+        # форму получить можно только ручной отрисовкой, той же, что и в
+        # _CategoryDelegate.paint(). Поэтому в компакт-режиме кнопка
+        # становится полностью прозрачной (только кликабельна), а овал,
+        # текст и шеврон рисует paintEvent базы (_PillCellEditorBase).
+        super().__init__(parent, auto_open=auto_open, compact=auto_open)
+        self._NEUTRAL = neutral_label
+        self._items: list[str] = []
+        self._current_idx: int = 0
+        self._show_edit_button = show_edit_button
+
+        self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn.clicked.connect(self._open_menu)
+        if self._compact:
+            # Пустая QPushButton даже без текста/паддингов сохраняет
+            # нативный минимальный размер стиля (Windows/Fusion) — через
+            # layout он раздувает ВЕСЬ _CategoryPillButton выше высоты
+            # строки, которую задаёт editor.setGeometry(option.rect).
+            # Явный minimumSize(0,0) отменяет это (в отличие от
+            # minimumSizeHint(), explicit minimumSize побеждает в layout).
+            self._btn.setMinimumSize(0, 0)
+
+        self._update_display()
 
     # ---- QComboBox-compatible API ---------------------------------------- #
 
@@ -1113,8 +1385,9 @@ class _CategoryPillButton(QWidget):
 
         if self._compact:
             # Кнопка полностью прозрачна — овал/текст/шеврон рисует
-            # paintEvent (см. __init__): только так форма гарантированно
-            # совпадает с _CategoryDelegate.paint() при любой высоте строки.
+            # paintEvent базы (_PillCellEditorBase): только так форма
+            # гарантированно совпадает с _CategoryDelegate.paint() при
+            # любой высоте строки.
             self._display_text = self._NEUTRAL if is_neutral else text
             if color is not None:
                 h, s, l, _ = color.getHslF()
@@ -1155,21 +1428,18 @@ class _CategoryPillButton(QWidget):
             )
         self._btn.setText(text)
 
+    # ---- Popup ------------------------------------------------------------ #
+
     def _open_menu(self):
         if not self._items:
             return
-        self._picked_in_popup = False
         popup = _SingleCatPopup(self._items, self._current_idx,
                                 show_edit_button=self._show_edit_button)
-        popup.itemSelected.connect(self._on_popup_selected)
         popup.editCategoriesRequested.connect(self._on_popup_edit_categories)
-        popup.hidden.connect(self._on_popup_hidden)
-        popup.show_at(self._btn.mapToGlobal(self._btn.rect().bottomLeft() + QPoint(0, 2)))
+        self._show_popup(popup)
 
-    def _on_popup_selected(self, idx: int):
-        self._picked_in_popup = True
+    def _apply_selection(self, idx: int):
         self.setCurrentIndex(idx)
-        self.userPicked.emit()
 
     def _on_popup_edit_categories(self):
         # _SingleCatPopup сразу закроется следом (self.close() в
@@ -1178,20 +1448,9 @@ class _CategoryPillButton(QWidget):
         self._picked_in_popup = True
         self.editCategoriesRequested.emit()
 
-    def _on_popup_hidden(self):
-        if not self._picked_in_popup:
-            self.popupDismissed.emit()
-
 
 class _PlotDelegate(_CellDelegate):
-    """Делегат колонки «Участок»: выпадающий список номеров участков из БД.
-    Для строк-мультиопераций рисует заштрихованный овал вместо значения."""
-
-    _BG       = QColor("#FFFFFF")
-    _BG_ALT   = QColor("#F0F4F8")
-    _BG_HOVER = QColor("#DDE4EE")
-    _BG_SEL   = QColor("#C9D8E2")
-    _BORDER   = QColor("#E3E8EF")
+    """Делегат колонки «Участок»: выпадающий список номеров участков из БД."""
 
     def __init__(self, items: list[str], parent=None):
         super().__init__(parent)
@@ -1205,36 +1464,26 @@ class _PlotDelegate(_CellDelegate):
             return
 
         if text == _MULTI_OP_LABEL:
+            # Ни у одной дочерней строки участок не указан — раньше здесь
+            # рисовалась заштрихованная пилюля-заглушка, но при развёрнутых
+            # (всегда) дочерних строках сама пустая ячейка уже читается как
+            # «участок не указан», а лишняя пилюля выглядит чужеродно —
+            # просто фон/граница, без пилюли.
             painter.save()
 
             rect = option.rect
+            # Ховер НЕ подсвечиваем: State_MouseOver в QTreeView приходит на
+            # всю строку разом, а ховер строк в таблице намеренно отключён
+            # (см. tree_qss в ui/theme.py) — иначе эта единственная ячейка
+            # темнела бы при наведении на любую часть строки.
             is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
             if option.state & QStyle.StateFlag.State_Selected:
                 painter.fillRect(rect, self._BG_SEL)
-            elif option.state & QStyle.StateFlag.State_MouseOver:
-                painter.fillRect(rect, self._BG_HOVER)
             else:
                 painter.fillRect(rect, self._BG_ALT if is_alt else self._BG)
 
             painter.setPen(QPen(self._BORDER, 1))
             painter.drawLine(rect.bottomLeft(), rect.bottomRight())
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-            v = max(3, (rect.height() - 20) // 2)
-            pill   = rect.adjusted(6, v, -6, -v)
-            pill_f = QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5)
-            radius_f = pill_f.height() / 2.0
-
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(234, 234, 238))
-            painter.drawRoundedRect(pill_f, radius_f, radius_f)
-
-            painter.setBrush(QBrush(QColor(185, 185, 193), Qt.BrushStyle.BDiagPattern))
-            painter.drawRoundedRect(pill_f, radius_f, radius_f)
-
-            painter.setPen(QPen(QColor(165, 165, 173), 1))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(pill_f, radius_f, radius_f)
 
             painter.restore()
             return
@@ -1246,7 +1495,6 @@ class _PlotDelegate(_CellDelegate):
 
         rect = option.rect
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
         is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
         if selected:
@@ -1285,99 +1533,145 @@ class _PlotDelegate(_CellDelegate):
         painter.restore()
 
     def createEditor(self, parent, option, index):
-        combo = QComboBox(parent)
-        combo.addItem("")           # пустой пункт — участок не указан
-        combo.addItems(self._items)
-        combo.activated.connect(lambda: self.commitData.emit(combo))
-        return combo
+        # Тот же приём, что и в _CategoryDelegate: компактная пилюля,
+        # popup выбора открывается сразу (auto_open), тот же визуальный
+        # язык, что и в фильтре заголовка (_PlotFilterPopup) — вместо
+        # чёрного нативного списка QComboBox.
+        current = str(index.data(Qt.ItemDataRole.EditRole) or "").strip()
+        editor = _PlotPillButton(self._items, current, parent)
+        editor.setMaximumWidth(option.rect.width())
+        editor.userPicked.connect(lambda e=editor: self._commit(e))
+        editor.popupDismissed.connect(lambda e=editor: self._cancel(e))
+        return editor
+
+    def _commit(self, editor):
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor)
+
+    def _cancel(self, editor):
+        self.closeEditor.emit(editor, QStyledItemDelegate.EndEditHint.RevertModelCache)
+
+    def eventFilter(self, obj, event):
+        # См. докстринг _CategoryDelegate.eventFilter (п.1) — popup выбора
+        # не потомок editor, поэтому его открытие выглядит для Qt как потеря
+        # фокуса редактором целиком; стандартный commit+close на FocusOut
+        # здесь подавляем, закрытием управляем сами через userPicked/
+        # popupDismissed.
+        if isinstance(obj, _PlotPillButton) and event.type() == QEvent.Type.FocusOut:
+            return True
+        return super().eventFilter(obj, event)
 
     def setEditorData(self, editor, index):
-        current = index.data(Qt.ItemDataRole.EditRole)
-        if isinstance(editor, QComboBox):
-            text = str(current).strip() if current else ""
-            if text:
-                pos = editor.findText(text)
-                if pos < 0:
-                    # Значения нет в базе — вставляем как первый пункт
-                    editor.insertItem(1, text)
-                    pos = 1
-                editor.setCurrentIndex(pos)
-            else:
-                editor.setCurrentIndex(0)
+        pass  # текущее значение уже передано в конструктор _PlotPillButton
 
     def setModelData(self, editor, model, index):
-        if isinstance(editor, QComboBox):
+        if isinstance(editor, _PlotPillButton):
             model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
 
     def updateEditorGeometry(self, editor, option, index):
         editor.setGeometry(option.rect)
 
 
-class _BranchColumnDelegate(_CellDelegate):
-    """Делегат колонки «Контрагент»:
-    - op-строки с детьми: текст + пилюля «Показать/Свернуть (N)»
-    - split-строки: линии дерева + отступ текста
-    - op-строки без детей: стандартный _CellDelegate"""
+class _SplitColumnDelegate(QStyledItemDelegate):
+    """Делегат служебного столбца «Сплит операции» (_SPLIT_COL):
+    - op-строка без детей: серая иконка splitscreen — клик создаёт сплит.
+    - op-строка с детьми: та же иконка, заливкой (fill), только индикатор.
+    - split-строка: слева delete_forever (удалить строку), справа add
+      (добавить строку ниже) — обе кликабельны независимо."""
 
-    toggleRequested = pyqtSignal(QModelIndex)
+    splitRequested       = pyqtSignal(QModelIndex)
+    addChildRequested     = pyqtSignal(QModelIndex)
+    deleteChildRequested  = pyqtSignal(QModelIndex)
 
-    _BTN_BG     = QColor("#E8F0F5")
-    _BTN_BG_H   = QColor("#C9D8E2")
-    _BTN_FG     = QColor("#07414F")
-    _BTN_BORDER = QColor("#B5C8D5")
-    _BTN_H      = 22
-    _LINE_COLOR = QColor("#B5C8D5")
-    _BG         = QColor("#FFFFFF")
-    _BG_ALT     = QColor("#F0F4F8")
-    _BG_HOVER   = QColor("#DDE4EE")
-    _BG_SEL     = QColor("#C9D8E2")
-    _BORDER     = QColor("#E3E8EF")
-    _TXT        = QColor("#1F2937")
-    _TXT_SEL    = QColor("#07414F")
-    _TRUNK_X    = 12
-    _SPLIT_PAD  = 24
+    _IC_SPLIT     = chr(0xF06D)   # splitscreen (fill) — операция уже разделена
+    _IC_SPLIT_ADD = chr(0xF4FD)   # splitscreen_add — операция ещё не разделена
+    _IC_ADD   = chr(0xE145)
+    _IC_DEL   = chr(0xE92B)
+    _IC_SIZE  = 18
+
+    _COLOR_GREY    = QColor("#9CA3AF")
+    _COLOR_GREY_H  = QColor("#6B7280")
+    _COLOR_BRAND   = QColor("#07414F")
+    _COLOR_DEL_H   = QColor("#DC2626")
 
     def __init__(self, view):
         super().__init__(view)
         self._view = view
-        self._hover_btn_idx = QModelIndex()
+        self._hover = (QModelIndex(), "")   # (index, "split"|"add"|"del")
+        self._pointing = False
+        self._fill_tag = QFont.Tag.fromString("FILL")
         view.viewport().installEventFilter(self)
 
-    @staticmethod
-    def _btn_font() -> QFont:
-        f = QFont()
-        f.setPixelSize(11)
-        f.setBold(True)
+    def _icon_font(self, fill: int = 0) -> QFont:
+        f = QFont("Material Symbols Rounded")
+        f.setPixelSize(self._IC_SIZE)
+        f.setVariableAxis(self._fill_tag, float(fill))
         return f
 
-    def _btn_rect(self, cell_rect: QRect, n: int) -> QRect:
-        f_btn = self._btn_font()
-        btn_w = QFontMetrics(f_btn).horizontalAdvance(f"Свернуть ({n})") + 20
-        y = cell_rect.top() + (cell_rect.height() - self._BTN_H) // 2
-        x = cell_rect.right() - btn_w - 6
-        return QRect(x, y, btn_w, self._BTN_H)
+    def _rects(self, rect: QRect, node) -> dict:
+        """Активные кликабельные зоны в ячейке для данного узла."""
+        if node.kind == "op" and not node.children:
+            return {"split": QRect(rect)}
+        if node.kind == "split":
+            half = rect.width() // 2
+            return {
+                "del": QRect(rect.left(), rect.top(), half, rect.height()),
+                "add": QRect(rect.left() + half, rect.top(),
+                             rect.width() - half, rect.height()),
+            }
+        return {}   # op с детьми — не кликабельно, только индикатор
 
-    def _update_btn_hover(self, pos):
-        new_hover = QModelIndex()
-        if pos is not None:
-            idx = self._view.indexAt(pos)
-            if idx.isValid():
-                node = idx.internalPointer()
-                if node is not None and node.kind == "op" and node.children:
-                    rect = self._view.visualRect(idx)
-                    if self._btn_rect(rect, len(node.children)).contains(pos):
-                        new_hover = idx
-        if new_hover != self._hover_btn_idx:
-            old = self._hover_btn_idx
-            self._hover_btn_idx = new_hover
-            if old.isValid():
-                self._view.update(old)
-            if new_hover.isValid():
-                self._view.update(new_hover)
-        if new_hover.isValid():
-            self._view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-            self._view.viewport().unsetCursor()
+    def paint(self, painter, option, index):
+        # Фон/выделение/чередование строк — как у любой обычной ячейки
+        # (у model.data() для _SPLIT_COL все роли, кроме флагов, пустые,
+        # так что super().paint() ничего, кроме фона, не рисует). Без этого
+        # вызова ячейка оставалась незакрашенной — на глаз выглядело как
+        # чужеродный серый блок посреди строки.
+        super().paint(painter, option, index)
+        node = index.internalPointer()
+        if node is None:
+            return
+        rect = option.rect
+        painter.save()
+
+        if node.kind == "op" and node.children:
+            painter.setFont(self._icon_font(fill=1))
+            painter.setPen(self._COLOR_BRAND)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._IC_SPLIT)
+        elif node.kind == "op":
+            hovered = self._hover == (index, "split")
+            painter.setFont(self._icon_font(fill=1 if hovered else 0))
+            painter.setPen(self._COLOR_GREY_H if hovered else self._COLOR_GREY)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._IC_SPLIT_ADD)
+        elif node.kind == "split":
+            rects = self._rects(rect, node)
+            del_h = self._hover == (index, "del")
+            add_h = self._hover == (index, "add")
+            painter.setFont(self._icon_font(fill=1 if del_h else 0))
+            painter.setPen(self._COLOR_DEL_H if del_h else self._COLOR_GREY)
+            painter.drawText(rects["del"], Qt.AlignmentFlag.AlignCenter, self._IC_DEL)
+            painter.setFont(self._icon_font(fill=1 if add_h else 0))
+            painter.setPen(self._COLOR_BRAND if add_h else self._COLOR_GREY)
+            painter.drawText(rects["add"], Qt.AlignmentFlag.AlignCenter, self._IC_ADD)
+
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        node = index.internalPointer()
+        if (node is not None and event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton):
+            rects = self._rects(option.rect, node)
+            pos = event.position().toPoint()
+            if "split" in rects and rects["split"].contains(pos):
+                self.splitRequested.emit(index)
+                return True
+            if "del" in rects and rects["del"].contains(pos):
+                self.deleteChildRequested.emit(index)
+                return True
+            if "add" in rects and rects["add"].contains(pos):
+                self.addChildRequested.emit(index)
+                return True
+        return super().editorEvent(event, model, option, index)
 
     def eventFilter(self, obj, event):
         try:
@@ -1387,169 +1681,43 @@ class _BranchColumnDelegate(_CellDelegate):
             return False
         if obj is viewport:
             if event.type() == QEvent.Type.MouseMove:
-                self._update_btn_hover(event.position().toPoint())
+                pos = event.position().toPoint()
+                idx = self._view.indexAt(pos)
+                new_hover = (QModelIndex(), "")
+                if idx.isValid():
+                    node = idx.internalPointer()
+                    m = idx.model()
+                    cols = m.columns() if m else []
+                    if (node is not None and 0 <= idx.column() < len(cols)
+                            and cols[idx.column()] == _SPLIT_COL):
+                        cell_rect = self._view.visualRect(idx)
+                        for key, r in self._rects(cell_rect, node).items():
+                            if r.contains(pos):
+                                new_hover = (idx, key)
+                                break
+                if new_hover != self._hover:
+                    old_idx = self._hover[0]
+                    self._hover = new_hover
+                    if old_idx.isValid():
+                        self._view.viewport().update(self._view.visualRect(old_idx))
+                    if new_hover[0].isValid():
+                        self._view.viewport().update(self._view.visualRect(new_hover[0]))
+                on_clickable = bool(new_hover[1])
+                if on_clickable and not self._pointing:
+                    self._pointing = True
+                    QApplication.setOverrideCursor(Qt.CursorShape.PointingHandCursor)
+                elif not on_clickable and self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
             elif event.type() == QEvent.Type.Leave:
-                self._update_btn_hover(None)
+                if self._pointing:
+                    self._pointing = False
+                    QApplication.restoreOverrideCursor()
+                if self._hover[0].isValid():
+                    old_idx = self._hover[0]
+                    self._hover = (QModelIndex(), "")
+                    self._view.viewport().update(self._view.visualRect(old_idx))
         return False
-
-    def paint(self, painter, option, index):
-        node = index.internalPointer()
-        if node is None:
-            super().paint(painter, option, index)
-            return
-
-        rect = option.rect
-        selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
-
-        if node.kind == "split":
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-
-            is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
-            if selected:
-                bg = self._BG_SEL
-            else:
-                bg = self._BG_ALT if is_alt else self._BG
-            painter.fillRect(rect, bg)
-            painter.setPen(QPen(self._BORDER, 1))
-            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
-
-            model_obj = index.model()
-            is_last = index.row() == model_obj.rowCount(index.parent()) - 1
-            midy = rect.top() + rect.height() // 2
-            cx = rect.left() + self._TRUNK_X
-            painter.setPen(QPen(self._LINE_COLOR, 1))
-            painter.drawLine(cx, rect.top(), cx, midy if is_last else rect.bottom())
-            painter.drawLine(cx, midy, cx + 10, midy)
-
-            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
-            if text:
-                painter.setFont(option.font)
-                painter.setPen(self._TXT_SEL if selected else self._TXT)
-                txt_rect = rect.adjusted(self._SPLIT_PAD, 0, -6, 0)
-                elided = painter.fontMetrics().elidedText(
-                    str(text), Qt.TextElideMode.ElideRight, txt_rect.width())
-                painter.drawText(
-                    txt_rect,
-                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                    elided,
-                )
-            painter.restore()
-
-        elif node.kind == "op" and node.children:
-            painter.save()
-
-            # Фон и нижняя граница — строго без антиалиасинга, иначе 1px-линия
-            # размазывается и не совпадает с QSS-границей соседних колонок.
-            is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
-            if selected:
-                bg = self._BG_SEL
-            else:
-                bg = self._BG_ALT if is_alt else self._BG
-            painter.fillRect(rect, bg)
-            painter.setPen(QPen(self._BORDER, 1))
-            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
-
-            n = len(node.children)
-            col0 = self._view.model().index(index.row(), 0,
-                                            self._view.model().parent(index))
-            is_expanded = self._view.isExpanded(col0)
-            label = f"Свернуть ({n})" if is_expanded else f"Показать ({n})"
-            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
-            btn = self._btn_rect(rect, n)
-
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            btn_bg = self._BTN_BG_H if self._hover_btn_idx == index else self._BTN_BG
-            painter.setBrush(btn_bg)
-            painter.setPen(QPen(self._BTN_BORDER, 1))
-            painter.drawRoundedRect(
-                QRectF(btn).adjusted(0.5, 0.5, -0.5, -0.5),
-                self._BTN_H / 2.0, self._BTN_H / 2.0,
-            )
-
-            f_btn = self._btn_font()
-            painter.setPen(self._BTN_FG)
-            painter.setFont(f_btn)
-            painter.drawText(btn, Qt.AlignmentFlag.AlignCenter, label)
-
-            text_rect = QRect(
-                rect.left() + 8, rect.top(),
-                btn.left() - rect.left() - 10, rect.height(),
-            )
-            painter.setPen(self._TXT_SEL if selected else self._TXT)
-            painter.setFont(option.font)
-            elided = painter.fontMetrics().elidedText(
-                str(text), Qt.TextElideMode.ElideRight, text_rect.width())
-            painter.drawText(
-                text_rect,
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                elided,
-            )
-
-            if index.data(MANUAL_ROLE):
-                painter.setFont(self._icon_font())
-                painter.setPen(
-                    QColor(255, 255, 255, 180) if selected else QColor("#9CA3AF")
-                )
-                painter.drawText(
-                    rect.adjusted(0, 0, -4, 0),
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                    self._CHAR,
-                )
-
-            painter.restore()
-
-        else:
-            # Обычные op-строки рисуем той же процедурой, что и строки с кнопкой:
-            # один путь рендеринга на всю колонку — иначе фон/отступы чуть «гуляют».
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-
-            is_alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
-            if selected:
-                bg = self._BG_SEL
-            else:
-                bg = self._BG_ALT if is_alt else self._BG
-            painter.fillRect(rect, bg)
-            painter.setPen(QPen(self._BORDER, 1))
-            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
-
-            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
-            if text:
-                painter.setFont(option.font)
-                painter.setPen(self._TXT_SEL if selected else self._TXT)
-                txt_rect = rect.adjusted(8, 0, -6, 0)
-                elided = painter.fontMetrics().elidedText(
-                    str(text), Qt.TextElideMode.ElideRight, txt_rect.width())
-                painter.drawText(
-                    txt_rect,
-                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                    elided,
-                )
-
-            if index.data(MANUAL_ROLE):
-                painter.setFont(self._icon_font())
-                painter.setPen(
-                    QColor(255, 255, 255, 180) if selected else QColor("#9CA3AF")
-                )
-                painter.drawText(
-                    rect.adjusted(0, 0, -4, 0),
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                    self._CHAR,
-                )
-            painter.restore()
-
-    def editorEvent(self, event, model, option, index):
-        node = index.internalPointer()
-        if (node is not None and node.kind == "op" and node.children
-                and event.type() == QEvent.Type.MouseButtonRelease
-                and event.button() == Qt.MouseButton.LeftButton):
-            btn = self._btn_rect(option.rect, len(node.children))
-            if btn.contains(event.position().toPoint()):
-                self.toggleRequested.emit(index)
-                return True
-        return super().editorEvent(event, model, option, index)
 
 
 # =========================================================================== #
@@ -2300,727 +2468,6 @@ class LoadSettingsDialog(_FramelessDialog):
 
 
 # =========================================================================== #
-#  Виджет строки разбивки (для Add/Edit диалогов)                             #
-# =========================================================================== #
-
-class _PlotComboBox(QComboBox):
-    """Выпадающий список участков с фильтрацией по вводу.
-
-    При вводе текста список фильтруется в реальном времени (MatchContains).
-    Допускается только выбор существующего значения — при потере фокуса
-    или нажатии Enter невалидное значение сбрасывается.
-    """
-
-    _STYLE = """
-        QComboBox {
-            background: #F8F9FA; border: 1px solid #D1D5DB;
-            border-radius: 5px; color: #374151; padding: 7px 10px;
-            padding-right: 28px; font-size: 13px;
-        }
-        QComboBox:focus { border: 1px solid #07414F; }
-        QComboBox::drop-down {
-            subcontrol-origin: padding; subcontrol-position: center right;
-            width: 28px; border: none; border-left: 1px solid #E5E7EB;
-            border-radius: 0 4px 4px 0;
-        }
-        QComboBox::down-arrow {
-            image: none; width: 10px; height: 10px;
-        }
-        QComboBox QAbstractItemView {
-            background: #FFFFFF; border: 1px solid #D1D5DB;
-            border-radius: 6px; padding: 4px;
-            selection-background-color: #E8F0F5; selection-color: #07414F;
-        }
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setEditable(True)
-        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.setStyleSheet(self._STYLE)
-        self.addItem("")
-        self._valid_values: set[str] = {""}
-        self._fill_items()
-
-        completer = self.completer()
-        completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-
-        self.lineEdit().editingFinished.connect(self._validate)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # Стрелка вниз
-        arrow_x = self.width() - 22
-        painter.setPen(QColor("#6B7280"))
-        f = QFont("Material Symbols Rounded")
-        f.setPixelSize(18)
-        painter.setFont(f)
-        arrow_rect = QRectF(arrow_x, 0, 22, self.height())
-        painter.drawText(arrow_rect, Qt.AlignmentFlag.AlignCenter, chr(0xE5C5))
-        painter.restore()
-
-    def _fill_items(self):
-        try:
-            if os.path.exists(_PLOTS_FILE):
-                with open(_PLOTS_FILE, "r", encoding="utf-8") as f:
-                    plots = json.load(f)
-                nums = sorted(
-                    set(str(p.get("num", "")) for p in plots if p.get("num")),
-                    key=lambda s: (0, int(s), s) if s.isdigit() else (1, 0, s),
-                )
-                for num in nums:
-                    self.addItem(num)
-                self._valid_values = {"", *nums}
-        except Exception:
-            pass
-
-    def _validate(self):
-        text = self.currentText().strip()
-        if text and text not in self._valid_values:
-            self.setCurrentIndex(0)
-
-
-class _SplitRowWidget(QWidget):
-    """Одна строка разбивки: Сумма / Категория / Участок / кнопка удаления."""
-
-    deleteRequested = pyqtSignal(object)  # self
-    sumChanged = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 2, 0, 2)
-        lay.setSpacing(6)
-
-        self.inp_summa = QLineEdit()
-        self.inp_summa.setPlaceholderText("Сумма")
-        self.inp_summa.setMaximumWidth(120)
-        self.inp_summa.textChanged.connect(lambda: self.sumChanged.emit())
-        lay.addWidget(self.inp_summa)
-
-        self.combo_cat = _CategoryPillButton(neutral_label="")
-        for cat in ALL_CATEGORIES:
-            self.combo_cat.addItem(cat)
-        if ALL_CATEGORIES:
-            self.combo_cat.setCurrentIndex(0)
-        lay.addWidget(self.combo_cat, stretch=1)
-
-        self.combo_plot = _PlotComboBox()
-        self.combo_plot.setMaximumWidth(100)
-        lay.addWidget(self.combo_plot)
-
-        btn_del = QPushButton("✕")
-        btn_del.setFixedSize(26, 26)
-        btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_del.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_del.setStyleSheet(
-            "QPushButton { background: transparent; border: none;"
-            " color: #9CA3AF; font-size: 14px; font-weight: 600; border-radius: 4px; }"
-            "QPushButton:hover { background: #FEE2E2; color: #B91C1C; }"
-        )
-        btn_del.clicked.connect(lambda: self.deleteRequested.emit(self))
-        lay.addWidget(btn_del)
-
-    def get_data(self) -> dict:
-        raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("−", "-").replace("–", "-").replace(" ", ""))
-        summa = 0.0
-        try:
-            summa = float(raw)
-        except ValueError:
-            pass
-        return {
-            "Сумма": summa,
-            "Категория": self.combo_cat.currentText(),
-            "Участок": self.combo_plot.currentText().strip(),
-        }
-
-    def set_data(self, data: dict):
-        num = _to_num(data.get("Сумма"))
-        if num is not None:
-            self.inp_summa.setText(_num_edit_str(num))
-        cat = str(data.get("Категория") or "")
-        idx = self.combo_cat.findText(cat)
-        if idx >= 0:
-            self.combo_cat.setCurrentIndex(idx)
-        self.combo_plot.setCurrentText(str(data.get("Участок") or ""))
-
-
-# Кнопки «Разделить операцию» / «Добавить строку» — общий стиль
-# диалогов добавления/редактирования операции.
-_SPLIT_BTN_QSS = f"""
-    QPushButton#btnSplit, QPushButton#btnAddSplit {{
-        background: transparent; color: {C.BRAND}; border: 1px solid #B5C8D5;
-        border-radius: 6px; padding: 5px 14px; font-size: {FS.SMALL}px;
-        font-weight: 600; text-align: left;
-    }}
-    QPushButton#btnSplit:hover, QPushButton#btnAddSplit:hover {{
-        background: {C.BRAND_FAINT};
-    }}
-"""
-
-
-class AddRowDialog(_FramelessDialog):
-    """Диалог ручного добавления операции в таблицу Детализации."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Добавить операцию")
-        self.setMinimumWidth(500)
-        self.setModal(True)
-        self._setup_ui()
-        self._apply_styles()
-
-    def _setup_ui(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 22, 24, 20)
-        lay.setSpacing(14)
-
-        lay.addLayout(self.make_header("Добавить операцию"))
-
-        form = QFormLayout()
-        form.setSpacing(10)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.date_edit = QDateEdit(QDate.currentDate(), calendarPopup=True)
-        style_date_popup(self.date_edit)
-        self.date_edit.setDisplayFormat("dd.MM.yyyy")
-        self.date_edit.setObjectName("datePicker")
-        form.addRow("Дата:", self.date_edit)
-
-        self.inp_summa = QLineEdit()
-        self.inp_summa.setPlaceholderText("например: 1500 (поступление) или -500 (списание)")
-        self.inp_summa.textChanged.connect(self._update_save_state)
-        form.addRow("Сумма, ₽:", self.inp_summa)
-
-        self.inp_cont = QLineEdit()
-        self.inp_cont.setPlaceholderText("Организация или ФИО")
-        form.addRow("Контрагент:", self.inp_cont)
-
-        self.inp_nazn = QLineEdit()
-        self.inp_nazn.setPlaceholderText("Назначение платежа")
-        form.addRow("Назначение:", self.inp_nazn)
-
-        self.combo_cat = _CategoryPillButton(neutral_label="")
-        for cat in ALL_CATEGORIES:
-            self.combo_cat.addItem(cat)
-        if ALL_CATEGORIES:
-            self.combo_cat.setCurrentIndex(0)
-        form.addRow("Категория:", self.combo_cat)
-
-        self.combo_plot = _PlotComboBox()
-        form.addRow("Участок:", self.combo_plot)
-
-        lay.addLayout(form)
-
-        # ---- секция разбивки операции ----
-        self._split_rows: list[_SplitRowWidget] = []
-
-        self._btn_split = QPushButton("  Разделить операцию")
-        self._btn_split.setObjectName("btnSplit")
-        self._btn_split.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._btn_split.clicked.connect(self._on_split_toggle)
-        lay.addWidget(self._btn_split)
-
-        self._split_section = QWidget()
-        self._split_section.setVisible(False)
-        split_lay = QVBoxLayout(self._split_section)
-        split_lay.setContentsMargins(0, 0, 0, 0)
-        split_lay.setSpacing(4)
-
-        hdr = QHBoxLayout()
-        for lbl in ("Сумма", "Категория", "Участок", ""):
-            l = QLabel(lbl)
-            l.setStyleSheet("color:#6B7280; font-size:11px; font-weight:600;")
-            hdr.addWidget(l, stretch=(2 if lbl == "Категория" else (0 if lbl == "" else 1)))
-        split_lay.addLayout(hdr)
-
-        self._split_rows_lay = QVBoxLayout()
-        self._split_rows_lay.setSpacing(2)
-        split_lay.addLayout(self._split_rows_lay)
-
-        self._btn_add_split = QPushButton(" Добавить строку")
-        self._btn_add_split.setIcon(icons.get_icon("add", 14, color=C.BRAND))
-        self._btn_add_split.setIconSize(QSize(14, 14))
-        self._btn_add_split.setObjectName("btnAddSplit")
-        self._btn_add_split.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_add_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._btn_add_split.clicked.connect(self._add_split_row)
-        split_lay.addWidget(self._btn_add_split)
-
-        lay.addWidget(self._split_section)
-        # ----------------------------------
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
-        lay.addWidget(sep)
-
-        self._split_warning = QLabel()
-        self._split_warning.setObjectName("splitWarning")
-        self._split_warning.setWordWrap(True)
-        self._split_warning.setStyleSheet(
-            "color:#9CA3AF; background:transparent; font-size:12px;"
-        )
-        lay.addWidget(self._split_warning)
-
-        btn_cancel = SecondaryButton("Отмена")
-        btn_cancel.clicked.connect(self.reject)
-        self._btn_save = PrimaryButton("Добавить")
-        self._btn_save.clicked.connect(self._on_accept)
-        lay.addLayout(self.make_button_row(btn_cancel, self._btn_save))
-        self._update_save_state()
-
-    def _on_split_toggle(self):
-        if self._split_section.isVisible():
-            self._split_section.setVisible(False)
-            self._btn_split.setText("  Разделить операцию")
-            for row in list(self._split_rows):
-                self._split_rows_lay.removeWidget(row)
-                row.deleteLater()
-            self._split_rows.clear()
-        else:
-            self._split_section.setVisible(True)
-            self._btn_split.setText("  Отменить разделение")
-            self._add_split_row()
-            self._add_split_row()
-        self.adjustSize()
-        self._update_save_state()
-
-    def _add_split_row(self):
-        row = _SplitRowWidget(self._split_section)
-        row.deleteRequested.connect(self._remove_split_row)
-        self._split_rows_lay.addWidget(row)
-        self._split_rows.append(row)
-        self.adjustSize()
-        self._update_save_state()
-
-    def _remove_split_row(self, row: "_SplitRowWidget"):
-        if row in self._split_rows:
-            self._split_rows.remove(row)
-            self._split_rows_lay.removeWidget(row)
-            row.deleteLater()
-            self.adjustSize()
-            self._update_save_state()
-
-    def _update_save_state(self):
-        if not hasattr(self, '_btn_save') or self._btn_save is None:
-            return
-        split_ok = True
-        if self._split_rows and self._split_section.isVisible():
-            raw = (self.inp_summa.text().strip()
-                   .replace(",", ".").replace("\u2212", "-").replace("\u2013", "-").replace(" ", ""))
-            try:
-                main_sum = float(raw) if raw else 0.0
-            except ValueError:
-                main_sum = 0.0
-            split_sum = 0.0
-            for row in self._split_rows:
-                rd = row.get_data()
-                split_sum += rd.get("Сумма", 0.0)
-            split_ok = abs(main_sum - split_sum) < 0.01
-        self._btn_save.setEnabled(split_ok)
-        self._btn_save.setCursor(
-            Qt.CursorShape.PointingHandCursor if split_ok else Qt.CursorShape.ArrowCursor
-        )
-        _text = "Сумма разбитых строк должна равняться сумме операции"
-        if split_ok:
-            self._split_warning.setStyleSheet(
-                "color:#9CA3AF; background:transparent; font-size:12px;"
-            )
-        else:
-            self._split_warning.setStyleSheet(
-                "color:#B45309; background:transparent; font-size:12px; font-weight:600;"
-            )
-        self._split_warning.setText(f"\u2139  {_text}")
-        self._split_warning.setVisible(self._split_section.isVisible() and not split_ok)
-
-    def _prefill(self, data: dict, breakdown: list):
-        ts = _to_ts(data.get("Дата"))
-        if ts is not None:
-            self.date_edit.setDate(QDate(ts.year, ts.month, ts.day))
-        num = _to_num(data.get("Сумма"))
-        if num is not None:
-            self.inp_summa.setText(_num_edit_str(num))
-        self.inp_cont.setText(str(data.get("Контрагент") or ""))
-        self.inp_cont.setCursorPosition(0)
-        self.inp_nazn.setText(str(data.get("Назначение") or ""))
-        self.inp_nazn.setCursorPosition(0)
-        cat = str(data.get("Категория") or "")
-        idx = self.combo_cat.findText(cat)
-        if idx >= 0:
-            self.combo_cat.setCurrentIndex(idx)
-        self.combo_plot.setCurrentText(str(data.get("Участок") or ""))
-        if breakdown:
-            self._on_split_toggle()
-            for bd in breakdown:
-                self._add_split_row(bd)
-            self._update_save_state()
-
-    def _on_accept(self):
-        raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("−", "-").replace("–", "-").replace(" ", ""))
-        if not raw:
-            _AlertDialog.show_alert(self, "Ошибка", "Укажите сумму операции")
-            return
-        try:
-            float(raw)
-        except ValueError:
-            _AlertDialog.show_alert(self, "Ошибка", "Некорректный формат суммы")
-            return
-        self.accept()
-
-    def get_result(self) -> dict:
-        raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("−", "-").replace("–", "-").replace(" ", ""))
-        d = self.date_edit.date()
-        result = {
-            "Дата":        pd.Timestamp(d.year(), d.month(), d.day()),
-            "Контрагент":  self.inp_cont.text().strip(),
-            "Сумма":       float(raw),
-            "Назначение":  self.inp_nazn.text().strip(),
-            "Категория":   self.combo_cat.currentText(),
-            "Участок":     self.combo_plot.currentText().strip(),
-        }
-        if self._split_rows:
-            contragent = self.inp_cont.text().strip()
-            result["_breakdown"] = [
-                {"Контрагент": contragent, **row.get_data()}
-                for row in self._split_rows
-            ]
-        return result
-
-    def _apply_styles(self):
-        self.setStyleSheet(self.base_qss() + _SPLIT_BTN_QSS)
-
-
-# =========================================================================== #
-#  Делегат кнопки редактирования                                              #
-# =========================================================================== #
-
-class _DetailEditDelegate(QStyledItemDelegate):
-    """Иконка карандаша в последнем столбце; filled при hover, cursor-рука."""
-
-    _IC_EDIT  = chr(0xE3C9)
-    _IC_FONT  = "Material Symbols Rounded"
-    _IC_COLOR = QColor("#07414F")
-
-    def __init__(self, view):
-        super().__init__(view)
-        self._view      = view
-        self._hover_idx = QModelIndex()
-        self._pointing  = False
-        self._fill_tag  = QFont.Tag.fromString("FILL")
-        view.viewport().installEventFilter(self)
-
-    def _is_btn(self, index: QModelIndex) -> bool:
-        if not index.isValid():
-            return False
-        node = index.internalPointer()
-        m    = index.model()
-        cols = m.columns() if m else []
-        col  = cols[index.column()] if 0 <= index.column() < len(cols) else ""
-        return bool(node and node.kind == "op" and col == _EDIT_COL)
-
-    def paint(self, painter, option, index):
-        super().paint(painter, option, index)
-        if not self._is_btn(index):
-            return
-        painter.save()
-        f = QFont(self._IC_FONT)
-        f.setPixelSize(18)
-        f.setVariableAxis(self._fill_tag, 1.0 if self._hover_idx == index else 0.0)
-        painter.setFont(f)
-        painter.setPen(self._IC_COLOR)
-        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, self._IC_EDIT)
-        painter.restore()
-
-    def eventFilter(self, obj, event):
-        try:
-            viewport = self._view.viewport()
-        except RuntimeError:
-            # self._view уже удалён — хвост событий при закрытии приложения.
-            return False
-        if obj is viewport:
-            if event.type() == QEvent.Type.MouseMove:
-                idx    = self._view.indexAt(event.position().toPoint())
-                on_btn = self._is_btn(idx)
-                if on_btn and not self._pointing:
-                    self._pointing = True
-                    QApplication.setOverrideCursor(Qt.CursorShape.PointingHandCursor)
-                elif not on_btn and self._pointing:
-                    self._pointing = False
-                    QApplication.restoreOverrideCursor()
-                new_hover = idx if on_btn else QModelIndex()
-                if new_hover != self._hover_idx:
-                    old = self._hover_idx
-                    self._hover_idx = new_hover
-                    if old.isValid():
-                        self._view.viewport().update(self._view.visualRect(old))
-                    if new_hover.isValid():
-                        self._view.viewport().update(self._view.visualRect(new_hover))
-            elif event.type() == QEvent.Type.Leave:
-                if self._pointing:
-                    self._pointing = False
-                    QApplication.restoreOverrideCursor()
-                if self._hover_idx.isValid():
-                    old = self._hover_idx
-                    self._hover_idx = QModelIndex()
-                    self._view.viewport().update(self._view.visualRect(old))
-        return super().eventFilter(obj, event)
-
-
-# =========================================================================== #
-#  Диалог редактирования операции                                             #
-# =========================================================================== #
-
-class EditOperationDialog(_FramelessDialog):
-    """Диалог редактирования существующей операции."""
-
-    def __init__(self, data: dict, breakdown: list = None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Редактировать операцию")
-        self.setMinimumWidth(500)
-        self.setModal(True)
-        self._split_rows: list[_SplitRowWidget] = []
-        self._setup_ui()
-        self._prefill(data, breakdown or [])
-        self._apply_styles()
-
-    def _setup_ui(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 22, 24, 20)
-        lay.setSpacing(14)
-
-        lay.addLayout(self.make_header("Редактировать операцию"))
-
-        form = QFormLayout()
-        form.setSpacing(10)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.date_edit = QDateEdit(QDate.currentDate(), calendarPopup=True)
-        style_date_popup(self.date_edit)
-        self.date_edit.setDisplayFormat("dd.MM.yyyy")
-        self.date_edit.setObjectName("datePicker")
-        form.addRow("Дата:", self.date_edit)
-
-        self.inp_summa = QLineEdit()
-        self.inp_summa.setPlaceholderText("например: 1500 (поступление) или -500 (списание)")
-        self.inp_summa.textChanged.connect(self._update_save_state)
-        form.addRow("Сумма, ₽:", self.inp_summa)
-
-        self.inp_cont = QLineEdit()
-        self.inp_cont.setPlaceholderText("Организация или ФИО")
-        form.addRow("Контрагент:", self.inp_cont)
-
-        self.inp_nazn = QLineEdit()
-        self.inp_nazn.setPlaceholderText("Назначение платежа")
-        form.addRow("Назначение:", self.inp_nazn)
-
-        self.combo_cat = _CategoryPillButton(neutral_label="")
-        for cat in ALL_CATEGORIES:
-            self.combo_cat.addItem(cat)
-        if ALL_CATEGORIES:
-            self.combo_cat.setCurrentIndex(0)
-        form.addRow("Категория:", self.combo_cat)
-
-        self.combo_plot = _PlotComboBox()
-        form.addRow("Участок:", self.combo_plot)
-
-        lay.addLayout(form)
-
-        # ---- секция разбивки операции ----
-        self._btn_split = QPushButton("  Разделить операцию")
-        self._btn_split.setObjectName("btnSplit")
-        self._btn_split.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._btn_split.clicked.connect(self._on_split_toggle)
-        lay.addWidget(self._btn_split)
-
-        self._split_section = QWidget()
-        self._split_section.setVisible(False)
-        split_lay = QVBoxLayout(self._split_section)
-        split_lay.setContentsMargins(0, 0, 0, 0)
-        split_lay.setSpacing(4)
-
-        hdr = QHBoxLayout()
-        for lbl in ("Сумма", "Категория", "Участок", ""):
-            l = QLabel(lbl)
-            l.setStyleSheet("color:#6B7280; font-size:11px; font-weight:600;")
-            hdr.addWidget(l, stretch=(2 if lbl == "Категория" else (0 if lbl == "" else 1)))
-        split_lay.addLayout(hdr)
-
-        self._split_rows_lay = QVBoxLayout()
-        self._split_rows_lay.setSpacing(2)
-        split_lay.addLayout(self._split_rows_lay)
-
-        self._btn_add_split = QPushButton(" Добавить строку")
-        self._btn_add_split.setIcon(icons.get_icon("add", 14, color=C.BRAND))
-        self._btn_add_split.setIconSize(QSize(14, 14))
-        self._btn_add_split.setObjectName("btnAddSplit")
-        self._btn_add_split.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_add_split.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._btn_add_split.clicked.connect(self._add_split_row)
-        split_lay.addWidget(self._btn_add_split)
-
-        lay.addWidget(self._split_section)
-        # ----------------------------------
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#E5E7EB;background:#E5E7EB;max-height:1px;")
-        lay.addWidget(sep)
-
-        self._split_warning = QLabel()
-        self._split_warning.setObjectName("splitWarning")
-        self._split_warning.setWordWrap(True)
-        self._split_warning.setStyleSheet(
-            "color:#9CA3AF; background:transparent; font-size:12px;"
-        )
-        lay.addWidget(self._split_warning)
-
-        btn_cancel = SecondaryButton("Отмена")
-        btn_cancel.clicked.connect(self.reject)
-        self._btn_save = PrimaryButton("Сохранить")
-        self._btn_save.clicked.connect(self._on_accept)
-        lay.addLayout(self.make_button_row(btn_cancel, self._btn_save))
-        self._update_save_state()
-
-    def _on_split_toggle(self):
-        if self._split_section.isVisible():
-            self._split_section.setVisible(False)
-            self._btn_split.setText("  Разделить операцию")
-            for row in list(self._split_rows):
-                self._split_rows_lay.removeWidget(row)
-                row.deleteLater()
-            self._split_rows.clear()
-        else:
-            self._split_section.setVisible(True)
-            self._btn_split.setText("  Отменить разделение")
-            self._add_split_row()
-            self._add_split_row()
-        self.adjustSize()
-        self._update_save_state()
-
-    def _add_split_row(self, data: dict = None):
-        row = _SplitRowWidget(self._split_section)
-        if data:
-            row.set_data(data)
-        row.deleteRequested.connect(self._remove_split_row)
-        row.sumChanged.connect(self._update_save_state)
-        self._split_rows_lay.addWidget(row)
-        self._split_rows.append(row)
-        self.adjustSize()
-        self._update_save_state()
-
-    def _remove_split_row(self, row: "_SplitRowWidget"):
-        if row in self._split_rows:
-            self._split_rows.remove(row)
-            self._split_rows_lay.removeWidget(row)
-            row.deleteLater()
-            self.adjustSize()
-            self._update_save_state()
-
-    def _update_save_state(self):
-        if not hasattr(self, '_btn_save') or self._btn_save is None:
-            return
-        split_ok = True
-        if self._split_rows and self._split_section.isVisible():
-            raw = (self.inp_summa.text().strip()
-                   .replace(",", ".").replace("\u2212", "-").replace("\u2013", "-").replace(" ", ""))
-            try:
-                main_sum = float(raw) if raw else 0.0
-            except ValueError:
-                main_sum = 0.0
-            split_sum = 0.0
-            for row in self._split_rows:
-                rd = row.get_data()
-                split_sum += rd.get("Сумма", 0.0)
-            split_ok = abs(main_sum - split_sum) < 0.01
-        self._btn_save.setEnabled(split_ok)
-        self._btn_save.setCursor(
-            Qt.CursorShape.PointingHandCursor if split_ok else Qt.CursorShape.ArrowCursor
-        )
-        _text = "Сумма разбитых строк должна равняться сумме операции"
-        if split_ok:
-            self._split_warning.setStyleSheet(
-                "color:#9CA3AF; background:transparent; font-size:12px;"
-            )
-        else:
-            self._split_warning.setStyleSheet(
-                "color:#B45309; background:transparent; font-size:12px; font-weight:600;"
-            )
-        self._split_warning.setText(f"\u2139  {_text}")
-        self._split_warning.setVisible(self._split_section.isVisible() and not split_ok)
-
-    def _prefill(self, data: dict, breakdown: list):
-        ts = _to_ts(data.get("Дата"))
-        if ts is not None:
-            self.date_edit.setDate(QDate(ts.year, ts.month, ts.day))
-        num = _to_num(data.get("Сумма"))
-        if num is not None:
-            self.inp_summa.setText(_num_edit_str(num))
-        self.inp_cont.setText(str(data.get("Контрагент") or ""))
-        self.inp_cont.setCursorPosition(0)
-        self.inp_nazn.setText(str(data.get("Назначение") or ""))
-        self.inp_nazn.setCursorPosition(0)
-        cat = str(data.get("Категория") or "")
-        idx = self.combo_cat.findText(cat)
-        if idx >= 0:
-            self.combo_cat.setCurrentIndex(idx)
-        self.combo_plot.setCurrentText(str(data.get("Участок") or ""))
-        if breakdown:
-            self._on_split_toggle()
-            for bd in breakdown:
-                self._add_split_row(bd)
-            self._update_save_state()
-
-    def _on_accept(self):
-        raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("\u2212", "-").replace("\u2013", "-").replace(" ", ""))
-        if not raw:
-            _AlertDialog.show_alert(self, "Ошибка", "Укажите сумму операции")
-            return
-        try:
-            float(raw)
-        except ValueError:
-            _AlertDialog.show_alert(self, "Ошибка", "Некорректный формат суммы")
-            return
-        self.accept()
-
-    def get_result(self) -> dict:
-        raw = (self.inp_summa.text().strip()
-               .replace(",", ".").replace("−", "-").replace("–", "-").replace(" ", ""))
-        d = self.date_edit.date()
-        result = {
-            "Дата":       pd.Timestamp(d.year(), d.month(), d.day()),
-            "Контрагент": self.inp_cont.text().strip(),
-            "Сумма":      float(raw),
-            "Назначение": self.inp_nazn.text().strip(),
-            "Категория":  self.combo_cat.currentText(),
-            "Участок":    self.combo_plot.currentText().strip(),
-        }
-        if self._split_rows:
-            contragent = self.inp_cont.text().strip()
-            result["_breakdown"] = [
-                {"Контрагент": contragent, **row.get_data()}
-                for row in self._split_rows
-            ]
-        else:
-            result["_breakdown"] = []
-        return result
-
-    def _apply_styles(self):
-        self.setStyleSheet(self.base_qss() + _SPLIT_BTN_QSS)
-
-
-# =========================================================================== #
 #  Попап фильтра по категориям                                                #
 # =========================================================================== #
 
@@ -3102,143 +2549,29 @@ class _PopupPillButton(QPushButton):
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, elided)
 
 
-class _SingleCatPopup(QFrame):
-    """Popup единичного выбора категории для диалогов Add/Edit и для
-    редактирования категории прямо в ячейке таблицы (см. _CategoryDelegate)."""
+class _PillPopupCardBase(QFrame):
+    """Общий каркас всплывающих карточек с пилюлями — и попапов ЕДИНИЧНОГО
+    выбора значения (инлайн-редактирование ячейки), и попапов-ФИЛЬТРОВ
+    мультивыбора из заголовка таблицы: белая скруглённая карточка, скролл
+    со списком пилюль (_PopupPillButton) и расчёт геометрии в show_at.
 
-    itemSelected = pyqtSignal(int)
-    editCategoriesRequested = pyqtSignal()
-    hidden = pyqtSignal()   # попап скрылся (и выбором, и кликом мимо)
+    Карточку рисует paintEvent на прозрачном окне (не QSS-фон) — та же
+    причина, что и у BaseDialog (ui/dialogs.py): без
+    WA_TranslucentBackground реальная форма окна остаётся
+    прямоугольной, и в углах "скруглённого" QSS-фона проступает
+    исходный прямоугольный фон окна.
+
+    Наследники наполняют self._lay пилюлями и собирают self._outer
+    (свои ряды действий/поиска + сам self._scroll)."""
+
     _MAX_H = 360
-    _ACTIONS_BTN_H = 28
-
-    def __init__(self, items: list, current_idx: int, parent=None, *,
-                 show_edit_button: bool = False):
-        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
-        # Карточку рисует paintEvent на прозрачном окне — см. докстринг
-        # у _CatFilterPopup (тот же приём, та же причина).
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        self._items = items
-        container = QWidget()
-        inner_lay = QVBoxLayout(container)
-        inner_lay.setContentsMargins(8, 8, 14, 8)
-        inner_lay.setSpacing(4)
-
-        self._btns: list[_PopupPillButton] = []
-        group = QButtonGroup(self)
-        group.setExclusive(True)
-
-        for i, item in enumerate(items):
-            btn = _PopupPillButton(item, CATEGORY_COLORS.get(item), container,
-                                    show_checkmark=False)
-            btn.setChecked(i == current_idx)
-            btn.clicked.connect(lambda _, idx=i: self._select(idx))
-            inner_lay.addWidget(btn)
-            group.addButton(btn)
-            self._btns.append(btn)
-
-        scroll = QScrollArea(self)
-        scroll.setWidget(container)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setStyleSheet("QScrollArea{background:#FFFFFF;border:none;}")
-        scroll.viewport().setStyleSheet("background:#FFFFFF;")
-        self._scroll_style = QStyleFactory.create("Fusion")
-        if self._scroll_style is not None:
-            scroll.setStyle(self._scroll_style)
-            scroll.verticalScrollBar().setStyle(self._scroll_style)
-        scroll.verticalScrollBar().setStyleSheet(scrollbar_qss(track="#FFFFFF"))
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(3, 3, 3, 3)
-        outer.setSpacing(0)
-
-        self._actions_h = 0
-        if show_edit_button:
-            btn_edit = SecondaryButton("Редактировать категории", icon="edit")
-            btn_edit.clicked.connect(self._on_edit_categories)
-            row = QHBoxLayout()
-            row.setContentsMargins(8, 6, 8, 6)
-            row.addWidget(btn_edit)
-            divider = QFrame()
-            divider.setFixedHeight(1)
-            divider.setStyleSheet("background:#E5E9EF; border:none;")
-            outer.addLayout(row)
-            outer.addWidget(divider)
-            self._actions_h = 6 + self._ACTIONS_BTN_H + 6 + 1
-
-        outer.addWidget(scroll)
-
-    def paintEvent(self, a0):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(QPen(QColor("#C9D8E2")))
-        p.setBrush(QColor("#FFFFFF"))
-        p.drawRoundedRect(rect, 8, 8)
-
-    def _select(self, idx: int):
-        self.itemSelected.emit(idx)
-        self.close()
-
-    def _on_edit_categories(self):
-        self.editCategoriesRequested.emit()
-        self.close()
-
-    def hideEvent(self, event):
-        super().hideEvent(event)
-        self.hidden.emit()
-
-    def show_at(self, global_pos: "QPoint"):
-        n = len(self._btns)
-        if n > 0:
-            pill_h    = 28
-            spacing   = 4
-            vmargin   = 16
-            content_h = n * pill_h + max(0, n - 1) * spacing + vmargin
-
-            max_btn_w = max(
-                (btn.minimumWidth() for btn in self._btns),
-                default=180
-            )
-            popup_w = min(max_btn_w, 300) + 34
-
-            screen      = QApplication.primaryScreen().availableGeometry()
-            available_h = screen.bottom() - global_pos.y() - 16 - self._actions_h
-            list_h      = min(content_h, self._MAX_H, max(80, available_h))
-            popup_h     = list_h + self._actions_h
-
-            self.setFixedWidth(max(popup_w, 200))
-            self.setFixedHeight(max(popup_h, 40 + self._actions_h))
-
-        self.move(global_pos)
-        self.show()
-        self.raise_()
-
-
-class _CatFilterPopup(QFrame):
-    """Выпадающий попап мультивыбора категорий из заголовка таблицы."""
-
-    selectionChanged = pyqtSignal(object)   # set[str]
-    _MAX_H = 360
+    _MIN_W = 200
     _ACTIONS_BTN_H = 22
-    # Высота строки «Выбрать все / Сбросить» + разделитель: 6+22+6 (action_row) + 1 (divider).
-    _ACTIONS_ROW_H = 6 + _ACTIONS_BTN_H + 6 + 1
 
     def __init__(self):
         super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
-        # Карточку рисует paintEvent на прозрачном окне (не QSS-фон) — та же
-        # причина, что и у BaseDialog (ui/dialogs.py): без
-        # WA_TranslucentBackground реальная форма окна остаётся
-        # прямоугольной, и в углах "скруглённого" QSS-фона проступает
-        # исходный прямоугольный фон окна.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self._selected: set = set()
-        self._btns: dict[str, _PopupPillButton] = {}
-        self._hide_time: float = 0.0
+        self._actions_h = 0   # суммарная высота рядов над списком
 
         self._container = QWidget()
         self._lay = QVBoxLayout(self._container)
@@ -3267,32 +2600,11 @@ class _CatFilterPopup(QFrame):
             self._scroll.verticalScrollBar().setStyle(self._scroll_style)
         self._scroll.verticalScrollBar().setStyleSheet(scrollbar_qss(track="#FFFFFF"))
 
-        # Строка действий над списком: «Выбрать все» / «Сбросить».
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(10, 6, 10, 6)
-        action_row.setSpacing(12)
-        btn_select_all = LinkButton("Выбрать все")
-        btn_select_all.setFixedHeight(self._ACTIONS_BTN_H)
-        btn_select_all.clicked.connect(self.select_all)
-        action_row.addWidget(btn_select_all)
-        action_row.addStretch()
-        btn_clear = LinkButton("Сбросить")
-        btn_clear.setFixedHeight(self._ACTIONS_BTN_H)
-        btn_clear.clicked.connect(self.clear_selection)
-        action_row.addWidget(btn_clear)
-
-        divider = QFrame()
-        divider.setFixedHeight(1)
-        divider.setStyleSheet("background:#E5E9EF; border:none;")
-
-        outer = QVBoxLayout(self)
+        self._outer = QVBoxLayout(self)
         # Отступ >= радиуса скругления (8px в paintEvent) — иначе непрозрачный
         # белый вьюпорт квадратом перекрывает антиалиасинг скруглённого угла.
-        outer.setContentsMargins(3, 3, 3, 3)
-        outer.setSpacing(0)
-        outer.addLayout(action_row)
-        outer.addWidget(divider)
-        outer.addWidget(self._scroll)
+        self._outer.setContentsMargins(3, 3, 3, 3)
+        self._outer.setSpacing(0)
 
     def paintEvent(self, a0):
         p = QPainter(self)
@@ -3302,61 +2614,52 @@ class _CatFilterPopup(QFrame):
         p.setBrush(QColor("#FFFFFF"))
         p.drawRoundedRect(rect, 8, 8)
 
-    # ------------------------------------------------------------------ build #
+    # ---- общие фабрики элементов ------------------------------------------ #
 
-    def rebuild(self, categories: list):
-        while self._lay.count():
-            item = self._lay.takeAt(0)
-            if (w := item.widget()):
-                w.deleteLater()
-        self._btns.clear()
+    @staticmethod
+    def _make_divider() -> QFrame:
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background:#E5E9EF; border:none;")
+        return divider
 
-        for cat in categories:
-            btn = _PopupPillButton(cat, CATEGORY_COLORS.get(cat), self._container)
-            btn.setChecked(cat in self._selected)
-            btn.toggled.connect(lambda checked, c=cat: self._on_toggle(c, checked))
-            self._lay.addWidget(btn)
-            self._btns[cat] = btn
+    def _make_search_input(self, placeholder: str) -> QLineEdit:
+        inp = QLineEdit()
+        inp.setPlaceholderText(placeholder)
+        inp.setClearButtonEnabled(True)
+        inp.setFixedHeight(self._ACTIONS_BTN_H)
+        inp.setStyleSheet(
+            "QLineEdit{background:#F8F9FA;border:1px solid #D5DCE4;border-radius:5px;"
+            "padding:2px 8px;font-size:12px;color:#1F2937;}"
+            "QLineEdit:focus{border:1px solid #07414F;}")
+        return inp
 
-    # ----------------------------------------------------------------- state #
+    # ---- хуки наследников -------------------------------------------------- #
 
-    def _on_toggle(self, cat: str, checked: bool):
-        if checked:
-            self._selected.add(cat)
-        else:
-            self._selected.discard(cat)
-        self.selectionChanged.emit(set(self._selected))
+    def _pill_color(self, item: str) -> "QColor | None":
+        """Цвет пилюли значения (None — нейтральная серая)."""
+        return None
 
-    def set_selected(self, sel: set):
-        self._selected = set(sel)
-        for cat, btn in self._btns.items():
-            btn.blockSignals(True)
-            btn.setChecked(cat in sel)
-            btn.blockSignals(False)
+    def _pill_buttons(self) -> list:
+        """Все пилюли списка — для расчёта геометрии в show_at."""
+        raise NotImplementedError
 
-    def clear_selection(self):
-        self._selected.clear()
-        for btn in self._btns.values():
-            btn.blockSignals(True)
-            btn.setChecked(False)
-            btn.blockSignals(False)
-        self.selectionChanged.emit(set())
+    def _avail_reserve_h(self) -> int:
+        """Сколько высоты вычесть из доступного места под СПИСОК при
+        расчёте до низа экрана (высота верхнего ряда действий)."""
+        return 0
 
-    def select_all(self):
-        self._selected = set(self._btns.keys())
-        for btn in self._btns.values():
-            btn.blockSignals(True)
-            btn.setChecked(True)
-            btn.blockSignals(False)
-        self.selectionChanged.emit(set(self._selected))
+    def _before_show(self):
+        pass
 
-    def get_selected(self) -> set:
-        return set(self._selected)
+    def _after_show(self):
+        pass
 
     # ---------------------------------------------------------------- popup #
 
     def show_at(self, global_pos: "QPoint"):
-        n = len(self._btns)
+        btns = self._pill_buttons()
+        n = len(btns)
         if n > 0:
             # Высота: аналитически (не sizeHint — он ненадёжен до первого show)
             pill_h   = 28   # _PopupPillButton.setFixedHeight(28)
@@ -3365,7 +2668,7 @@ class _CatFilterPopup(QFrame):
             content_h = n * pill_h + max(0, n - 1) * spacing + vmargin
 
             max_btn_w = max(
-                (btn.minimumWidth() for btn in self._btns.values()),
+                (btn.minimumWidth() for btn in btns),
                 default=180
             )
             # Буфер вокруг пилюли по ширине: 3+3 внешнее поле окна (paintEvent) +
@@ -3377,158 +2680,34 @@ class _CatFilterPopup(QFrame):
             popup_w = min(max_btn_w, 300) + 34
 
             screen      = QApplication.primaryScreen().availableGeometry()
-            available_h = screen.bottom() - global_pos.y() - 16
+            available_h = screen.bottom() - global_pos.y() - 16 - self._avail_reserve_h()
             list_h      = min(content_h, self._MAX_H, max(80, available_h))
-            popup_h     = list_h + self._ACTIONS_ROW_H
+            popup_h     = list_h + self._actions_h
 
-            self.setFixedWidth(max(popup_w, 200))
-            self.setFixedHeight(max(popup_h, 40 + self._ACTIONS_ROW_H))
+            self.setFixedWidth(max(popup_w, self._MIN_W))
+            self.setFixedHeight(max(popup_h, 40 + self._actions_h))
 
+        self._before_show()
         self.move(global_pos)
         self.show()
         self.raise_()
-
-    def hideEvent(self, event):
-        self._hide_time = time.monotonic()
-        super().hideEvent(event)
-
-    def was_just_hidden(self) -> bool:
-        return time.monotonic() - self._hide_time < 0.2
+        self._after_show()
 
 
-class _PlotFilterPopup(QFrame):
-    """Выпадающий попап мультивыбора участков из заголовка таблицы —
-    тот же визуальный язык, что и _CatFilterPopup, но вместо «Выбрать
-    все» — строка поиска: участков в проекте обычно много больше, чем
-    категорий, и пролистывать список нет смысла."""
+class _PillSearchMixin:
+    """Строка поиска над списком пилюль (попапы «Участок» — участков в
+    проекте обычно много больше, чем категорий, и пролистывать список нет
+    смысла). Требует от класса-носителя: self._search_input, self._lay,
+    self._order (ключи пилюль в исходном порядке) и реализацию
+    _btn_for(key) / _text_for(key)."""
 
-    selectionChanged = pyqtSignal(object)   # set[str]
-    _MAX_H = 360
-    _ACTIONS_BTN_H = 22
-    # Высота строки поиска/«Сбросить» + разделитель: 6+22+6 (action_row) + 1 (divider).
-    _ACTIONS_ROW_H = 6 + _ACTIONS_BTN_H + 6 + 1
+    def _btn_for(self, key):
+        raise NotImplementedError
 
-    def __init__(self):
-        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
-        # Карточку рисует paintEvent на прозрачном окне (не QSS-фон) — та же
-        # причина, что и у _CatFilterPopup.
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self._selected: set = set()
-        self._btns: dict[str, _PopupPillButton] = {}
-        self._plot_order: list = []   # порядок из rebuild() — база для поиска
-        self._hide_time: float = 0.0
+    def _text_for(self, key) -> str:
+        raise NotImplementedError
 
-        self._container = QWidget()
-        self._lay = QVBoxLayout(self._container)
-        self._lay.setContentsMargins(8, 8, 14, 8)
-        self._lay.setSpacing(4)
-
-        self._scroll = QScrollArea(self)
-        self._scroll.setWidget(self._container)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._scroll.setStyleSheet("QScrollArea{background:#FFFFFF;border:none;}")
-        self._scroll.viewport().setStyleSheet("background:#FFFFFF;")
-        self._scroll_style = QStyleFactory.create("Fusion")
-        if self._scroll_style is not None:
-            self._scroll.setStyle(self._scroll_style)
-            self._scroll.verticalScrollBar().setStyle(self._scroll_style)
-        self._scroll.verticalScrollBar().setStyleSheet(scrollbar_qss(track="#FFFFFF"))
-
-        # Строка действий над списком: поиск участка + «Сбросить».
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(10, 6, 10, 6)
-        action_row.setSpacing(8)
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("Поиск участка...")
-        self._search_input.setClearButtonEnabled(True)
-        self._search_input.setFixedHeight(self._ACTIONS_BTN_H)
-        self._search_input.setStyleSheet(
-            "QLineEdit{background:#F8F9FA;border:1px solid #D5DCE4;border-radius:5px;"
-            "padding:2px 8px;font-size:12px;color:#1F2937;}"
-            "QLineEdit:focus{border:1px solid #07414F;}")
-        self._search_input.textChanged.connect(self._on_search_text)
-        action_row.addWidget(self._search_input, stretch=1)
-        btn_clear = LinkButton("Сбросить")
-        btn_clear.setFixedHeight(self._ACTIONS_BTN_H)
-        btn_clear.clicked.connect(self.clear_selection)
-        action_row.addWidget(btn_clear)
-
-        divider = QFrame()
-        divider.setFixedHeight(1)
-        divider.setStyleSheet("background:#E5E9EF; border:none;")
-
-        outer = QVBoxLayout(self)
-        # Отступ >= радиуса скругления (8px в paintEvent) — та же причина,
-        # что и в _CatFilterPopup.
-        outer.setContentsMargins(3, 3, 3, 3)
-        outer.setSpacing(0)
-        outer.addLayout(action_row)
-        outer.addWidget(divider)
-        outer.addWidget(self._scroll)
-
-    def paintEvent(self, a0):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(QPen(QColor("#C9D8E2")))
-        p.setBrush(QColor("#FFFFFF"))
-        p.drawRoundedRect(rect, 8, 8)
-
-    # ------------------------------------------------------------------ build #
-
-    def rebuild(self, plots: list):
-        while self._lay.count():
-            item = self._lay.takeAt(0)
-            if (w := item.widget()):
-                w.deleteLater()
-        self._btns.clear()
-        self._plot_order = list(plots)
-
-        for num in plots:
-            btn = _PopupPillButton(num, None, self._container)
-            btn.setChecked(num in self._selected)
-            btn.toggled.connect(lambda checked, n=num: self._on_toggle(n, checked))
-            self._btns[num] = btn
-        # Раскладка (порядок + завершающий stretch) собирается в
-        # _apply_search_filter — единая точка добавления в self._lay.
-        self._apply_search_filter()
-
-    # ----------------------------------------------------------------- state #
-
-    def _on_toggle(self, num: str, checked: bool):
-        if checked:
-            self._selected.add(num)
-        else:
-            self._selected.discard(num)
-        self.selectionChanged.emit(set(self._selected))
-
-    def set_selected(self, sel: set):
-        self._selected = set(sel)
-        for num, btn in self._btns.items():
-            btn.blockSignals(True)
-            btn.setChecked(num in sel)
-            btn.blockSignals(False)
-
-    def clear_selection(self):
-        self._selected.clear()
-        for btn in self._btns.values():
-            btn.blockSignals(True)
-            btn.setChecked(False)
-            btn.blockSignals(False)
-        self.selectionChanged.emit(set())
-
-    def get_selected(self) -> set:
-        return set(self._selected)
-
-    # ----------------------------------------------------------------- поиск #
-
-    def _on_search_text(self, _text: str):
-        self._apply_search_filter()
-
-    def _apply_search_filter(self):
+    def _apply_search_filter(self, _text: str = ""):
         """Совпавшие с поиском пилюли поднимаются в начало списка (не просто
         скрывают несовпавшие на месте — иначе результаты оказываются
         вперемешку, разделённые пустыми местами скрытых кнопок).
@@ -3544,50 +2723,296 @@ class _PlotFilterPopup(QFrame):
         addStretch() в хвосте отдаёт весь излишек ему, а не пилюлям."""
         text = self._search_input.text().strip().lower()
         if text:
-            matched = [n for n in self._plot_order if text in n.lower()]
-            rest    = [n for n in self._plot_order if text not in n.lower()]
+            matched = [k for k in self._order if text in self._text_for(k).lower()]
+            rest    = [k for k in self._order if text not in self._text_for(k).lower()]
             ordered = matched + rest
         else:
-            ordered = self._plot_order
+            ordered = self._order
 
         while self._lay.count():
             self._lay.takeAt(0)
-        for num in ordered:
-            self._lay.addWidget(self._btns[num])
+        for key in ordered:
+            self._lay.addWidget(self._btn_for(key))
         self._lay.addStretch(1)
 
-        for num in self._plot_order:
-            self._btns[num].setVisible(not text or text in num.lower())
+        for key in self._order:
+            self._btn_for(key).setVisible(not text or text in self._text_for(key).lower())
+
+    def _before_show(self):
+        self._search_input.clear()
+
+    def _after_show(self):
+        self._search_input.setFocus()
+
+
+class _SinglePillPopupBase(_PillPopupCardBase):
+    """База попапов ЕДИНИЧНОГО выбора значения для инлайн-редактирования
+    ячейки (Add/Edit-диалоги и делегаты таблицы): пилюли-«радио»
+    (QButtonGroup), клик сразу выбирает и закрывает попап. Наследник
+    добавляет свой верхний ряд (_build_top) и цвет пилюль (_pill_color)."""
+
+    itemSelected = pyqtSignal(int)
+    hidden = pyqtSignal()   # попап скрылся (и выбором, и кликом мимо)
+
+    def __init__(self, items: list, current_idx: int):
+        super().__init__()
+        self._items = items
+
+        self._btns: list[_PopupPillButton] = []
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+
+        for i, item in enumerate(items):
+            # «Отмечена» здесь означает «это текущее значение», а не
+            # «применён фильтр» — галочка выключена (см. _PopupPillButton).
+            btn = _PopupPillButton(item, self._pill_color(item), self._container,
+                                   show_checkmark=False)
+            btn.setChecked(i == current_idx)
+            btn.clicked.connect(lambda _, idx=i: self._select(idx))
+            self._lay.addWidget(btn)
+            group.addButton(btn)
+            self._btns.append(btn)
+
+        self._actions_h = self._build_top(self._outer)
+        self._outer.addWidget(self._scroll)
+
+    def _build_top(self, outer: QVBoxLayout) -> int:
+        """Верхний ряд (кнопка действия/поиск) над списком; возвращает его
+        суммарную высоту (для show_at-геометрии)."""
+        return 0
+
+    def _pill_buttons(self) -> list:
+        return self._btns
+
+    def _avail_reserve_h(self) -> int:
+        # Верхний ряд действий уменьшает место под список при расчёте
+        # доступной высоты до низа экрана.
+        return self._actions_h
+
+    def _select(self, idx: int):
+        self.itemSelected.emit(idx)
+        self.close()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.hidden.emit()
+
+
+class _SingleCatPopup(_SinglePillPopupBase):
+    """Popup единичного выбора категории для диалогов Add/Edit и для
+    редактирования категории прямо в ячейке таблицы (см. _CategoryDelegate)."""
+
+    editCategoriesRequested = pyqtSignal()
+    _ACTIONS_BTN_H = 28
+
+    def __init__(self, items: list, current_idx: int, parent=None, *,
+                 show_edit_button: bool = False):
+        self._show_edit_button = show_edit_button
+        super().__init__(items, current_idx)
+
+    def _pill_color(self, item: str) -> "QColor | None":
+        return CATEGORY_COLORS.get(item)
+
+    def _build_top(self, outer: QVBoxLayout) -> int:
+        if not self._show_edit_button:
+            return 0
+        btn_edit = SecondaryButton("Редактор категорий", icon="category")
+        btn_edit.clicked.connect(self._on_edit_categories)
+        row = QHBoxLayout()
+        row.setContentsMargins(8, 6, 8, 6)
+        row.addWidget(btn_edit)
+        outer.addLayout(row)
+        outer.addWidget(self._make_divider())
+        return 6 + self._ACTIONS_BTN_H + 6 + 1
+
+    def _on_edit_categories(self):
+        self.editCategoriesRequested.emit()
+        self.close()
+
+
+class _SinglePlotPopup(_PillSearchMixin, _SinglePillPopupBase):
+    """Popup единичного выбора номера участка для инлайн-редактирования
+    ячейки «Участок» в таблице «Операции» — тот же визуальный язык (белая
+    карточка, серые пилюли), что и в попапе фильтра участков заголовка
+    (_PlotFilterPopup), вместо чёрного нативного списка QComboBox.
+
+    Строка поиска сверху — тот же приём, что и в _PlotFilterPopup: клавиатурный
+    ввод номера остаётся доступен (фильтрует и поднимает совпадения наверх),
+    Enter выбирает первое совпадение."""
+
+    _ACTIONS_ROW_H = 6 + _PillPopupCardBase._ACTIONS_BTN_H + 6 + 1
+
+    def __init__(self, items: list, current_idx: int, parent=None):
+        super().__init__(items, current_idx)
+        self._order = list(range(len(items)))   # порядок из __init__ — база для поиска
+        # Завершающий stretch в раскладке — см. докстринг
+        # _PillSearchMixin._apply_search_filter.
+        self._apply_search_filter()
+
+    def _build_top(self, outer: QVBoxLayout) -> int:
+        # Строка поиска — набор с клавиатуры сразу фильтрует список и
+        # поднимает совпадения наверх.
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(10, 6, 10, 6)
+        self._search_input = self._make_search_input("Номер участка...")
+        self._search_input.textChanged.connect(self._apply_search_filter)
+        self._search_input.returnPressed.connect(self._on_enter)
+        action_row.addWidget(self._search_input, stretch=1)
+        outer.addLayout(action_row)
+        outer.addWidget(self._make_divider())
+        return self._ACTIONS_ROW_H
+
+    # ----------------------------------------------------------------- поиск #
+
+    def _btn_for(self, key):
+        return self._btns[key]
+
+    def _text_for(self, key) -> str:
+        return self._items[key]
+
+    def _on_enter(self):
+        text = self._search_input.text().strip().lower()
+        if not text:
+            return
+        for idx in self._order:
+            if text in self._items[idx].lower():
+                self._select(idx)
+                return
+
+
+class _PlotPillButton(_PillCellEditorBase):
+    """Компактная пилюля-редактор ячейки «Участок»: при входе в
+    редактирование сразу открывает popup выбора номера участка (см.
+    _SinglePlotPopup) — тот же приём компактного/прозрачного рендера, что
+    и у _CategoryPillButton (auto_open=True), но без цветового кодирования
+    (номера участков не привязаны к цвету)."""
+
+    _NO_PLOT_LABEL = "Без участка"
+
+    def __init__(self, items: list[str], current_value: str, parent=None):
+        super().__init__(parent, auto_open=True, compact=True)
+        # "" — «участок не указан»; в списке показываем как отдельную
+        # пилюлю с понятной подписью, но значение хранится пустой строкой.
+        self._values = [""] + [v for v in items if v]
+        if current_value and current_value not in self._values:
+            # Значения нет в базе (введено вручную/из старого импорта) —
+            # вставляем как первый пункт, тот же приём, что раньше был у
+            # QComboBox.insertItem.
+            self._values.insert(1, current_value)
+        self._current_value = current_value
+        self._display_text = self._label(current_value)
+
+        self._btn.setMinimumSize(0, 0)
+        self._btn.setStyleSheet("QPushButton{background:transparent;border:none;}")
+
+    def _label(self, value: str) -> str:
+        return self._NO_PLOT_LABEL if not value else value
+
+    # ---- QComboBox-совместимый минимум, нужный делегату ------------------- #
+
+    def currentText(self) -> str:
+        return self._current_value
+
+    # ---- Popup ------------------------------------------------------------ #
+
+    def _open_menu(self):
+        if not self._values:
+            return
+        labels = [self._label(v) for v in self._values]
+        idx = self._values.index(self._current_value) if self._current_value in self._values else 0
+        self._show_popup(_SinglePlotPopup(labels, idx))
+
+    def _apply_selection(self, idx: int):
+        self._current_value = self._values[idx] if 0 <= idx < len(self._values) else ""
+        self._display_text = self._label(self._current_value)
+        self.update()
+
+
+class _FilterPopupBase(_PillPopupCardBase):
+    """База выпадающих попапов МУЛЬТИвыбора из заголовка таблицы
+    (категории/участки): пилюли-чекбоксы, строка действий над списком,
+    механика выделения (set_selected / clear_selection / get_selected) и
+    защёлка was_just_hidden() от мгновенного повторного открытия. Наследник
+    наполняет строку действий (_build_action_row), задаёт цвет пилюль
+    (_pill_color) и порядок раскладки (_relayout)."""
+
+    selectionChanged = pyqtSignal(object)   # set[str]
+    # Высота строки действий + разделитель: 6+22+6 (action_row) + 1 (divider).
+    _ACTIONS_ROW_H = 6 + _PillPopupCardBase._ACTIONS_BTN_H + 6 + 1
+
+    def __init__(self):
+        super().__init__()
+        self._selected: set = set()
+        self._btns: dict[str, _PopupPillButton] = {}
+        self._order: list = []   # порядок из rebuild() — база для раскладки/поиска
+        self._hide_time: float = 0.0
+        self._actions_h = self._ACTIONS_ROW_H
+
+        # Строка действий над списком.
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(10, 6, 10, 6)
+        self._build_action_row(action_row)
+
+        self._outer.addLayout(action_row)
+        self._outer.addWidget(self._make_divider())
+        self._outer.addWidget(self._scroll)
+
+    def _build_action_row(self, action_row: QHBoxLayout):
+        raise NotImplementedError
+
+    def _pill_buttons(self) -> list:
+        return list(self._btns.values())
+
+    # ------------------------------------------------------------------ build #
+
+    def rebuild(self, values: list):
+        while self._lay.count():
+            item = self._lay.takeAt(0)
+            if (w := item.widget()):
+                w.deleteLater()
+        self._btns.clear()
+        self._order = list(values)
+
+        for key in self._order:
+            btn = _PopupPillButton(key, self._pill_color(key), self._container)
+            btn.setChecked(key in self._selected)
+            btn.toggled.connect(lambda checked, k=key: self._on_toggle(k, checked))
+            self._btns[key] = btn
+        self._relayout()
+
+    def _relayout(self):
+        """Добавление пилюль в self._lay — единая точка после rebuild()."""
+        for key in self._order:
+            self._lay.addWidget(self._btns[key])
+
+    # ----------------------------------------------------------------- state #
+
+    def _on_toggle(self, key: str, checked: bool):
+        if checked:
+            self._selected.add(key)
+        else:
+            self._selected.discard(key)
+        self.selectionChanged.emit(set(self._selected))
+
+    def set_selected(self, sel: set):
+        self._selected = set(sel)
+        for key, btn in self._btns.items():
+            btn.blockSignals(True)
+            btn.setChecked(key in sel)
+            btn.blockSignals(False)
+
+    def clear_selection(self):
+        self._selected.clear()
+        for btn in self._btns.values():
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+        self.selectionChanged.emit(set())
+
+    def get_selected(self) -> set:
+        return set(self._selected)
 
     # ---------------------------------------------------------------- popup #
-
-    def show_at(self, global_pos: "QPoint"):
-        n = len(self._btns)
-        if n > 0:
-            pill_h   = 28   # _PopupPillButton.setFixedHeight(28)
-            spacing  = 4    # self._lay.setSpacing(4)
-            vmargin  = 16   # 8 top + 8 bottom
-            content_h = n * pill_h + max(0, n - 1) * spacing + vmargin
-
-            max_btn_w = max(
-                (btn.minimumWidth() for btn in self._btns.values()),
-                default=180
-            )
-            popup_w = min(max_btn_w, 300) + 34
-
-            screen      = QApplication.primaryScreen().availableGeometry()
-            available_h = screen.bottom() - global_pos.y() - 16
-            list_h      = min(content_h, self._MAX_H, max(80, available_h))
-            popup_h     = list_h + self._ACTIONS_ROW_H
-
-            self.setFixedWidth(max(popup_w, 240))
-            self.setFixedHeight(max(popup_h, 40 + self._ACTIONS_ROW_H))
-
-        self._search_input.clear()
-        self.move(global_pos)
-        self.show()
-        self.raise_()
-        self._search_input.setFocus()
 
     def hideEvent(self, event):
         self._hide_time = time.monotonic()
@@ -3595,6 +3020,67 @@ class _PlotFilterPopup(QFrame):
 
     def was_just_hidden(self) -> bool:
         return time.monotonic() - self._hide_time < 0.2
+
+
+class _CatFilterPopup(_FilterPopupBase):
+    """Выпадающий попап мультивыбора категорий из заголовка таблицы."""
+
+    def _pill_color(self, item: str) -> "QColor | None":
+        return CATEGORY_COLORS.get(item)
+
+    def _build_action_row(self, action_row: QHBoxLayout):
+        # «Выбрать все» / «Сбросить».
+        action_row.setSpacing(12)
+        btn_select_all = LinkButton("Выбрать все")
+        btn_select_all.setFixedHeight(self._ACTIONS_BTN_H)
+        btn_select_all.clicked.connect(self.select_all)
+        action_row.addWidget(btn_select_all)
+        action_row.addStretch()
+        btn_clear = LinkButton("Сбросить")
+        btn_clear.setFixedHeight(self._ACTIONS_BTN_H)
+        btn_clear.clicked.connect(self.clear_selection)
+        action_row.addWidget(btn_clear)
+
+    def select_all(self):
+        self._selected = set(self._btns.keys())
+        for btn in self._btns.values():
+            btn.blockSignals(True)
+            btn.setChecked(True)
+            btn.blockSignals(False)
+        self.selectionChanged.emit(set(self._selected))
+
+
+class _PlotFilterPopup(_PillSearchMixin, _FilterPopupBase):
+    """Выпадающий попап мультивыбора участков из заголовка таблицы —
+    тот же визуальный язык, что и _CatFilterPopup, но вместо «Выбрать
+    все» — строка поиска: участков в проекте обычно много больше, чем
+    категорий, и пролистывать список нет смысла."""
+
+    _MIN_W = 240
+
+    def _build_action_row(self, action_row: QHBoxLayout):
+        # Поиск участка + «Сбросить».
+        action_row.setSpacing(8)
+        self._search_input = self._make_search_input("Поиск участка...")
+        self._search_input.textChanged.connect(self._apply_search_filter)
+        action_row.addWidget(self._search_input, stretch=1)
+        btn_clear = LinkButton("Сбросить")
+        btn_clear.setFixedHeight(self._ACTIONS_BTN_H)
+        btn_clear.clicked.connect(self.clear_selection)
+        action_row.addWidget(btn_clear)
+
+    def _relayout(self):
+        # Порядок + завершающий stretch собирает _apply_search_filter —
+        # единая точка добавления в self._lay (см. _PillSearchMixin).
+        self._apply_search_filter()
+
+    # ----------------------------------------------------------------- поиск #
+
+    def _btn_for(self, key):
+        return self._btns[key]
+
+    def _text_for(self, key) -> str:
+        return key
 
 
 # =========================================================================== #
@@ -3608,6 +3094,7 @@ class _DetailHeaderView(QHeaderView):
     periodFilterChanged = pyqtSignal(object, object)   # (date_from, date_to) | (None, None)
     plotFilterChanged    = pyqtSignal(object)   # set[str]
     checkAllToggled      = pyqtSignal()
+    splitFilterToggled   = pyqtSignal(bool)   # только операции с дочерними строками
 
     _BG      = QColor("#C9D8E2")
     _FG      = QColor("#07414F")
@@ -3654,6 +3141,9 @@ class _DetailHeaderView(QHeaderView):
         self._check_col:      int = -1
         self._check_total:    int = 0
         self._check_selected: int = 0
+        self._split_col:      int = -1
+        self._split_active:   bool = False
+        self._split_hovered:  bool = False
         self._fill_tag = QFont.Tag.fromString("FILL")
 
     _SORT_W = 18   # ширина зоны иконки сортировки (слева, перед текстом)
@@ -3687,7 +3177,9 @@ class _DetailHeaderView(QHeaderView):
         self.viewport().update()
         self.catFilterChanged.emit(selected)
 
-    def _cat_icon_zone(self, sec_rect: QRect) -> QRect:
+    def _filter_icon_zone(self, sec_rect: QRect) -> QRect:
+        """QRect иконки-фильтра у правого края секции — одна геометрия на
+        все фильтры заголовка (категории/период/участки)."""
         IC_W = self._IC_W
         return QRect(sec_rect.right() - IC_W - 4, sec_rect.top(), IC_W, sec_rect.height())
 
@@ -3710,10 +3202,6 @@ class _DetailHeaderView(QHeaderView):
         self.viewport().update()
         self.periodFilterChanged.emit(date_from, date_to)
 
-    def _period_icon_zone(self, sec_rect: QRect) -> QRect:
-        IC_W = self._IC_W
-        return QRect(sec_rect.right() - IC_W - 4, sec_rect.top(), IC_W, sec_rect.height())
-
     # ----------------------------------------------------------- фильтр участков #
 
     def set_plot_col(self, col: int, plots: list, selected: set = None):
@@ -3733,9 +3221,18 @@ class _DetailHeaderView(QHeaderView):
         self.viewport().update()
         self.plotFilterChanged.emit(selected)
 
-    def _plot_icon_zone(self, sec_rect: QRect) -> QRect:
-        IC_W = self._IC_W
-        return QRect(sec_rect.right() - IC_W - 4, sec_rect.top(), IC_W, sec_rect.height())
+    # --------------------------------------------------- фильтр «только сплиты» #
+
+    def set_split_col(self, col: int, active: bool = False):
+        self._split_col = col
+        self._split_active = active
+        self.viewport().update()
+
+    def _split_icon_zone(self, sec_rect: QRect) -> QRect:
+        # Заголовок этой колонки — сам по себе только иконка (без заголовка/
+        # стрелки сортировки, см. paintSection: «single-glyph» ветка), так
+        # что кликабельна вся секция целиком, не отдельная под-зона.
+        return sec_rect
 
     # ----------------------------------------------------------- чекбокс «все» #
 
@@ -3787,8 +3284,16 @@ class _DetailHeaderView(QHeaderView):
         if label:
             # Одиночный символ Material Symbols — рисуем как иконку, без стрелок
             if len(label) == 1 and 0xE000 <= ord(label) <= 0xF8FF:
+                is_split_btn = logical_index == self._split_col
+                if is_split_btn and self._split_hovered:
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor(C.BRAND_GHOST))
+                    painter.drawRoundedRect(rect.adjusted(4, 4, -4, -4), 6, 6)
                 f_ic = QFont("Material Symbols Rounded")
                 f_ic.setPixelSize(18)
+                if is_split_btn:
+                    f_ic.setVariableAxis(self._fill_tag, 1.0 if self._split_active else 0.0)
                 painter.setPen(self._FG)
                 painter.setFont(f_ic)
                 painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
@@ -3796,13 +3301,12 @@ class _DetailHeaderView(QHeaderView):
                 is_cat    = (logical_index == self._cat_col)
                 is_period = (logical_index == self._period_col)
                 is_plot   = (logical_index == self._plot_col)
-                IC_W     = self._IC_W
                 # Иконка сортировки — слева, перед текстом (не у правого края).
                 sort_rect = QRect(rect.left() + 4, rect.top(), self._SORT_W, rect.height())
                 content_left = self._content_left(rect.left())
-                cat_rect = self._cat_icon_zone(rect) if is_cat else None
-                period_rect = self._period_icon_zone(rect) if is_period else None
-                plot_rect = self._plot_icon_zone(rect) if is_plot else None
+                cat_rect = self._filter_icon_zone(rect) if is_cat else None
+                period_rect = self._filter_icon_zone(rect) if is_period else None
+                plot_rect = self._filter_icon_zone(rect) if is_plot else None
 
                 if is_cat:
                     title_max_w = max(0, cat_rect.left() - content_left - 6)
@@ -3900,7 +3404,7 @@ class _DetailHeaderView(QHeaderView):
             if self._cat_col >= 0 and logical == self._cat_col:
                 sec_x    = self.sectionViewportPosition(self._cat_col)
                 sec_rect = QRect(sec_x, 0, self.sectionSize(self._cat_col), self.height())
-                if self._cat_icon_zone(sec_rect).contains(pos):
+                if self._filter_icon_zone(sec_rect).contains(pos):
                     if self._cat_popup and self._cat_popup.isVisible():
                         self._cat_popup.hide()
                         return
@@ -3916,7 +3420,7 @@ class _DetailHeaderView(QHeaderView):
             if self._period_col >= 0 and logical == self._period_col:
                 sec_x    = self.sectionViewportPosition(self._period_col)
                 sec_rect = QRect(sec_x, 0, self.sectionSize(self._period_col), self.height())
-                if self._period_icon_zone(sec_rect).contains(pos):
+                if self._filter_icon_zone(sec_rect).contains(pos):
                     if self._period_popup and self._period_popup.isVisible():
                         self._period_popup.hide()
                         return
@@ -3933,7 +3437,7 @@ class _DetailHeaderView(QHeaderView):
             if self._plot_col >= 0 and logical == self._plot_col:
                 sec_x    = self.sectionViewportPosition(self._plot_col)
                 sec_rect = QRect(sec_x, 0, self.sectionSize(self._plot_col), self.height())
-                if self._plot_icon_zone(sec_rect).contains(pos):
+                if self._filter_icon_zone(sec_rect).contains(pos):
                     if self._plot_popup and self._plot_popup.isVisible():
                         self._plot_popup.hide()
                         return
@@ -3945,13 +3449,21 @@ class _DetailHeaderView(QHeaderView):
                         self._plot_popup.show_at(global_pt)
                     return
 
+            # Фильтр «только операции с дочерними строками» — вся секция
+            # кликабельна (заголовок — одна иконка, без текста/стрелки).
+            if self._split_col >= 0 and logical == self._split_col:
+                self._split_active = not self._split_active
+                self.splitFilterToggled.emit(self._split_active)
+                self.viewport().update()
+                return
+
             # Сортировка — только клик по стрелке, не по всей ячейке.
             # 3 состояния по кругу: по возрастанию → по убыванию → без
             # сортировки (возврат к исходному порядку).
             if logical >= 0:
                 cols = self.model().columns() if self.model() else []
                 col_name = cols[logical] if 0 <= logical < len(cols) else None
-                if col_name not in (_EDIT_COL, _CHECK_COL):
+                if col_name not in (_CHECK_COL, _SPLIT_COL):
                     sec_x    = self.sectionViewportPosition(logical)
                     sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
                     if self._sort_icon_zone(sec_rect).contains(pos):
@@ -3989,7 +3501,7 @@ class _DetailHeaderView(QHeaderView):
             sec_x    = self.sectionViewportPosition(self._cat_col)
             sec_rect = QRect(sec_x, 0, self.sectionSize(self._cat_col), self.height())
             cat_hov  = (logical == self._cat_col
-                        and self._cat_icon_zone(sec_rect).contains(pos))
+                        and self._filter_icon_zone(sec_rect).contains(pos))
             if cat_hov != self._cat_hovered:
                 self._cat_hovered = cat_hov
                 self.viewport().update()
@@ -4001,7 +3513,7 @@ class _DetailHeaderView(QHeaderView):
             sec_x    = self.sectionViewportPosition(self._period_col)
             sec_rect = QRect(sec_x, 0, self.sectionSize(self._period_col), self.height())
             period_hov = (logical == self._period_col
-                          and self._period_icon_zone(sec_rect).contains(pos))
+                          and self._filter_icon_zone(sec_rect).contains(pos))
             if period_hov != self._period_hovered:
                 self._period_hovered = period_hov
                 self.viewport().update()
@@ -4013,11 +3525,21 @@ class _DetailHeaderView(QHeaderView):
             sec_x    = self.sectionViewportPosition(self._plot_col)
             sec_rect = QRect(sec_x, 0, self.sectionSize(self._plot_col), self.height())
             plot_hov = (logical == self._plot_col
-                        and self._plot_icon_zone(sec_rect).contains(pos))
+                        and self._filter_icon_zone(sec_rect).contains(pos))
             if plot_hov != self._plot_hovered:
                 self._plot_hovered = plot_hov
                 self.viewport().update()
             if plot_hov:
+                hand = True
+
+        # Заголовок «Сплит операции» — кнопка-фильтр «только с дочерними
+        # строками», hover-фон + курсор-рука на всю секцию.
+        if self._split_col >= 0:
+            split_hov = logical == self._split_col
+            if split_hov != self._split_hovered:
+                self._split_hovered = split_hov
+                self.viewport().update()
+            if split_hov:
                 hand = True
 
         self.viewport().setCursor(
@@ -4035,33 +3557,40 @@ class _DetailHeaderView(QHeaderView):
         if self._plot_hovered:
             self._plot_hovered = False
             self.viewport().update()
+        if self._split_hovered:
+            self._split_hovered = False
+            self.viewport().update()
         _AppTooltip.hide()
         super().leaveEvent(event)
 
     def event(self, e):
         if e.type() == QEvent.Type.ToolTip and (
             self._cat_col >= 0 or self._period_col >= 0 or self._plot_col >= 0
+            or self._split_col >= 0
         ):
             pos     = e.pos()
             logical = self.logicalIndexAt(pos.x())
             if logical == self._cat_col:
                 sec_x    = self.sectionViewportPosition(self._cat_col)
                 sec_rect = QRect(sec_x, 0, self.sectionSize(self._cat_col), self.height())
-                if self._cat_icon_zone(sec_rect).contains(pos):
+                if self._filter_icon_zone(sec_rect).contains(pos):
                     _AppTooltip.show_at("Фильтровать категории", e.globalPos())
                     return True
             if logical == self._period_col:
                 sec_x    = self.sectionViewportPosition(self._period_col)
                 sec_rect = QRect(sec_x, 0, self.sectionSize(self._period_col), self.height())
-                if self._period_icon_zone(sec_rect).contains(pos):
+                if self._filter_icon_zone(sec_rect).contains(pos):
                     _AppTooltip.show_at("Фильтровать по периоду", e.globalPos())
                     return True
             if logical == self._plot_col:
                 sec_x    = self.sectionViewportPosition(self._plot_col)
                 sec_rect = QRect(sec_x, 0, self.sectionSize(self._plot_col), self.height())
-                if self._plot_icon_zone(sec_rect).contains(pos):
+                if self._filter_icon_zone(sec_rect).contains(pos):
                     _AppTooltip.show_at("Фильтровать участки", e.globalPos())
                     return True
+            if logical == self._split_col:
+                _AppTooltip.show_at("Показать только операции с разделением", e.globalPos())
+                return True
             _AppTooltip.hide()
         return super().event(e)
 
@@ -4097,10 +3626,13 @@ class DetailWidget(QWidget):
         # Не сохраняется в проект — живёт только в рамках сессии.
         self._dup_pending: dict[int, dict] = {}
         self._cat_col: int | None = None
-        self._cont_col: int | None = None
         self._plot_col: int | None = None
+        self._date_col: int | None = None
+        self._sum_col: int | None = None
+        self._split_col: int | None = None
         self._hdr_cat_filter: set = set()
         self._hdr_plot_filter: set = set()
+        self._only_with_children: bool = False   # фильтр «только со сплитом»
         self._filter_mode = "all"   # all | income | expense
         self._period_from = None    # date | None — фильтр по периоду
         self._period_to = None
@@ -4135,24 +3667,8 @@ class DetailWidget(QWidget):
             b.clicked.connect(handler)
             return b
 
-        # «Добавить операцию» — леве́е всех остальных иконок (единственная
-        # с нестандартным расположением по просьбе — остальные три идут в
-        # прежнем относительном порядке).
-        btn_add_row = _hdr_icon_btn("Добавить операцию", self._add_row)
-        btn_add_row.setIcon(icons.get_icon(0xE145, 22, color="#9CA3AF"))  # add
-        top_bar.addWidget(btn_add_row)
-
-        self.btn_load = _hdr_icon_btn("Импорт из Excel", self.load_file)
-        self.btn_load.setIcon(icons.get_icon(0xEAF3, 22, color="#9CA3AF"))
-        top_bar.addWidget(self.btn_load)
-
-        btn_cat = _hdr_icon_btn("Категории", self._show_cat_editor)
-        btn_cat.setIcon(icons.get_icon("category", 22, color="#9CA3AF"))
-        top_bar.addWidget(btn_cat)
-
-        btn_excel = _hdr_icon_btn("Экспорт в Excel", self._export_excel)
-        btn_excel.setIcon(icons.get_icon(0xF3B2, 22, color="#9CA3AF"))  # file_export
-        top_bar.addWidget(btn_excel)
+        # Порядок слева направо: Удалить выбранные, Категории,
+        # Экспорт в Excel, Импорт из Excel, Добавить операцию.
 
         # «Удалить выбранные» — перенесена из иконки в заголовке столбца
         # чекбоксов (как во вкладке «Участки»): обычная иконка тулбара,
@@ -4166,6 +3682,22 @@ class DetailWidget(QWidget):
             "QPushButton:hover{background:#FEF2F2;}"
             "QPushButton:disabled{background:transparent;}")
         top_bar.addWidget(self._btn_bulk_delete)
+
+        btn_cat = _hdr_icon_btn("Категории", self._show_cat_editor)
+        btn_cat.setIcon(icons.get_icon("category", 22, color="#9CA3AF"))
+        top_bar.addWidget(btn_cat)
+
+        btn_excel = _hdr_icon_btn("Экспорт в Excel", self._export_excel)
+        btn_excel.setIcon(icons.get_icon(0xF3B2, 22, color="#9CA3AF"))  # file_export
+        top_bar.addWidget(btn_excel)
+
+        self.btn_load = _hdr_icon_btn("Импорт из Excel", self.load_file)
+        self.btn_load.setIcon(icons.get_icon(0xEAF3, 22, color="#9CA3AF"))
+        top_bar.addWidget(self.btn_load)
+
+        btn_add_row = _hdr_icon_btn("Добавить операцию", self._add_row)
+        btn_add_row.setIcon(icons.get_icon(0xE145, 22, color="#9CA3AF"))  # add
+        top_bar.addWidget(btn_add_row)
 
         layout.addLayout(top_bar)
 
@@ -4218,7 +3750,7 @@ class DetailWidget(QWidget):
         self.model = OperationsTreeModel(self._manual_cells, self._dup_pending, self)
         self.model.cellEdited.connect(self._on_cell_edited)
 
-        self.tree = QTreeView(objectName="mainTable")
+        self.tree = MainTableTreeView(objectName="mainTable")
         self.tree.setModel(self.model)
         self.tree.setUniformRowHeights(True)
         # Стрелка/＋/корзина живут в служебном столбце-делегате, поэтому штатную
@@ -4228,8 +3760,8 @@ class DetailWidget(QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # Двойной клик правит ячейку прямо в таблице (Дата/Сумма/Контрагент/
-        # Назначение/Категория/Участок) — в дополнение к карандашу, который
-        # открывает полный диалог с разбивкой операции.
+        # Назначение/Категория/Участок) — единственный способ редактирования,
+        # отдельных диалогов больше нет.
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self.tree.setSortingEnabled(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -4248,26 +3780,31 @@ class DetailWidget(QWidget):
         self.hdr_view.periodFilterChanged.connect(self._on_period_changed)
         self.hdr_view.plotFilterChanged.connect(self._on_hdr_plot_filter_changed)
         self.hdr_view.checkAllToggled.connect(self._on_master_check_clicked)
+        self.hdr_view.splitFilterToggled.connect(self._on_split_filter_toggled)
         self.tree.setStyleSheet(self._TREE_STYLE)
         self.tree.setViewportMargins(0, self.hdr_view.height(), 0, 0)
+        # Win11: нативный overlay-скроллбар игнорирует ширину/цвет из QSS,
+        # пока стиль виджета не Fusion — тот же приём, что и в списке
+        # участков (plots_widget.list_view).
+        self._tree_sb_style = QStyleFactory.create("Fusion")
+        if self._tree_sb_style is not None:
+            self.tree.setStyle(self._tree_sb_style)
+            self.tree.verticalScrollBar().setStyle(self._tree_sb_style)
 
         self._cell_delegate = _CellDelegate(self.tree)
         self._category_delegate = _CategoryDelegate(ALL_CATEGORIES, self.tree)
         self._category_delegate.editCategoriesRequested.connect(self._show_cat_editor)
         self._plot_delegate = _PlotDelegate(load_plot_numbers(), self.tree)
-        self._branch_delegate = _BranchColumnDelegate(self.tree)
-        self._branch_delegate.toggleRequested.connect(self._on_toggle)
-        self._edit_delegate = _DetailEditDelegate(self.tree)
+        self._date_delegate = _DateCellDelegate(self.tree)
+        self._sum_delegate = _SumCellDelegate(self.tree)
+        self._split_delegate = _SplitColumnDelegate(self.tree)
+        self._split_delegate.splitRequested.connect(self._on_split_requested)
+        self._split_delegate.addChildRequested.connect(self._on_add_child_requested)
+        self._split_delegate.deleteChildRequested.connect(self._on_delete_child_requested)
         self._check_delegate = _DetailCheckDelegate(self.tree)
         self._check_delegate.selectionChanged.connect(self._on_check_selection_changed)
         self.tree.setItemDelegate(self._cell_delegate)
         self.tree.clicked.connect(self._on_tree_clicked)
-        self.tree.expanded.connect(
-            lambda idx: self.tree.viewport().update(self.tree.visualRect(idx))
-        )
-        self.tree.collapsed.connect(
-            lambda idx: self.tree.viewport().update(self.tree.visualRect(idx))
-        )
 
         # Панель редактора категорий — скрыта по умолчанию, выезжает справа.
         self._cat_editor_panel = CategoryEditorPanel(ALL_CATEGORIES, self)
@@ -4284,11 +3821,6 @@ class DetailWidget(QWidget):
         table_outer.finish_setup()
         layout.addWidget(table_outer, stretch=1)
 
-        summary_layout = QHBoxLayout()
-        self.lbl_records = QLabel("Записей: —", objectName="summaryRecords")
-        summary_layout.addWidget(self.lbl_records)
-        summary_layout.addStretch()
-        layout.addLayout(summary_layout)
 
     # QTreeView нуждается в собственных правилах: глобальный QSS целит в
     # QTableWidget#mainTable и на дерево не распространяется.
@@ -4376,6 +3908,8 @@ class DetailWidget(QWidget):
 
         self.model.load(columns, records)
         self._apply_header_layout(self.model.columns())
+        # Разбивка теперь всегда развёрнута — кнопки Показать/Свернуть нет.
+        self.tree.expandAll()
 
         # Делегат комбобокса — только на колонку «Категория».
         cat = self.model.category_column()
@@ -4385,14 +3919,15 @@ class DetailWidget(QWidget):
             self.tree.setItemDelegateForColumn(cat, self._category_delegate)
         self._cat_col = cat
 
-        # Делегат с линиями дерева и корзиной — на колонку «Контрагент».
         cols = self.model.columns()
-        cont = cols.index("Контрагент") if "Контрагент" in cols else -1
-        if self._cont_col is not None and self._cont_col != cont:
-            self.tree.setItemDelegateForColumn(self._cont_col, self._cell_delegate)
-        if cont >= 0:
-            self.tree.setItemDelegateForColumn(cont, self._branch_delegate)
-        self._cont_col = cont
+
+        # Делегат иконок управления сплитом — на служебную колонку _SPLIT_COL.
+        split_col = cols.index(_SPLIT_COL) if _SPLIT_COL in cols else -1
+        if self._split_col is not None and self._split_col != split_col:
+            self.tree.setItemDelegateForColumn(self._split_col, self._cell_delegate)
+        if split_col >= 0:
+            self.tree.setItemDelegateForColumn(split_col, self._split_delegate)
+        self._split_col = split_col
 
         # Делегат выпадающего списка — на колонку «Участок».
         plot = cols.index("Участок") if "Участок" in cols else -1
@@ -4402,24 +3937,46 @@ class DetailWidget(QWidget):
             self.tree.setItemDelegateForColumn(plot, self._plot_delegate)
         self._plot_col = plot
 
+        # Делегат дата-пикера — на колонку «Дата».
+        date_col = cols.index("Дата") if "Дата" in cols else -1
+        if self._date_col is not None and self._date_col != date_col:
+            self.tree.setItemDelegateForColumn(self._date_col, self._cell_delegate)
+        if date_col >= 0:
+            self.tree.setItemDelegateForColumn(date_col, self._date_delegate)
+        self._date_col = date_col
+
+        # Делегат ввода суммы — на колонку «Сумма».
+        sum_col = cols.index("Сумма") if "Сумма" in cols else -1
+        if self._sum_col is not None and self._sum_col != sum_col:
+            self.tree.setItemDelegateForColumn(self._sum_col, self._cell_delegate)
+        if sum_col >= 0:
+            self.tree.setItemDelegateForColumn(sum_col, self._sum_delegate)
+        self._sum_col = sum_col
+
         self._refresh_summary()
+
+    def _present_values(self, col: str) -> set:
+        """Значения столбца, реально встречающиеся в данных: верхнеуровневые
+        + из строк разбивки (пустые отбрасываются)."""
+        if self.df_full is None or col not in self.df_full.columns:
+            return set()
+        present: set = set(self.df_full[col].dropna().astype(str).unique())
+        present.discard("")
+        if "_breakdown" in self.df_full.columns:
+            bd_col = self.df_full["_breakdown"]
+            for raw in bd_col[bd_col.notna()]:
+                for item in _parse_breakdown(raw):
+                    v = item.get(col) if isinstance(item, dict) else None
+                    if v:
+                        present.add(str(v))
+        return present
 
     def _present_categories(self) -> list[str]:
         """Категории для попапа фильтра — только реально встречающиеся в
         текущих данных (+ NO_CATEGORY_LABEL, если такие ячейки есть), а не
         весь ALL_CATEGORIES: там оседают категории, которые когда-то
         добавили в редакторе, но ни разу не присвоили ни одной операции."""
-        if self.df_full is None or "Категория" not in self.df_full.columns:
-            return []
-        present: set = set(self.df_full["Категория"].dropna().unique())
-        present.discard("")
-        if "_breakdown" in self.df_full.columns:
-            bd_col = self.df_full["_breakdown"]
-            for raw in bd_col[bd_col.notna()]:
-                for item in _parse_breakdown(raw):
-                    cat = item.get("Категория") if isinstance(item, dict) else None
-                    if cat:
-                        present.add(cat)
+        present = self._present_values("Категория")
         ordered = [c for c in ALL_CATEGORIES if c in present]
         extra = sorted(present - set(ordered) - {NO_CATEGORY_LABEL})
         result = ordered + extra
@@ -4431,22 +3988,12 @@ class DetailWidget(QWidget):
         """Номера участков для попапа фильтра — только реально встречающиеся
         в текущих данных (не весь реестр snt_plots.json), отсортированные
         численно там, где номер — число."""
-        if self.df_full is None or "Участок" not in self.df_full.columns:
-            return []
-        present: set = set(self.df_full["Участок"].dropna().astype(str).unique())
-        present.discard("")
-        if "_breakdown" in self.df_full.columns:
-            bd_col = self.df_full["_breakdown"]
-            for raw in bd_col[bd_col.notna()]:
-                for item in _parse_breakdown(raw):
-                    num = item.get("Участок") if isinstance(item, dict) else None
-                    if num:
-                        present.add(str(num))
+        present = self._present_values("Участок")
         return sorted(present, key=lambda s: (0, int(s), s) if s.isdigit() else (1, 0, s))
 
     def _apply_header_layout(self, columns: list[str]):
         col_widths = {
-            _CHECK_COL: 36, _EDIT_COL: 46,
+            _CHECK_COL: 36, _SPLIT_COL: 56,
             "Дата": 95, "Сумма": 140, "Категория": 210, "Участок": 120,
         }
         stretch_cols = {"Контрагент", "Назначение"}
@@ -4465,9 +4012,6 @@ class DetailWidget(QWidget):
             check_idx = columns.index(_CHECK_COL)
             self.tree.setItemDelegateForColumn(check_idx, self._check_delegate)
             self.hdr_view.set_check_col(check_idx)
-        # Делегат редактирования
-        if _EDIT_COL in columns:
-            self.tree.setItemDelegateForColumn(columns.index(_EDIT_COL), self._edit_delegate)
         if "Категория" in columns:
             self.hdr_view.set_cat_col(
                 columns.index("Категория"), self._present_categories(), self._hdr_cat_filter
@@ -4480,10 +4024,12 @@ class DetailWidget(QWidget):
             self.hdr_view.set_plot_col(
                 columns.index("Участок"), self._present_plots(), self._hdr_plot_filter
             )
+        if _SPLIT_COL in columns:
+            self.hdr_view.set_split_col(
+                columns.index(_SPLIT_COL), self._only_with_children
+            )
 
     def _refresh_summary(self):
-        nodes = self.model.top_nodes()
-        self.lbl_records.setText(f"Записей: {len(nodes)}")
         self._refresh_check_header()
 
     def _refresh_check_header(self):
@@ -4501,36 +4047,90 @@ class DetailWidget(QWidget):
             self.df_full["_breakdown"] = self.df_full["_breakdown"].astype("object")
         self.df_full.at[df_idx, "_breakdown"] = _dump_breakdown(items)
 
+    @staticmethod
+    def _mark_remainder(items: list):
+        """Явно помечает последний элемент списка как строку-остаток (см.
+        _SPLIT_REMAINDER_KEY) и снимает пометку со всех остальных — маркер
+        живёт в самих данных строки, а не вычисляется по позиции, иначе
+        сортировка таблицы по любому столбцу произвольно «переносила» бы
+        статус остатка на другую строку (op.children сортируется вместе с
+        root.children в OperationsTreeModel._apply_sort_internal)."""
+        for item in items:
+            item.pop(_SPLIT_REMAINDER_KEY, None)
+        if items:
+            items[-1][_SPLIT_REMAINDER_KEY] = True
+
     def _delete_split(self, split_node: _Node):
         parent = split_node.parent
         if parent is None or self.df_full is None or parent.df_idx not in self.df_full.index:
             return
-        items = [dict(c.data) for c in parent.children if c is not split_node]
+        remaining = [c for c in parent.children if c is not split_node]
+        # Минимум 2 строки в сплите — если остаётся меньше, снимаем разбивку
+        # целиком (операция возвращается в обычный вид). Иначе сумма снова
+        # делится поровну между оставшимися строками.
+        items = []
+        if len(remaining) >= 2:
+            total = _to_num(parent.data.get("Сумма")) or 0.0
+            items = [dict(c.data) for c in remaining]
+            for item, part in zip(items, _split_amount_evenly(total, len(items))):
+                item["Сумма"] = part
+            self._mark_remainder(items)
+        elif not str(parent.data.get("Категория") or "").strip():
+            # Сплит снят, а своей категории у операции нет (например, импорт
+            # сразу развернул смешанную авто-категорию в сплит) — ставим
+            # системную «Без категории», а не оставляем ячейку пустой.
+            parent.data["Категория"] = NO_CATEGORY_LABEL
+            self.df_full.at[parent.df_idx, "Категория"] = NO_CATEGORY_LABEL
         self._set_breakdown(parent.df_idx, items)
-        target = parent.df_idx
         self.apply_filters()
-        idx = self.model.index_for_df_idx(target)
-        if idx.isValid() and items:
-            self.tree.expand(idx)
         # Разбивка — аннотация, на суммы/долги не влияет: dataLoaded не эмитим.
 
-    def _on_toggle(self, index: QModelIndex):
-        col0 = self.model.index(index.row(), 0, self.model.parent(index))
-        if self.tree.isExpanded(col0):
-            self.tree.collapse(col0)
-        else:
-            self.tree.expand(col0)
+    def _on_split_requested(self, index: QModelIndex):
+        node = index.internalPointer()
+        if node is None or node.kind != "op" or node.children or self.df_full is None:
+            return
+        total = _to_num(node.data.get("Сумма")) or 0.0
+        parts = _split_amount_evenly(total, 2)
+        cat = node.data.get("Категория", "")
+        plot = node.data.get("Участок", "")
+        items = [{"Сумма": p, "Категория": cat, "Участок": plot} for p in parts]
+        self._mark_remainder(items)
+        self._set_breakdown(node.df_idx, items)
+        self.apply_filters()
+
+    def _on_add_child_requested(self, index: QModelIndex):
+        node = index.internalPointer()
+        if node is None or node.kind != "split" or self.df_full is None:
+            return
+        parent = node.parent
+        if parent is None or parent.df_idx not in self.df_full.index:
+            return
+        items = [dict(c.data) for c in parent.children]
+        pos = parent.children.index(node) + 1
+        items.insert(pos, {
+            "Сумма": 0.0,
+            "Категория": parent.data.get("Категория", ""),
+            "Участок": parent.data.get("Участок", ""),
+        })
+        total = _to_num(parent.data.get("Сумма")) or 0.0
+        for item, part in zip(items, _split_amount_evenly(total, len(items))):
+            item["Сумма"] = part
+        self._mark_remainder(items)
+        self._set_breakdown(parent.df_idx, items)
+        self.apply_filters()
+
+    def _on_delete_child_requested(self, index: QModelIndex):
+        node = index.internalPointer()
+        if node is None or node.kind != "split":
+            return
+        self._delete_split(node)
 
     # --------------------------------------------------- кнопка редакт. ----- #
     def _on_tree_clicked(self, index: QModelIndex):
         cols = self.model.columns()
         if index.isValid() and 0 <= index.column() < len(cols):
             col = cols[index.column()]
-            if col == _EDIT_COL:
-                node = index.internalPointer()
-                if node and node.kind == "op":
-                    self._edit_operation(node)
-            elif col == "Категория":
+            if col == "Категория":
                 # Пилюля категории открывается уже по одному клику (обычные
                 # ячейки — по двойному, см. setEditTriggers), это привычнее
                 # для бейджа-переключателя. Если ячейка недоступна для
@@ -4538,89 +4138,62 @@ class DetailWidget(QWidget):
                 # молча откажет — tree.edit() ничего не сделает.
                 self.tree.edit(index)
 
-    def _edit_operation(self, node):
-        breakdown = []
-        if self.df_full is not None and node.df_idx in self.df_full.index:
-            breakdown = _parse_breakdown(self.df_full.at[node.df_idx, "_breakdown"]
-                                         if "_breakdown" in self.df_full.columns else None)
-        dlg = EditOperationDialog(node.data, breakdown, self)
-        if _exec_dialog(dlg, self) != QDialog.DialogCode.Accepted:
-            return
-        try:
-            result = dlg.get_result()
-        except Exception as e:
-            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось получить данные из формы:\n{e}")
-            return
-        df_idx = node.df_idx
-        new_breakdown = result.pop("_breakdown", None)
-        if df_idx is not None and self.df_full is not None and df_idx in self.df_full.index:
-            for col, val in result.items():
-                if col in self.df_full.columns:
-                    cur_dtype = self.df_full[col].dtype
-                    if cur_dtype.kind == "f" and isinstance(val, str) and val.strip() == "":
-                        val = 0.0
-                    self.df_full.at[df_idx, col] = val
-                    self._manual_cells.add((df_idx, col))
-            self.df_full["Дата"] = pd.to_datetime(self.df_full["Дата"], errors="coerce")
-            if new_breakdown is not None:
-                self._set_breakdown(df_idx, new_breakdown)
-        try:
-            self.apply_filters()
-        except Exception as e:
-            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка обновления таблицы:\n{e}")
-            return
-        if new_breakdown:
-            idx = self.model.index_for_df_idx(df_idx)
-            if idx.isValid():
-                self.tree.expand(idx)
-        try:
-            self.dataLoaded.emit(self.df_full)
-        except Exception as e:
-            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка обновления вкладок:\n{e}")
-
     # ----------------------------------------------------- добавить строку -- #
     def _add_row(self):
-        dlg = AddRowDialog(self)
-        if _exec_dialog(dlg, self) != QDialog.DialogCode.Accepted:
-            return
-        try:
-            row_data = dlg.get_result()
-        except Exception as e:
-            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось получить данные из формы:\n{e}")
-            return
-        new_breakdown = row_data.pop("_breakdown", None)
-
+        # Управление таблицей целиком перенесено в саму таблицу (инлайн-
+        # редактирование/сплит) — «Добавить операцию» больше не открывает
+        # отдельное окно, а сразу вставляет пустую строку ПЕРВОЙ в списке
+        # (без сортировки список идёт в порядке df_full — см. _rebuild_model)
+        # и предлагает сразу вписать дату; остальные поля правятся тем же
+        # способом, что и у любой другой операции.
         if self.df_full is None:
             self.df_full = pd.DataFrame(
                 columns=["Дата", "Контрагент", "Сумма", "Назначение", "Категория", "Участок"]
             )
             self.df_full = self.df_full.astype({"Дата": "datetime64[ns]", "Сумма": float})
 
+        row_data = {
+            "Дата": pd.Timestamp.now().normalize(),
+            "Контрагент": "",
+            "Сумма": float("nan"),
+            "Назначение": "",
+            "Категория": "",
+            "Участок": "",
+        }
         new_idx = int(self.df_full.index.max()) + 1 if len(self.df_full) > 0 else 0
-
-        new_hash = _compute_hash(row_data)
-        row_data["_hash"] = new_hash
-
+        row_data["_hash"] = _compute_hash(row_data)
         new_row = {
             col: row_data.get(col, "" if col != "Сумма" else float("nan"))
             for col in self.df_full.columns
         }
-        self.df_full.loc[new_idx] = new_row
+        # Новая строка встаёт первой по ПОРЯДКУ строк df_full — не меняем
+        # индексы существующих строк (на них завязаны _manual_cells,
+        # _dup_pending, выбор чекбоксов и т.д.), у новой строки просто
+        # свежий уникальный df_idx.
+        new_row_df = pd.DataFrame([new_row], index=[new_idx])
+        self.df_full = pd.concat([new_row_df, self.df_full])
         self.df_full["Дата"] = pd.to_datetime(self.df_full["Дата"], errors="coerce")
-
         self._manual_rows.add(new_idx)
-        for col in row_data:
-            if col in self.df_full.columns:
-                self._manual_cells.add((new_idx, col))
 
-        if new_breakdown:
-            self._set_breakdown(new_idx, new_breakdown)
+        # Пустая строка (Сумма ещё не заполнена) не проходит фильтр
+        # Пополнения/Списания и фильтр «только со сплитом» — сбрасываем их,
+        # иначе новая строка тут же спрячется и редактор ниже не откроется.
+        # _apply_header_layout() (внутри apply_filters()) синхронизирует
+        # визуальное состояние кнопки-фильтра в заголовке по self._only_with_children.
+        self._filter_mode = "all"
+        self._op_tab_buttons["all"].setChecked(True)
+        self._only_with_children = False
 
         self.apply_filters()
-        if new_breakdown:
-            idx = self.model.index_for_df_idx(new_idx)
-            if idx.isValid():
-                self.tree.expand(idx)
+
+        idx = self.model.index_for_df_idx(new_idx)
+        if idx.isValid():
+            self.tree.scrollTo(idx)
+            self.tree.setCurrentIndex(idx)
+            cols = self.model.columns()
+            if "Дата" in cols:
+                date_idx = self.model.index(idx.row(), cols.index("Дата"), idx.parent())
+                self.tree.edit(date_idx)
         try:
             self.dataLoaded.emit(self.df_full)
         except Exception as e:
@@ -4676,6 +4249,8 @@ class DetailWidget(QWidget):
             )
 
             df = _ensure_meta_columns(df)
+            # Смешанную авто-категорию сразу разворачиваем в сплит 50/50.
+            df = _mixed_to_breakdown(df)
 
             if merge_mode and self.df_full is not None:
                 existing = _ensure_meta_columns(self.df_full)
@@ -4746,8 +4321,12 @@ class DetailWidget(QWidget):
             df["Категория"] = df["Категория"].apply(
                 lambda v: v[:-len(" (авто)")] if isinstance(v, str) and v.endswith(" (авто)") else v
             )
-        df = _ensure_meta_columns(df)
-        self.df_full = df
+        self.df_full = _ensure_meta_columns(df)
+        # Категории, реально встречающиеся в операциях/разбивках проекта,
+        # возвращаются в ALL_CATEGORIES — даже если snt_categories.json
+        # удалили: файл — восстановимый кэш, а не единственный источник.
+        present = self._present_values("Категория") - {NO_CATEGORY_LABEL, _MIXED_CAT}
+        ensure_categories(sorted(present - set(ALL_CATEGORIES)))
         self.apply_filters()
         try:
             self.dataLoaded.emit(self.df_full)
@@ -4788,30 +4367,25 @@ class DetailWidget(QWidget):
     def _filtered_df(self) -> "pd.DataFrame":
         df = self.df_full.copy()
 
-        if self._hdr_cat_filter:
-            _sel = self._hdr_cat_filter
-            # Строка с разбивкой фильтруется по категориям её строк, без —
-            # по верхнеуровневой. JSON разбивки парсим только там, где он
-            # есть (df.apply по всем строкам был излишне медленным).
-            mask = df["Категория"].isin(_sel)
+        def _col_filter(df, col: str, selected: set):
+            """Фильтр по столбцу с учётом разбивки: строка с разбивкой
+            проходит по значениям её строк, без — по верхнеуровневому.
+            JSON разбивки парсится только там, где он есть (df.apply по
+            всем строкам был излишне медленным)."""
+            mask = df[col].astype(str).isin(selected)
             if "_breakdown" in df.columns:
                 bd_col = df["_breakdown"]
                 for idx in df.index[bd_col.notna()]:
                     bd = _parse_breakdown(bd_col.at[idx])
                     if bd:
-                        mask.at[idx] = any(it.get("Категория") in _sel for it in bd)
-            df = df[mask]
+                        mask.at[idx] = any(
+                            str(it.get(col)) in selected for it in bd)
+            return df[mask]
 
+        if self._hdr_cat_filter:
+            df = _col_filter(df, "Категория", self._hdr_cat_filter)
         if self._hdr_plot_filter:
-            _psel = self._hdr_plot_filter
-            mask = df["Участок"].astype(str).isin(_psel)
-            if "_breakdown" in df.columns:
-                bd_col = df["_breakdown"]
-                for idx in df.index[bd_col.notna()]:
-                    bd = _parse_breakdown(bd_col.at[idx])
-                    if bd:
-                        mask.at[idx] = any(str(it.get("Участок")) in _psel for it in bd)
-            df = df[mask]
+            df = _col_filter(df, "Участок", self._hdr_plot_filter)
 
         # Поиск по операциям — сразу по двум столбцам: Контрагент и Назначение.
         if self._search_text:
@@ -4825,6 +4399,9 @@ class DetailWidget(QWidget):
             df = df[df["Дата"].dt.date >= self._period_from]
         if self._period_to is not None:
             df = df[df["Дата"].dt.date <= self._period_to]
+
+        if self._only_with_children and "_breakdown" in df.columns:
+            df = df[df["_breakdown"].apply(lambda v: bool(_parse_breakdown(v)))]
 
         self._refresh_op_tabs(df)
         if self._filter_mode == "income":
@@ -4864,6 +4441,10 @@ class DetailWidget(QWidget):
 
     def _on_hdr_plot_filter_changed(self, selected: set):
         self._hdr_plot_filter = set(selected)
+        self.apply_filters()
+
+    def _on_split_filter_toggled(self, active: bool):
+        self._only_with_children = active
         self.apply_filters()
 
     def _on_search_text(self, text: str):
@@ -4917,6 +4498,8 @@ class DetailWidget(QWidget):
         if df.empty:
             _AlertDialog.show_alert(self, "Нет данных", "После применения фильтров нет строк для экспорта.")
             return
+        # Самые свежие операции — сверху.
+        df = df.sort_values("Дата", ascending=False)
 
         path, _ = QFileDialog.getSaveFileName(
             self, "Экспорт детализации", "детализация.xlsx", "Excel (*.xlsx)")
@@ -4941,18 +4524,53 @@ class DetailWidget(QWidget):
                 cell.font = Font(bold=True)
                 cell.alignment = Alignment(horizontal="center")
 
-            for _, row in df.iterrows():
-                out_row = []
+            def _out_row(row, overrides: dict) -> list:
+                vals = []
                 for col in headers:
-                    val = row[col]
+                    val = overrides.get(col, row[col])
                     if col == "Сумма":
                         num = pd.to_numeric(val, errors="coerce")
-                        out_row.append(float(num) if pd.notna(num) else "")
+                        vals.append(float(num) if pd.notna(num) else "")
                     elif col == "Дата":
-                        out_row.append(val.strftime("%d.%m.%Y") if pd.notna(val) else "")
+                        vals.append(val.strftime("%d.%m.%Y") if pd.notna(val) else "")
                     else:
-                        out_row.append("" if pd.isna(val) else val)
-                ws.append(out_row)
+                        vals.append("" if pd.isna(val) else val)
+                return vals
+
+            # Смешанная категория автокатегоризации в экспорт не попадает:
+            # такая операция выгружается двумя строками-сплитами — 50/50,
+            # «Членские взносы» и «Электроэнергия (от садоводов)» (то же
+            # разбиение, что и при создании сплита в таблице). Если у
+            # операции уже есть ручная разбивка — выгружаем её строки.
+            # (Новые импорты сюда не попадают — _mixed_to_breakdown
+            # разворачивает категорию ещё при загрузке; ветка нужна для
+            # старых сохранённых проектов.)
+            for _, row in df.iterrows():
+                if str(row.get("Категория") or "") == _MIXED_CAT:
+                    bd = (_parse_breakdown(row["_breakdown"])
+                          if "_breakdown" in df.columns else [])
+                    if bd:
+                        parts = [
+                            {"Сумма": _to_num(it.get("Сумма")) or 0.0,
+                             "Категория": str(it.get("Категория") or ""),
+                             "Участок": str(it.get("Участок") or "")}
+                            for it in bd
+                        ]
+                    else:
+                        total = pd.to_numeric(row["Сумма"], errors="coerce")
+                        halves = _split_amount_evenly(
+                            float(total) if pd.notna(total) else 0.0, 2)
+                        plot = row.get("Участок", "")
+                        parts = [
+                            {"Сумма": halves[0], "Категория": _MIXED_SPLIT_CATS[0],
+                             "Участок": plot},
+                            {"Сумма": halves[1], "Категория": _MIXED_SPLIT_CATS[1],
+                             "Участок": plot},
+                        ]
+                    for part in parts:
+                        ws.append(_out_row(row, part))
+                    continue
+                ws.append(_out_row(row, {}))
 
             if summa_col_idx is not None:
                 green_fill = PatternFill("solid", fgColor="C8E6C9")
