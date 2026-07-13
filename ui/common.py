@@ -27,10 +27,10 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QCalendarWidget, QDateEdit, QFrame, QHeaderView, QLabel,
-    QLineEdit, QSpinBox, QToolButton, QWidget,
+    QLineEdit, QSpinBox, QToolButton, QTreeView, QWidget,
 )
 
-from ui.theme import C, FS, TREE_SCROLLBAR_W, calendar_qss, tree_qss
+from ui.theme import C, FS, SCROLLBAR_W, calendar_qss, tree_qss
 
 # ──────────────────────────────────────────────────────────────────────────
 #  Стили компактных полей ввода (формы карточек/диалогов)
@@ -173,7 +173,75 @@ TREE_STYLE = tree_qss()
 
 # Ширина скроллбара mainTable — заглушки в шапках таблиц долгов должны
 # совпадать с ней по ширине.
-SB_W = TREE_SCROLLBAR_W
+SB_W = SCROLLBAR_W
+
+
+class MainTableTreeView(QTreeView):
+    """QTreeView#mainTable с вертикальным скроллбаром, начинающимся НИЖЕ
+    заголовка, а не с самого верха фрейма.
+
+    QAbstractScrollArea расставляет скроллбары на всю высоту фрейма
+    независимо от setViewportMargins() (те резервируют место только под
+    сам viewport, не под скроллбар) — из-за этого скроллбар наезжал на
+    строку заголовка. updateGeometries() — штатная точка перерасчёта
+    геометрии скроллбаров/viewport у QAbstractScrollArea, подрезаем скроллбар
+    здесь на каждый layout/resize.
+
+    Угол «шапка × желоб скроллбара» после подрезки никто не рисует (шапка
+    заканчивается на границе вьюпорта) — оставалась белая дыра. Закрываем
+    её заглушкой цвета шапки: сплошной #C9D8E2 без границ — бесшовное
+    продолжение заголовка, тот же вид, что у sb_stub в шапках таблиц
+    долгов (energy/vznosy_debt_widget)."""
+
+    _HDR_BG = QColor("#C9D8E2")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._hdr_stub = QWidget(self)
+        # Без WA_StyledBackground голый QWidget может молча игнорировать
+        # QSS-фон — заглушка «есть», но ничего не рисует.
+        self._hdr_stub.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._hdr_stub.setStyleSheet(
+            f"background:{self._HDR_BG.name()};border:none;")
+        self._hdr_stub.hide()
+
+    def _sync_scrollbar(self):
+        header = self.header()
+        hh = 0 if header.isHidden() else header.height()
+        sb = self.verticalScrollBar()
+        if hh <= 0 or not sb.isVisibleTo(self) or sb.width() <= 0:
+            self._hdr_stub.hide()
+            return
+        # ВАЖНО: скроллбар живёт не в самом дереве, а в служебном контейнере
+        # (QAbstractScrollAreaScrollBarContainer), и sb.geometry() задан в
+        # координатах КОНТЕЙНЕРА — его x() всегда 0. Все позиции считаем
+        # через mapTo(self, ...) в системе координат дерева.
+        top_left = sb.mapTo(self, QPoint(0, 0))
+        if top_left.x() <= 0:
+            # Лейаут ещё не расставил контейнер (первый показ, пустая
+            # модель) — без проверки заглушка встаёт в левый верхний угол.
+            self._hdr_stub.hide()
+            return
+        if top_left.y() < hh:
+            g = sb.geometry()
+            dy = hh - top_left.y()
+            sb.setGeometry(g.x(), g.y() + dy, g.width(), max(0, g.height() - dy))
+            top_left = sb.mapTo(self, QPoint(0, 0))
+        self._hdr_stub.setGeometry(top_left.x(), 0, sb.width(), hh)
+        self._hdr_stub.show()
+        self._hdr_stub.raise_()
+
+    def updateGeometries(self):
+        super().updateGeometries()
+        self._sync_scrollbar()
+
+    def resizeEvent(self, event):
+        # Геометрию скроллбаров QAbstractScrollArea расставляет не только в
+        # updateGeometries(), но и в layoutChildren() по resize — без этого
+        # хука ресайз возвращал скроллбар на всю высоту (поверх шапки),
+        # а заглушка оставалась на старом месте.
+        super().resizeEvent(event)
+        self._sync_scrollbar()
 
 # Светлые фоновые варианты цветов долга для строк таблиц (уровень → bg).
 # Уровни возвращают core.energy.debt_level / core.vznosy.debt_level.

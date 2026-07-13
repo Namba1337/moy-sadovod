@@ -7,7 +7,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDateEdit, QFileDialog,
     QFrame, QHBoxLayout, QHeaderView, QLabel, QMenu,
-    QPushButton, QTreeView, QVBoxLayout, QWidget, QWidgetAction,
+    QPushButton, QStyleFactory, QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from core import energy
@@ -17,6 +17,7 @@ from ui.common import (
     SortHeaderView as _SortHeaderView,
     ClipFrame as _ClipFrame,
     FlatTableModel as _FlatTableModel,
+    MainTableTreeView,
     TREE_STYLE as _TREE_STYLE,
     SB_W as _SB_W,
     style_date_popup,
@@ -323,7 +324,7 @@ class VznosyDebtWidget(QWidget):
         hdr_inner.addWidget(sb_stub)
 
         # ── Дерево (плоское) ────────────────────────────────────────────────
-        self.tree = QTreeView(objectName="mainTable")
+        self.tree = MainTableTreeView(objectName="mainTable")
         self.tree.setModel(self.model)
         self.tree.header().hide()
         self.tree.setRootIsDecorated(False)
@@ -336,6 +337,13 @@ class VznosyDebtWidget(QWidget):
         self.tree.setMouseTracking(True)
         self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.tree.setStyleSheet(_TREE_STYLE)
+        # Win11: нативный overlay-скроллбар игнорирует ширину/цвет из QSS,
+        # пока стиль виджета не Fusion — тот же приём, что и в списке
+        # участков (plots_widget.list_view).
+        self._tree_sb_style = QStyleFactory.create("Fusion")
+        if self._tree_sb_style is not None:
+            self.tree.setStyle(self._tree_sb_style)
+            self.tree.verticalScrollBar().setStyle(self._tree_sb_style)
         self.tree.doubleClicked.connect(self._open_card)
 
         # Поиск в шапке: Участок, Собственник
