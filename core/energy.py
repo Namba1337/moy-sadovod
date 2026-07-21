@@ -740,7 +740,10 @@ def parse_breakdown(value, *, total: Optional[float] = None) -> list:
     if total is not None and items:
         items_sum = sum(
             (_to_float(i.get("Сумма")) or 0.0) for i in items if isinstance(i, dict))
-        if abs(items_sum - abs(total)) > 0.01:
+        # Строки разбивки несут знак родительской операции (так их создаёт и
+        # правит ui/detail_widget.py, включая клэмпинг остатка при total < 0) —
+        # сравниваем обе величины со знаком, а не items_sum с abs(total).
+        if abs(items_sum - total) > 0.01:
             return []
     return items
 
