@@ -1050,6 +1050,11 @@ class _FilterTabButton(QPushButton):
         self.updateGeometry()
         self.update()
 
+    def set_label(self, label: str):
+        self._label = label
+        self.updateGeometry()
+        self.update()
+
     def _content_width(self, fm: QFontMetrics) -> int:
         w = fm.horizontalAdvance(self._label) + fm.horizontalAdvance(self._count)
         if self._icon_cp is not None:

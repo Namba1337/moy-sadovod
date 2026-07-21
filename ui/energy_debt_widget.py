@@ -1,11 +1,7 @@
-import os
-import re
-from datetime import date
-
-from PyQt6.QtCore import Qt, QDate, QModelIndex
+from PyQt6.QtCore import Qt, QDate, QModelIndex, QSize
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog,
+    QAbstractItemView, QButtonGroup, QCheckBox, QDialog,
     QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QPushButton, QSpinBox, QStyleFactory, QVBoxLayout, QWidget,
 )
@@ -14,6 +10,8 @@ from core import energy
 from core.utils import fmt_money
 from ui.buttons import PrimaryButton, SecondaryButton
 from ui.common import (
+    CalendarArrowFlip,
+    NoJumpDateEdit,
     SortHeaderView as _SortHeaderView,
     ClipFrame as _ClipFrame,
     FlatTableModel as _FlatTableModel,
@@ -28,8 +26,16 @@ from ui.dialogs import (
     exec_dialog as _exec_dialog,
 )
 from ui.energy_card import PlotCardDialog
+from ui.icons import get_icon as _get_icon, icon_png_path as _icon_png_path
+from ui.plots_widget import _FilterTabButton
 from ui.rates_widget import RatesWidget
 from ui.theme import C, FS
+
+
+# Стиль поля даты — как «на дату:» на вкладке «Взносы» (ui.vznosy_debt_widget):
+# белый фон, синевато-серая рамка, свой шеврон вместо системной стрелки.
+_DATE_PILL_BORDER = "#C9D8E2"
+_DATE_PILL_HOVER   = "#DCE7EC"
 
 
 # ============================================================================ #
@@ -40,11 +46,13 @@ class _EnergyModel(_FlatTableModel):
     """Плоская модель для таблицы долгов по электроэнергии."""
 
     COLUMNS = [
-        "Участок", "Владелец", "Последнее показание", "Дата показ.",
-        "Без показ., мес.",
-        "Начислено", "Оплачено", "Стартовое", "Долг / Аванс",
+        "Участок", "Владелец", "Без показ., мес.",
+        "Начислено", "Оплачено", "Долг / Аванс",
         "Без оплаты, мес.", "Тип расчёта",
     ]
+    # Заголовки «№ уч.» / «Собственник» — как в «Взносах»; внутренний ключ
+    # COLUMNS (_text_Участок/_text_Владелец и т.д.) не меняется.
+    HEADER_LABELS = {"Участок": "№ уч.", "Владелец": "Собственник"}
 
 
 # ============================================================================ #
@@ -144,7 +152,8 @@ class _EnergySettingsDialog(_FramelessDialog):
             "Используются, только если на конкретном участке (кнопка "
             "«Тип расчёта») своё значение не задано — например, "
             "региональный норматив на освещение можно указать один раз "
-            "здесь, а не на каждом участке."
+            "здесь, а не на каждом участке. Этими же значениями пользуется "
+            "и автопереход выше — для оценки «хвоста» участков-счётчиков."
         )
         info2.setWordWrap(True)
         info2.setStyleSheet("color:#6B7280;font-size:12px;")
@@ -213,7 +222,8 @@ class EnergyDebtWidget(QWidget):
         self._df = None
         self._last_debts: dict = {}
         self._col_syncing = False
-        self._search_filters: dict[int, str] = {}
+        self._search_text = ""
+        self._filter_mode = "all"
         self._setup_ui()
         self._rebuild()
 
@@ -223,45 +233,36 @@ class EnergyDebtWidget(QWidget):
         lay.setSpacing(12)
 
         top = QHBoxLayout()
-
-        self.chk_active_only = QCheckBox("Только активный договор")
-        self.chk_active_only.setChecked(True)
-        self.chk_active_only.setToolTip(
-            "Если включено — начисления и оплаты считаются только с даты начала "
-            "текущей активной группы (договора). Если выключено — вся история "
-            "участка, включая прежних собственников."
-        )
-        self.chk_active_only.stateChanged.connect(self._rebuild)
-        top.addWidget(self.chk_active_only)
-
-        self.chk_stale_readings = QCheckBox("Без показаний ≥ 3 мес.")
-        self.chk_stale_readings.setToolTip(
-            "Участки со счётчиком, которые не передают показания 3 месяца "
-            "подряд и дольше — по порядку действий СНТ таким пора переходить "
-            "на расчётный метод (кнопка «Тип расчёта» на карточке участка)."
-        )
-        self.chk_stale_readings.stateChanged.connect(self._rebuild)
-        top.addWidget(self.chk_stale_readings)
-
+        top.setSpacing(8)
+        lbl_title = QLabel("Электроэнергия")
+        lbl_title.setStyleSheet(
+            "font-size:14px; font-weight:700; color:#1F2937; background:transparent;")
+        top.addWidget(lbl_title)
         top.addStretch()
 
         top.addWidget(QLabel("на дату:", objectName="filterLabel"))
-        self.date_as_of = QDateEdit(calendarPopup=True, objectName="datePicker",
-                                    displayFormat="dd.MM.yyyy")
+        # NoJumpDateEdit + ручной QSS — тот же стиль, что и «на дату:» на
+        # вкладке «Взносы» (ui.vznosy_debt_widget), вместо блёклого общего
+        # QDateEdit#datePicker: белый фон, синевато-серая рамка, свой шеврон.
+        self.date_as_of = NoJumpDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
         style_date_popup(self.date_as_of)
+        self.date_as_of.setFixedWidth(110)
+        _arr_dn = _icon_png_path("expand_more", 12, color="#6B7280")
+        _arr_up = _icon_png_path("expand_less", 12, color="#6B7280")
+        self.date_as_of.setStyleSheet(
+            "QDateEdit{background:#FFFFFF;border:1px solid " + _DATE_PILL_BORDER + ";"
+            "border-radius:6px;padding:2px 4px 2px 6px;font-size:12px;color:#1F2937;}"
+            "QDateEdit::drop-down{subcontrol-origin:padding;subcontrol-position:right;"
+            "width:18px;border:none;border-left:1px solid " + _DATE_PILL_BORDER + ";"
+            "background:transparent;border-top-right-radius:6px;border-bottom-right-radius:6px;}"
+            "QDateEdit::drop-down:hover{background:" + _DATE_PILL_HOVER + ";}"
+            f"QDateEdit::down-arrow{{image:url({_arr_dn});width:12px;height:12px;}}"
+            f'QDateEdit[calOpen="true"]::down-arrow{{image:url({_arr_up});}}')
+        CalendarArrowFlip(self.date_as_of)
         self.date_as_of.setDate(QDate.currentDate())
         self.date_as_of.setMaximumDate(QDate.currentDate())
         self.date_as_of.dateChanged.connect(self._rebuild)
         top.addWidget(self.date_as_of)
-
-        self.cb_only_debt = QComboBox(objectName="filterCombo")
-        self.cb_only_debt.addItems(["Все участки", "Только должники", "Только аванс/0"])
-        self.cb_only_debt.currentIndexChanged.connect(self._rebuild)
-        top.addWidget(self.cb_only_debt)
-
-        self.btn_mass_pdf = SecondaryButton("Квитанции должникам", icon="receipt")
-        self.btn_mass_pdf.clicked.connect(self._export_debtor_receipts)
-        top.addWidget(self.btn_mass_pdf)
 
         btn_rates = SecondaryButton("Нормативы", icon="ruler")
         btn_rates.clicked.connect(self._open_rates_dialog)
@@ -281,26 +282,70 @@ class EnergyDebtWidget(QWidget):
 
         lay.addLayout(top)
 
-        # Легенда — те же цвета, что и заливка строк (C.DEBT / C.DEBT_BG)
-        legend = QHBoxLayout()
-        legend.setSpacing(20)
-        for color, text in [
-            (C.DEBT["ok"],   "■  без долга / аванс"),
-            (C.DEBT["low"],  "■  небольшой долг"),
-            (C.DEBT["mid"],  "■  средний"),
-            (C.DEBT["high"], "■  крупный"),
-        ]:
-            lb = QLabel(text)
-            lb.setStyleSheet(f"color:{color};background:transparent;font-size:11px;")
-            legend.addWidget(lb)
-        legend.addStretch()
-        lay.addLayout(legend)
+        # ── Вкладки-фильтры: Все / Должники / Нет долгов / Без показаний ──────
+        # Тот же компонент, что и в «Операциях» (_FilterTabButton) — единый
+        # визуальный язык вкладок-фильтров по всему приложению.
+        tabs_row = QHBoxLayout()
+        tabs_row.setContentsMargins(0, 4, 0, 0)
+        tabs_row.setSpacing(20)
+        self._filter_tab_group = QButtonGroup(self)
+        self._filter_tab_group.setExclusive(True)
+        self._filter_tab_buttons: dict[str, _FilterTabButton] = {}
+        for mode, label in (("all", "Все"), ("debtors", "Должники"),
+                            ("nodebt", "Нет долгов"), ("stale", "Без показаний")):
+            btn = _FilterTabButton(label)
+            btn.clicked.connect(lambda checked, m=mode: self._on_filter_tab(m))
+            self._filter_tab_group.addButton(btn)
+            self._filter_tab_buttons[mode] = btn
+            tabs_row.addWidget(btn)
+        tabs_row.addStretch()
+        self._filter_tab_buttons["all"].setChecked(True)
+
+        lay.addLayout(tabs_row)
+
+        # ── Поиск по участку/собственнику — тот же приём, что и в «Взносах» ───
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 4, 0, 4)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Поиск по участку или собственнику")
+        self._search.setClearButtonEnabled(True)
+        self._search.setMinimumWidth(220)
+        self._search.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._search.setStyleSheet(
+            "QLineEdit{background:transparent;border:none;border-bottom:2px solid #D1D5DB;"
+            "border-radius:0;padding:6px 2px;font-size:13px;color:#1F2937;}"
+            "QLineEdit:focus{border-bottom:2px solid #07414F;}")
+        self._search.textChanged.connect(self._on_search_text)
+        search_row.addWidget(self._search, stretch=1)
+
+        # Переключатель «Только активный договор» — справа от поиска, тот же
+        # визуальный приём, что и на вкладке «Взносы».
+        self.chk_active_only = QPushButton(" Только активный договор")
+        self.chk_active_only.setCheckable(True)
+        self.chk_active_only.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_active_only.setIconSize(QSize(20, 20))
+        self.chk_active_only.setStyleSheet(
+            "QPushButton{background:transparent;border:none;border-radius:6px;"
+            "padding:4px 8px;font-size:12px;color:#374151;}"
+            "QPushButton:hover{background:#F3F4F6;}")
+        self.chk_active_only.setToolTip(
+            "Если включено — начисления и оплаты считаются только с даты начала "
+            "текущей активной группы (договора). Если выключено — вся история "
+            "участка, включая прежних собственников."
+        )
+        self.chk_active_only.setChecked(True)
+        self._refresh_active_only_icon()
+        self.chk_active_only.toggled.connect(self._on_toggle_active_only)
+        search_row.addWidget(self.chk_active_only)
+
+        lay.addLayout(search_row)
 
         # ── Модель ──────────────────────────────────────────────────────────
         self.model = _EnergyModel(self)
 
         # ── Шапка (внешняя) ─────────────────────────────────────────────────
-        self.hdr_view = _SortHeaderView()
+        self.hdr_view = _SortHeaderView(sort_left=True)
         self.hdr_view.setModel(self.model)
         self.hdr_view.sortIndicatorChanged.connect(self._on_sort_changed)
 
@@ -338,11 +383,6 @@ class EnergyDebtWidget(QWidget):
             self.tree.verticalScrollBar().setStyle(self._tree_sb_style)
         self.tree.doubleClicked.connect(self._open_card)
 
-        # Поиск в шапке: Участок, Владелец
-        self.hdr_view.add_search_col(_EnergyModel.COLUMNS.index("Участок"))
-        self.hdr_view.add_search_col(_EnergyModel.COLUMNS.index("Владелец"))
-        self.hdr_view.searchChanged.connect(self._on_search_changed)
-
         # Синхронизация ширин колонок между hdr_view и tree
         self.tree.header().sectionResized.connect(self._on_tree_hdr_resized)
         self.hdr_view.sectionResized.connect(self._on_hdr_view_resized)
@@ -356,14 +396,6 @@ class EnergyDebtWidget(QWidget):
         outer_inner.addWidget(self.tree, stretch=1)
         table_outer.finish_setup()
 
-        # Сверка с поставщиком
-        self.recon_lbl = QLabel("", objectName="statusLabel")
-        self.recon_lbl.setWordWrap(True)
-        self.recon_lbl.setStyleSheet(
-            "background:#F9FAFB;border:1px solid #E5E7EB;border-radius:6px;"
-            "padding:10px 14px;color:#374151;font-size:12px;"
-        )
-
         self.status_lbl = QLabel("Загрузите выписку на вкладке «Детализация»",
                                   objectName="statusLabel")
         self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -372,7 +404,6 @@ class EnergyDebtWidget(QWidget):
         table_vbox.setSpacing(4)
         table_vbox.setContentsMargins(0, 0, 0, 0)
         table_vbox.addWidget(table_outer, stretch=1)
-        table_vbox.addWidget(self.recon_lbl)
         table_vbox.addWidget(self.status_lbl)
         lay.addLayout(table_vbox)
 
@@ -394,14 +425,35 @@ class EnergyDebtWidget(QWidget):
         self.tree.header().resizeSection(logical, new_size)
         self._col_syncing = False
 
-    # -- сортировка / поиск -------------------------------------------------- #
+    # -- сортировка -------------------------------------------------------- #
 
     def _on_sort_changed(self, col, order):
         self.model.sort(col, order)
         self.hdr_view.setSortIndicator(col, order)
 
-    def _on_search_changed(self, col, text):
-        self._search_filters[col] = text.strip().lower()
+    # -- поиск ----------------------------------------------------------------- #
+
+    def _on_search_text(self, text: str):
+        self._search_text = text.strip().lower()
+        self._rebuild()
+
+    # -- вкладки-фильтры ------------------------------------------------------- #
+
+    def _on_filter_tab(self, mode: str):
+        self._filter_mode = mode
+        self._rebuild()
+
+    # -- переключатель «Только активный договор» ------------------------------ #
+
+    def _refresh_active_only_icon(self):
+        checked = self.chk_active_only.isChecked()
+        cp = 0xE9F6 if checked else 0xE9F5  # toggle_on / toggle_off
+        self.chk_active_only.setIcon(
+            _get_icon(cp, 20, fill=1 if checked else 0,
+                      color="#07414F" if checked else "#9CA3AF"))
+
+    def _on_toggle_active_only(self, checked: bool):
+        self._refresh_active_only_icon()
         self._rebuild()
 
     # -- публичный API ------------------------------------------------------- #
@@ -453,8 +505,9 @@ class EnergyDebtWidget(QWidget):
         active_only = self.chk_active_only.isChecked()
         auto_settings = energy.load_auto_settings()
         stale_threshold = auto_settings.get("months") or energy.DEFAULT_AUTO_SWITCH_MONTHS
-        self.chk_stale_readings.setText(f"Без показаний ≥ {stale_threshold} мес.")
-        self.chk_stale_readings.setToolTip(
+        btn_stale = self._filter_tab_buttons["stale"]
+        btn_stale.set_label(f"Без показаний ≥ {stale_threshold} мес.")
+        btn_stale.setToolTip(
             f"Участки со счётчиком, которые не передают показания "
             f"{stale_threshold} мес. подряд и дольше. "
             + ("Начисление для них уже ведётся автоматически по среднему "
@@ -495,21 +548,11 @@ class EnergyDebtWidget(QWidget):
                 gb = energy.balance_for_active_group(
                     plot, as_of, meters, rates, repls, baseline, self._df, since=since,
                     plots=plots_list, auto_settings=auto_settings, pay_index=pay_idx)
-                charged, paid, base_amt, debt = gb.charged, gb.paid, gb.baseline, gb.debt
+                charged, paid, debt = gb.charged, gb.paid, gb.debt
             else:
-                charged, paid, base_amt, debt = bal.charged, bal.paid, bal.baseline, bal.debt
+                charged, paid, debt = bal.charged, bal.paid, bal.debt
 
             owner = ", ".join(owners.get(plot, [])) or "—"
-            last_reading_text = "—"
-            last_date_text = "—"
-            reading_sort = -1.0
-            date_sort = -1.0
-            if bal.last_reading:
-                ly, lm, lv = bal.last_reading
-                last_reading_text = f"{lv:g}"
-                last_date_text = f"{lm:02d}.{ly}"
-                reading_sort = float(lv)
-                date_sort = float(ly * 100 + lm)
 
             level = energy.debt_level(debt, monthly_avg=300.0)
             debts_map[plot] = {"debt": debt, "level": level,
@@ -536,7 +579,7 @@ class EnergyDebtWidget(QWidget):
             if mwr is not None and mwr >= stale_threshold:
                 stale_readings_count += 1
             row = {
-                "_text_Участок": f"уч. {plot}",
+                "_text_Участок": plot,
                 "_sort_Участок": plot_sort,
                 "_fg_Участок": "#07414F",
                 "_bold_Участок": True,
@@ -544,14 +587,6 @@ class EnergyDebtWidget(QWidget):
                 "_text_Владелец": owner,
                 "_sort_Владелец": owner,
                 "_fg_Владелец": "#374151",
-
-                "_text_Последнее показание": last_reading_text,
-                "_sort_Последнее показание": reading_sort,
-                "_fg_Последнее показание": "#374151",
-
-                "_text_Дата показ.": last_date_text,
-                "_sort_Дата показ.": date_sort,
-                "_fg_Дата показ.": "#9CA3AF",
 
                 "_text_Без показ., мес.": "—" if mwr is None else str(mwr),
                 "_sort_Без показ., мес.": mwr or 0,
@@ -564,10 +599,6 @@ class EnergyDebtWidget(QWidget):
                 "_text_Оплачено": fmt_money(paid),
                 "_sort_Оплачено": paid,
                 "_fg_Оплачено": "#059669" if paid else "#9CA3AF",
-
-                "_text_Стартовое": fmt_money(base_amt) if base_amt else "—",
-                "_sort_Стартовое": base_amt,
-                "_fg_Стартовое": "#c97c7c" if base_amt else "#9CA3AF",
 
                 "_text_Долг / Аванс": fmt_money(debt),
                 "_sort_Долг / Аванс": debt,
@@ -588,30 +619,27 @@ class EnergyDebtWidget(QWidget):
             }
             rows.append(row)
 
-        # Поиск в шапке
-        for col_idx, text in self._search_filters.items():
-            if not text:
-                continue
-            col_name = _EnergyModel.COLUMNS[col_idx]
-            if col_name == "Участок":
-                rows = [r for r in rows if text in r.get("_text_Участок", "").lower()]
-            elif col_name == "Владелец":
-                rows = [r for r in rows if text in r.get("_text_Владелец", "").lower()]
+        # Применяем поиск — один запрос сразу по Участку и Владельцу
+        text = self._search_text
+        if text:
+            rows = [
+                r for r in rows
+                if text in str(r.get("_text_Участок", "")).lower()
+                or text in r.get("_text_Владелец", "").lower()
+            ]
 
-        # Фильтр по долгу
-        mode = self.cb_only_debt.currentText()
-        if mode == "Только должники":
+        # Вкладка-фильтр
+        if self._filter_mode == "debtors":
             rows = [r for r in rows if r.get("_sort_Долг / Аванс", 0.0) > 0.5]
-        elif mode == "Только аванс/0":
+        elif self._filter_mode == "nodebt":
             rows = [r for r in rows if r.get("_sort_Долг / Аванс", 0.0) <= 0.5]
-
-        if self.chk_stale_readings.isChecked():
+        elif self._filter_mode == "stale":
             rows = [r for r in rows if r.get("_sort_Без показ., мес.", 0) >= stale_threshold]
 
         self.model.load(rows)
 
         # Ширины колонок
-        widths = [85, 240, 140, 95, 110, 110, 110, 95, 120, 110, 120]
+        widths = [85, 240, 110, 110, 110, 120, 110, 120]
         for h in (self.hdr_view, self.tree.header()):
             h.setStretchLastSection(False)
             for c, w in enumerate(widths):
@@ -643,125 +671,19 @@ class EnergyDebtWidget(QWidget):
             f"общий долг (тип 1+2): {fmt_money(total_debt)}{stale_note}{auto_note}"
         )
 
-        # Сверка
-        try:
-            df = self._df
-            if df is None or df.empty:
-                date_from = energy._parse_iso(baseline.get("start_date", "")) or date(as_of.year, 1, 1)
-                date_to = as_of
-            else:
-                date_from = max(
-                    df["Дата"].min().date(),
-                    energy._parse_iso(baseline.get("start_date", "")) or df["Дата"].min().date(),
-                )
-                date_to = as_of
-            common = energy.load_common_meter()
-            rec = energy.reconcile(date_from, date_to, plots,
-                                    meters, rates, repls, common, df,
-                                    plot_records=plots_list)
-            extras = ""
-            if rec.common_kwh is not None:
-                extras = (f"  ·  общий счётчик: {rec.common_kwh:.0f} кВт·ч"
-                          f"  ·  частные: {rec.private_kwh:.0f} кВт·ч"
-                          f"  ·  потери: {rec.loss_kwh:.0f} кВт·ч"
-                          + (f" ({fmt_money(rec.loss_rub)})" if rec.loss_rub else ""))
-            self.recon_lbl.setText(
-                f"<b>Сверка с поставщиком</b> ({rec.period_from} — {rec.period_to}):  "
-                f"начислено садоводам {fmt_money(rec.charged_total)}  ·  "
-                f"собрано {fmt_money(rec.collected_total)}  ·  "
-                f"уплачено в Пермэнергосбыт {fmt_money(rec.paid_to_supplier)}  ·  "
-                f"расхождение {fmt_money(rec.collected_total - rec.paid_to_supplier)}"
-                + extras
-            )
-        except Exception as e:
-            self.recon_lbl.setText(f"Сверка недоступна: {e}")
-
     def _open_card(self, index: QModelIndex):
         if not index.isValid():
             return
         node = index.internalPointer()
         if node is None:
             return
-        plot = node.get("_text_Участок", "").replace("уч. ", "").strip()
+        plot = str(node.get("_text_Участок", "")).strip()
         if not plot:
             return
         as_of = self.date_as_of.date().toPyDate()
         dlg = PlotCardDialog(plot, self._df, self, as_of=as_of)
         _exec_dialog(dlg, self)
         self._rebuild()
-
-    def _export_debtor_receipts(self):
-        if self._df is None or len(self._df) == 0:
-            _AlertDialog.show_alert(self, "Квитанции", "Сначала загрузите выписку.")
-            return
-        meters = energy.load_meters()
-        rates = energy.load_rates()
-        repls = energy.load_replacements()
-        baseline = energy.load_baseline()
-        plots_recs = energy.load_plots()
-        by_num = {str(p.get("num", "")): p for p in plots_recs}
-        as_of = self.date_as_of.date().toPyDate()
-
-        # Должник = участок, где задолженность у ТЕКУЩЕГО собственника.
-        pay_idx = energy.payments_index(self._df, energy.CATS_ELECTRO_INCOME)
-        debtors: list[tuple[str, str]] = []
-        for plot in self._plot_list():
-            rec = by_num.get(plot, {})
-            owners_list = rec.get("owners", []) or []
-            rows = energy.balances_by_owner(
-                plot, as_of, meters, rates, repls, baseline, self._df,
-                owners_list, ownership_form=rec.get("ownership_form"),
-                plots=plots_recs, pay_index=pay_idx)
-            cur_debt = sum(r.debt for r in rows if r.is_current)
-            if cur_debt > 0.5:
-                cur_name = next((r.name for r in rows if r.is_current), "")
-                debtors.append((plot, cur_name))
-
-        if not debtors:
-            _AlertDialog.show_alert(self, "Квитанции", "Должников нет — квитанции не нужны.")
-            return
-        folder = QFileDialog.getExistingDirectory(self, "Папка для квитанций")
-        if not folder:
-            return
-        try:
-            from core import receipt
-        except ImportError as e:
-            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось импортировать модуль квитанций:\n{e}")
-            return
-
-        ok = 0
-        errors = []
-        # Пакетная генерация PDF заметно долгая — курсор занятости, чтобы
-        # окно не выглядело зависшим (U1 из аудита UI).
-        from PyQt6.QtWidgets import QApplication
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            for plot, cur_name in debtors:
-                surname = cur_name.split()[0] if cur_name else ""
-                fname = f"Уч_{plot}"
-                if surname:
-                    safe_surname = re.sub(r"[^\w\-]", "_", surname)
-                    fname += f"_{safe_surname}"
-                fname += f"_{as_of.isoformat()}.pdf"
-                fname = fname.replace("/", "-")
-                path = os.path.join(folder, fname)
-                try:
-                    receipt.save_plot_receipt_pdf(plot, self._df, path, as_of=as_of)
-                    ok += 1
-                except Exception as e:
-                    errors.append(f"уч. {plot}: {e}")
-        finally:
-            QApplication.restoreOverrideCursor()
-        if errors:
-            _AlertDialog.show_alert(
-                self, "Квитанции",
-                f"Создано: {ok}\nОшибки ({len(errors)}):\n" + "\n".join(errors[:10])
-            )
-        else:
-            _AlertDialog.show_alert(
-                self, "Квитанции",
-                f"✅  Сформировано {ok} квитанций в:\n{folder}"
-            )
 
     def _export_excel(self):
         path, _ = QFileDialog.getSaveFileName(
