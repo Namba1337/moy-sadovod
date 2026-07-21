@@ -694,7 +694,7 @@ class EnergyDebtWidget(QWidget):
             path += ".xlsx"
 
         headers = [
-            self.hdr_view.headerData(c, Qt.Orientation.Horizontal)
+            self.model.headerData(c, Qt.Orientation.Horizontal)
             for c in range(self.model.columnCount())
         ]
         rows = []

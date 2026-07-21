@@ -257,6 +257,14 @@ def _month_iter(start: date, count: int) -> list[tuple[int, int]]:
     return out
 
 
+def _months_in_period(period: "Period") -> int:
+    """Число календарных месяцев, покрываемых периодом [date_from, date_to]
+    (включительно) — периоды ЧВ не всегда ровно 12 месяцев, date_to задаётся
+    вручную в тарифах (ui/rates_widget.py)."""
+    return ((period.date_to.year - period.date_from.year) * 12
+            + (period.date_to.month - period.date_from.month) + 1)
+
+
 @dataclass
 class MonthBar:
     year: int
@@ -281,10 +289,10 @@ class MonthCategoryBar:
 
 def monthly_breakdown(df: Optional[pd.DataFrame],
                       period: Optional[Period]) -> list[MonthBar]:
-    """Помесячные приход/расход за 12 месяцев периода."""
+    """Помесячные приход/расход за все месяцы периода."""
     if period is None:
         return []
-    months = _month_iter(period.date_from, 12)
+    months = _month_iter(period.date_from, _months_in_period(period))
     if df is None:
         return [MonthBar(y, m, _MONTH_RU[m], 0.0, 0.0) for (y, m) in months]
 
@@ -309,7 +317,7 @@ def monthly_breakdown(df: Optional[pd.DataFrame],
 def monthly_category_breakdown(df: Optional[pd.DataFrame],
                                period: Optional[Period],
                                kind: str) -> list[MonthCategoryBar]:
-    """Помесячный поток по категориям за 12 месяцев периода.
+    """Помесячный поток по категориям за все месяцы периода.
 
     kind: 'income' — положительные операции, 'expense' — отрицательные.
     Операция с ручной разбивкой (см. energy.parse_breakdown) учитывается
@@ -319,7 +327,7 @@ def monthly_category_breakdown(df: Optional[pd.DataFrame],
     программы)."""
     if period is None:
         return []
-    months = _month_iter(period.date_from, 12)
+    months = _month_iter(period.date_from, _months_in_period(period))
     if df is None:
         return [MonthCategoryBar(y, m, _MONTH_RU[m], []) for y, m in months]
 
@@ -340,11 +348,15 @@ def monthly_category_breakdown(df: Optional[pd.DataFrame],
         for _, row in g[has_breakdown].iterrows():
             for item in energy.parse_breakdown(row.get("_breakdown"), total=row.get("Сумма")):
                 item_amt = energy._to_float(item.get("Сумма"))
-                if item_amt is None or item_amt <= 0:
+                # Строки разбивки несут знак родителя (отрицательный для
+                # расхода) — берём модуль и заново применяем знак родителя,
+                # а не требуем item_amt > 0 (иначе разбивка расходной
+                # операции целиком пропадала бы из графика).
+                if item_amt is None or abs(item_amt) < 0.005:
                     continue
                 r = row.copy()
                 r["Категория"] = str(item.get("Категория", "")).strip() or "Прочее"
-                r["_s"] = item_amt if row["_s"] >= 0 else -item_amt
+                r["_s"] = abs(item_amt) if row["_s"] >= 0 else -abs(item_amt)
                 exploded_rows.append(r)
         exploded = (pd.DataFrame(exploded_rows) if exploded_rows
                     else g.iloc[0:0].copy())
@@ -425,10 +437,12 @@ def category_breakdown(df: Optional[pd.DataFrame], d0: date, d1: date,
         if breakdown:
             for item in breakdown:
                 item_amt = energy._to_float(item.get("Сумма"))
-                if item_amt is None or item_amt <= 0:
+                # Строки разбивки несут знак родителя (отрицательный для
+                # расхода) — берём модуль, а не требуем item_amt > 0.
+                if item_amt is None or abs(item_amt) < 0.005:
                     continue
                 item_cat = str(item.get("Категория", "")).strip() or "Прочее"
-                totals[item_cat] = totals.get(item_cat, 0.0) + item_amt
+                totals[item_cat] = totals.get(item_cat, 0.0) + abs(item_amt)
             continue
         cat = str(row.get("Категория", "")).strip() or "Прочее"
         amt = abs(float(row["_s"]))
