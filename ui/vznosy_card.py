@@ -6,7 +6,7 @@ from datetime import date
 from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QComboBox, QDateEdit, QDialog, QFileDialog,
+    QComboBox, QDateEdit, QDialog,
     QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTabWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
@@ -15,14 +15,47 @@ from PyQt6.QtWidgets import (
 from core import energy
 from core.utils import fmt_money
 from ui.buttons import GhostButton, PrimaryButton, SecondaryButton
-from ui.common import style_date_popup
+from ui.common import ClipFrame, style_date_popup
 from ui.dialogs import (
     AlertDialog as _AlertDialog,
     BaseDialog as _FramelessDialog,
     ConfirmDialog as _ConfirmDialog,
     exec_dialog as _exec_dialog,
 )
-from ui.theme import C, FS
+from ui.plots_widget import _is_visible
+from ui.theme import C, FS, RAD
+
+
+def _group_primary_name(group: dict, empty: str = "—") -> str:
+    """ФИО «под звёздочкой» (is_visible) для группы/договора, иначе первый
+    собственник — тот же принцип, что и в главном списке участков и
+    таблице долгов ЧВ (см. _plot_primary_owner в ui.plots_widget), вместо
+    полного списка через запятую (core.ownership.group_label): для
+    архивных групп список всех совладельцев в одной ячейке был слишком
+    длинным, а нужен только тот, кто был отмечен звёздочкой именно у ЭТОГО
+    (в т.ч. прошлого) договора — у каждой группы своя запись owners."""
+    from core import ownership as own
+    owners = own.group_owners(group)
+    if not owners:
+        return empty
+    visible = next((o for o in owners if _is_visible(o)), None)
+    main = visible or next((o for o in owners if own.is_owner(o)), owners[0])
+    name = own.owner_name(main) if main else ""
+    return name if name else empty
+
+
+def _clip_table(table: QTableWidget) -> ClipFrame:
+    """Оборачивает таблицу в ClipFrame — маска под скруглённые углы вкладки
+    (QTabWidget::pane имеет border-radius:6px), иначе квадратная заливка
+    строк таблицы (viewport со скроллом рисует поверх собственной QSS-рамки
+    таблицы) вылезает за скруглённый край панели — тот же баг, что уже
+    чинили в «Периодах членских взносов» (rates_widget.py)."""
+    frame = ClipFrame(QColor(0, 0, 0, 0), RAD.FRAME)
+    fl = QVBoxLayout(frame)
+    fl.setContentsMargins(0, 0, 0, 0)
+    fl.addWidget(table)
+    frame.finish_setup()
+    return frame
 
 
 class VznosyAdjustmentDialog(_FramelessDialog):
@@ -172,20 +205,34 @@ class VznosyCardDialog(_FramelessDialog):
         lay.setSpacing(10)
 
         from core import vznosy
-        owners = energy.owners_map().get(self._plot, [])
-        owners_text = ", ".join(owners) if owners else "владельцы не указаны"
+        from core import ownership as own
+        active = own.active_group(energy.plot_record(self._plot))
+        owners_text = (_group_primary_name(active, empty="владельцы не указаны")
+                       if active else "владельцы не указаны")
         area = vznosy.plot_area_map().get(self._plot)
         area_text = f"{area:g} м²" if area is not None else "площадь не указана"
 
+        # ── Верхний ряд: заголовок + действие + закрыть ───────────
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
         self.head = QLabel(
             f"<b>Участок {self._plot}</b>  ·  {owners_text}  ·  {area_text}"
         )
         self.head.setStyleSheet("font-size:14px;color:#111827;background:transparent;")
-        lay.addWidget(self.head)
+        top_row.addWidget(self.head, 1)
 
-        self.summary_lbl = QLabel("")
-        self.summary_lbl.setStyleSheet("color:#9CA3AF;background:transparent;font-size:12px;")
-        lay.addWidget(self.summary_lbl)
+        btn_adj = SecondaryButton("Корректировка начислений", icon="tune")
+        btn_adj.clicked.connect(lambda: self._add_adjustment("charge_override"))
+        top_row.addWidget(btn_adj)
+
+        btn_close = QPushButton("✕", objectName="btnPanelClose")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_close.clicked.connect(self.accept)
+        top_row.addWidget(btn_close)
+
+        lay.addLayout(top_row)
 
         self.warning_lbl = QLabel("")
         self.warning_lbl.setStyleSheet(
@@ -212,12 +259,20 @@ class VznosyCardDialog(_FramelessDialog):
             "Период", "Группа/договор", "Тариф", "Начислено", "Оплачено за период",
             "Корректировка", "Баланс нараст.",
         ])
+        # «Тариф» — самая длинная по содержимому колонка (напр. «15 ₽/м² ·
+        # 545 м² → 8 175,00 ₽») — растягивается на остаток ширины, чтобы
+        # таблица целиком помещалась в окно без горизонтальной прокрутки;
+        # остальные колонки — под фиксированный, но компактный контент.
         hdr = self.table.horizontalHeader()
-        for c, w in enumerate([200, 170, 240, 120, 140, 190, 130]):
-            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
-            self.table.setColumnWidth(c, w)
+        widths = [150, 130, None, 95, 120, 140, 105]
+        for c, w in enumerate(widths):
+            if w is None:
+                hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+            else:
+                hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+                self.table.setColumnWidth(c, w)
         hdr.setStretchLastSection(False)
-        t1_lay.addWidget(self.table, 1)
+        t1_lay.addWidget(_clip_table(self.table), 1)
         self.tabs.addTab(tab1, "Разбивка по периодам")
 
         # Вкладка 2: разбивка по собственникам
@@ -238,7 +293,7 @@ class VznosyCardDialog(_FramelessDialog):
             ohdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
             self.owners_table.setColumnWidth(c, w)
         ohdr.setStretchLastSection(True)
-        t2_lay.addWidget(self.owners_table, 1)
+        t2_lay.addWidget(_clip_table(self.owners_table), 1)
         self._owners_tab_idx = self.tabs.addTab(tab2, "По группам / собственникам")
 
         # Вкладка 3: ручные операции и корректировки
@@ -254,32 +309,30 @@ class VznosyCardDialog(_FramelessDialog):
         self.adj_table.setHorizontalHeaderLabels([
             "Дата", "Тип", "Период", "Сумма", "Примечание", "",
         ])
+        # «Примечание» растягивается на остаток — тот же приём, что и у
+        # «Тариф» в разбивке по периодам (см. выше), чтобы не было
+        # горизонтальной прокрутки; последняя колонка — узкая, только под
+        # кнопку удаления, стретчиться незачем.
         ahdr = self.adj_table.horizontalHeader()
-        for c, w in enumerate([110, 200, 80, 120, 380, 40]):
-            ahdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
-            self.adj_table.setColumnWidth(c, w)
+        adj_widths = [100, 160, 70, 100, None, 36]
+        for c, w in enumerate(adj_widths):
+            if w is None:
+                ahdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+            else:
+                ahdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+                self.adj_table.setColumnWidth(c, w)
         ahdr.setStretchLastSection(False)
-        t3_lay.addWidget(self.adj_table, 1)
+        t3_lay.addWidget(_clip_table(self.adj_table), 1)
         self.tabs.addTab(tab3, "Ручные операции и корректировки")
 
         lay.addWidget(self.tabs, 1)
 
-        # ── Кнопки внизу ──────────────────────────────────────────
-        bottom = QHBoxLayout()
-        btn_adj = SecondaryButton("Корректировка начислений", icon="tune")
-        btn_adj.clicked.connect(lambda: self._add_adjustment("charge_override"))
-        bottom.addWidget(btn_adj)
-
-        btn_pdf = SecondaryButton("Сохранить PDF-квитанцию", icon="pdf")
-        btn_pdf.clicked.connect(self._on_pdf)
-        bottom.addWidget(btn_pdf)
-
-        bottom.addStretch()
-        # «Закрыть» — не главное действие карточки, а её закрытие: secondary.
-        btn_close = SecondaryButton("Закрыть")
-        btn_close.clicked.connect(self.accept)
-        bottom.addWidget(btn_close)
-        lay.addLayout(bottom)
+        # ── Подсказка-сводка — под таблицей, как и в других местах
+        # приложения (см. objectName="statusLabel" в rates_widget.py,
+        # vznosy_debt_widget.py).
+        self.summary_lbl = QLabel("", objectName="statusLabel")
+        self.summary_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        lay.addWidget(self.summary_lbl)
 
         self.setStyleSheet(self.base_qss() + f"""
             QTabWidget#vznosyTabs::pane {{
@@ -312,9 +365,11 @@ class VznosyCardDialog(_FramelessDialog):
                                        rates, adj, self._df)
         py = vznosy.paid_by_period(self._plot, self._df, self._as_of, periods, adj)
 
-        # Обновить заголовок (площадь могла измениться)
-        owners = energy.owners_map().get(self._plot, [])
-        owners_text = ", ".join(owners) if owners else "владельцы не указаны"
+        # Обновить заголовок (площадь и/или активная группа могли измениться)
+        from core import ownership as own
+        active = own.active_group(energy.plot_record(self._plot))
+        owners_text = (_group_primary_name(active, empty="владельцы не указаны")
+                       if active else "владельцы не указаны")
         area_text = f"{area:g} м²" if area is not None else "площадь не указана"
         self.head.setText(
             f"<b>Участок {self._plot}</b>  ·  {owners_text}  ·  {area_text}"
@@ -331,7 +386,6 @@ class VznosyCardDialog(_FramelessDialog):
             self.warning_lbl.setVisible(False)
 
         # Главная таблица периодов
-        from core import ownership as own
         plot_rec = energy.plot_record(self._plot)
         self.table.setRowCount(len(bal.breakdown))
         cum = 0.0
@@ -343,16 +397,18 @@ class VznosyCardDialog(_FramelessDialog):
                 else:
                     period_label = f"{y.period_from.strftime('%d.%m.%Y')}—..."
 
-                # Группа/договор, действовавшая в периоде
+                # Группа/договор, действовавшая в периоде — ФИО «под
+                # звёздочкой» этой группы, не полный список совладельцев
+                # (см. _group_primary_name).
                 g_from = own.group_at(plot_rec, y.period_from)
-                group_text = own.group_label(g_from, empty="—") if g_from else "—"
+                group_text = _group_primary_name(g_from) if g_from else "—"
                 group_color = "#374151" if g_from else "#9CA3AF"
                 if y.period_to:
                     g_to = own.group_at(plot_rec, y.period_to)
                     key_from = (own.group_since(g_from), own.group_until(g_from)) if g_from else None
                     key_to = (own.group_since(g_to), own.group_until(g_to)) if g_to else None
                     if key_to != key_from:
-                        to_text = own.group_label(g_to, empty="—") if g_to else "—"
+                        to_text = _group_primary_name(g_to) if g_to else "—"
                         group_text = f"{group_text} → {to_text}"
                         group_color = "#B45309"
 
@@ -492,7 +548,6 @@ class VznosyCardDialog(_FramelessDialog):
         rec = energy.plot_record(self._plot)
 
         # Новая модель: groups
-        groups = own.plot_groups(rec)
         archived = own.archived_groups(rec)
         active = own.active_group(rec)
         has_groups_model = "groups" in rec
@@ -511,7 +566,7 @@ class VznosyCardDialog(_FramelessDialog):
                     gb = vznosy.balance_for_active_group(
                         self._plot, area, self._as_of, rates, adj, self._df, since=since)
                     all_rows.append({
-                        "name": own.group_label(active, empty="(нет лиц)"),
+                        "name": _group_primary_name(active, empty="(нет лиц)"),
                         "period": self._fmt_ownership_period(since, None),
                         "charged": gb.charged,
                         "paid": gb.paid,
@@ -523,7 +578,7 @@ class VznosyCardDialog(_FramelessDialog):
             for g in archived:
                 debt_v = (g.get("debt_at_close") or {}).get("vznosy", 0.0) or 0.0
                 all_rows.append({
-                    "name": own.group_label(g, empty="(без ФИО)"),
+                    "name": _group_primary_name(g, empty="(без ФИО)"),
                     "period": self._fmt_ownership_period(own.group_since(g), own.group_until(g)),
                     "charged": None,
                     "paid": None,
@@ -625,25 +680,4 @@ class VznosyCardDialog(_FramelessDialog):
                 adj.pop(self._plot, None)
             vznosy.save_adjustments(adj)
             self._rebuild()
-
-    def _on_pdf(self):
-        try:
-            from core import receipt
-        except ImportError:
-            _AlertDialog.show_alert(self, "Квитанции",
-                                    "Модуль квитанций ещё не подключён.")
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить квитанцию",
-            f"Уч_{self._plot}_ЧВ_{self._as_of.isoformat()}.pdf",
-            "PDF (*.pdf)"
-        )
-        if not path:
-            return
-        try:
-            receipt.save_vznosy_receipt_pdf(self._plot, self._df, path,
-                                            as_of=self._as_of)
-            _AlertDialog.show_alert(self, "Квитанция", f"Сохранено:\n{path}")
-        except Exception as e:
-            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось сохранить:\n{e}")
 

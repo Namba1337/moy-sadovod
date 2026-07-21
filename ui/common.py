@@ -323,6 +323,11 @@ class FlatTableModel(QAbstractItemModel):
     """
 
     COLUMNS: list[str] = []
+    # Опциональная подмена заголовка для конкретного столбца (внутренний
+    # ключ COLUMNS остаётся прежним — им завязаны все _text_/_sort_/…
+    # ключи строк, меняется только отображаемый текст шапки). Тот же приём,
+    # что и в detail_widget.py («Участок» → «№ уч.»).
+    HEADER_LABELS: dict[str, str] = {}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -331,6 +336,8 @@ class FlatTableModel(QAbstractItemModel):
     def load(self, rows: list[dict]):
         self.beginResetModel()
         self._rows = list(rows)
+        for i, r in enumerate(self._rows):
+            r["_orig_idx"] = i
         self.endResetModel()
 
     def top_nodes(self) -> list[dict]:
@@ -377,19 +384,23 @@ class FlatTableModel(QAbstractItemModel):
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             if 0 <= section < len(self.COLUMNS):
-                return self.COLUMNS[section]
+                col = self.COLUMNS[section]
+                return self.HEADER_LABELS.get(col, col)
         return None
 
     def sort(self, column, order=Qt.SortOrder.AscendingOrder):
-        if not (0 <= column < len(self.COLUMNS)):
-            return
-        col = self.COLUMNS[column]
-        sort_key = f"_sort_{col}"
         self.layoutAboutToBeChanged.emit()
-        self._rows.sort(
-            key=lambda r: (r.get(sort_key) is None, r.get(sort_key, 0.0)),
-            reverse=(order == Qt.SortOrder.DescendingOrder),
-        )
+        if 0 <= column < len(self.COLUMNS):
+            col = self.COLUMNS[column]
+            sort_key = f"_sort_{col}"
+            self._rows.sort(
+                key=lambda r: (r.get(sort_key) is None, r.get(sort_key, 0.0)),
+                reverse=(order == Qt.SortOrder.DescendingOrder),
+            )
+        else:
+            # Столбец вне диапазона (3-е состояние сортировки — сброс):
+            # возвращаем исходный порядок вставки, см. load().
+            self._rows.sort(key=lambda r: r.get("_orig_idx", 0))
         self.layoutChanged.emit()
 
 
@@ -484,12 +495,18 @@ class SortHeaderView(QHeaderView):
     _IC_CHARS = {chr(0xE73A), chr(0xF567), chr(0xF0DC)}  # иконки-индикаторы
     _IC_COLOR = QColor("#F59E0B")
 
-    def __init__(self, parent=None):
+    _SORT_W = 18   # ширина зоны иконки сортировки (режим sort_left)
+
+    def __init__(self, parent=None, sort_left: bool = False):
         super().__init__(Qt.Orientation.Horizontal, parent)
-        self.setSectionsClickable(True)
+        # sort_left=True — как в «Операциях»: стрелка сортировки слева от
+        # текста, клик работает только по стрелке (не по всей секции), 3
+        # состояния по кругу (по возрастанию → по убыванию → без сортировки).
+        self._sort_left = sort_left
+        self.setSectionsClickable(not sort_left)
         self.setSortIndicatorShown(False)
         self.setFixedHeight(34)
-        self.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        self.setSortIndicator(-1 if sort_left else 0, Qt.SortOrder.AscendingOrder)
         self.setMouseTracking(True)
         self._del_col        = -1
         self._has_sel        = False
@@ -506,6 +523,14 @@ class SortHeaderView(QHeaderView):
 
     def set_delete_col(self, col: int):
         self._del_col = col
+
+    def _content_left(self, sec_left: int) -> int:
+        """(sort_left) X, с которого начинается текст — после иконки сортировки."""
+        return sec_left + 4 + self._SORT_W + 4
+
+    def _sort_icon_zone(self, sec_rect: QRect) -> QRect:
+        """(sort_left) QRect стрелки сортировки — слева, перед текстом."""
+        return QRect(sec_rect.left() + 4, sec_rect.top(), self._SORT_W, sec_rect.height())
 
     def _indicator_zones(self, logical_index: int, rect: QRect) -> list:
         """Возвращает [(QRect, tooltip)] для каждого индикатора, справа налево."""
@@ -681,6 +706,22 @@ class SortHeaderView(QHeaderView):
                     self._toggle_search(logical)
                     return
 
+            # sort_left: клик только по стрелке, 3 состояния по кругу — по
+            # возрастанию → по убыванию → без сортировки (исходный порядок).
+            if self._sort_left and logical >= 0:
+                sec_x    = self.sectionViewportPosition(logical)
+                sec_rect = QRect(sec_x, 0, self.sectionSize(logical), self.height())
+                if self._sort_icon_zone(sec_rect).contains(pos):
+                    cur_col   = self.sortIndicatorSection()
+                    cur_order = self.sortIndicatorOrder()
+                    if cur_col != logical:
+                        self.setSortIndicator(logical, Qt.SortOrder.AscendingOrder)
+                    elif cur_order == Qt.SortOrder.AscendingOrder:
+                        self.setSortIndicator(logical, Qt.SortOrder.DescendingOrder)
+                    else:
+                        self.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+                    return
+
         super().mousePressEvent(event)
 
     # -- paint ----------------------------------------------------------------
@@ -721,6 +762,33 @@ class SortHeaderView(QHeaderView):
                     painter.setPen(self._FG)
                 painter.setFont(f_ic)
                 painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+            elif self._sort_left:
+                sort_rect    = self._sort_icon_zone(rect)
+                content_left = self._content_left(rect.left())
+                text_rect    = QRect(content_left, rect.top(),
+                                     rect.right() - content_left - 4, rect.height())
+                painter.setPen(self._FG)
+                f = QFont(); f.setPixelSize(12); f.setBold(True)
+                painter.setFont(f)
+                painter.drawText(text_rect,
+                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                 label)
+
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                cx = sort_rect.left() + sort_rect.width() // 2
+                cy = sort_rect.top() + sort_rect.height() // 2
+                is_sorted = (self.sortIndicatorSection() == logical_index)
+                asc  = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+                desc = is_sorted and self.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(self._ARR_ON if asc else self._ARR_OFF)
+                painter.drawPolygon(QPolygon([
+                    QPoint(cx - 4, cy - 1), QPoint(cx + 4, cy - 1), QPoint(cx, cy - 6),
+                ]))
+                painter.setBrush(self._ARR_ON if desc else self._ARR_OFF)
+                painter.drawPolygon(QPolygon([
+                    QPoint(cx - 4, cy + 1), QPoint(cx + 4, cy + 1), QPoint(cx, cy + 6),
+                ]))
             else:
                 arr_w    = 18
                 arr_rect = QRect(rect.right() - arr_w - 2, rect.top(), arr_w, rect.height())
