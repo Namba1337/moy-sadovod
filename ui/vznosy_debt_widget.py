@@ -1,12 +1,10 @@
-import os
-import re
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QDate, QModelIndex, QPoint, pyqtSignal
+from PyQt6.QtCore import Qt, QDate, QModelIndex, QPoint, QSize, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QDateEdit, QFileDialog,
-    QFrame, QHBoxLayout, QHeaderView, QLabel, QMenu,
+    QAbstractItemView, QCheckBox, QDateEdit,
+    QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
     QPushButton, QStyleFactory, QVBoxLayout, QWidget, QWidgetAction,
 )
 
@@ -14,6 +12,8 @@ from core import energy
 from core.utils import fmt_money
 from ui.buttons import SecondaryButton
 from ui.common import (
+    CalendarArrowFlip,
+    NoJumpDateEdit,
     SortHeaderView as _SortHeaderView,
     ClipFrame as _ClipFrame,
     FlatTableModel as _FlatTableModel,
@@ -22,9 +22,9 @@ from ui.common import (
     SB_W as _SB_W,
     style_date_popup,
 )
+from ui.icons import get_icon as _get_icon, icon_png_path as _icon_png_path
 from ui.theme import C
 from ui.dialogs import (
-    AlertDialog as _AlertDialog,
     BaseDialog as _FramelessDialog,
     exec_dialog as _exec_dialog,
 )
@@ -44,14 +44,27 @@ class _VznosyModel(_FlatTableModel):
         "Участок", "Собственник", "Площадь, м²",
         "Начислено", "Оплачено", "Долг / Аванс",
     ]
+    # Заголовок «№ уч.» — как в «Операциях»; внутренний ключ "Участок"
+    # (_text_Участок/_sort_Участок и т.д.) не меняется.
+    HEADER_LABELS = {"Участок": "№ уч."}
 
 
 # ============================================================================ #
 #  Кнопка мультивыбора периодов                                                #
 # ============================================================================ #
 
+# Стиль поля даты/фильтра-кнопки — как у «Дата начала:» в карточке группы
+# участка (см. ctx.since_date_edit в ui.plots_widget), а не общий блёклый
+# QDateEdit#datePicker/QComboBox#filterCombo: белый фон, синевато-серая
+# рамка, скруглённые углы, свой шеврон вместо системной стрелки.
+_DATE_PILL_BORDER = "#C9D8E2"
+_DATE_PILL_HOVER   = "#DCE7EC"
+
+
 class _PeriodFilterButton(QWidget):
-    """Кнопка с выпадающим меню чекбоксов для выбора периодов ЧВ.
+    """Кнопка с выпадающим меню чекбоксов для выбора периодов ЧВ — визуально
+    в едином стиле с полем «на дату» (см. _DATE_PILL_BORDER), а не старая
+    цветная пилюля.
 
     Идентификатор периода — ``date_from`` в ISO-формате (как в
     :func:`core.vznosy.balance_for_periods`). Выбор по умолчанию — «все».
@@ -61,6 +74,12 @@ class _PeriodFilterButton(QWidget):
 
     selectionChanged = pyqtSignal(object)   # set[str] выбранных ключей
 
+    _BTN_SS = (
+        "QPushButton{background:#FFFFFF;border:1px solid " + _DATE_PILL_BORDER + ";"
+        "border-radius:6px;padding:6px 10px;font-size:12px;color:#1F2937;text-align:left;}"
+        "QPushButton:hover{background:" + _DATE_PILL_HOVER + ";}"
+    )
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._periods: list[tuple[str, str]] = []   # (key, label)
@@ -68,10 +87,9 @@ class _PeriodFilterButton(QWidget):
 
         lyt = QHBoxLayout(self)
         lyt.setContentsMargins(0, 0, 0, 0)
-        lyt.setSpacing(6)
-        lyt.addWidget(QLabel("периоды:", objectName="filterLabel"))
-        self._btn = QPushButton("Все  ▾")
+        self._btn = QPushButton()
         self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn.setStyleSheet(self._BTN_SS)
         self._btn.clicked.connect(self._open_menu)
         lyt.addWidget(self._btn)
         self._update_label()
@@ -94,33 +112,14 @@ class _PeriodFilterButton(QWidget):
         n = len(self._periods)
         s = len(self._selected)
         if n == 0 or s == n:
-            self._btn.setText("Все  ▾")
-            self._btn.setStyleSheet("""
-                QPushButton {
-                    background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
-                    color: #374151; padding: 2px 8px; font-size: 12px;
-                }
-                QPushButton:hover { background: #F3F4F6; }
-            """)
+            text = "Все периоды"
         elif s == 0:
-            self._btn.setText("Ничего  ▾")
-            self._btn.setStyleSheet("""
-                QPushButton {
-                    background: #FEE2E2; border: 1px solid #FCA5A5; border-radius: 11px;
-                    color: #991B1B; padding: 2px 10px; font-size: 11px; font-weight: 500;
-                }
-                QPushButton:hover { background: #FECACA; }
-            """)
+            text = "Периоды не выбраны"
+        elif s == 1:
+            text = dict(self._periods).get(next(iter(self._selected)), "1 период")
         else:
-            self._btn.setText(f"{s} из {n}  ▾")
-            self._btn.setStyleSheet("""
-                QPushButton {
-                    background: rgba(7,65,79,0.1); border: 1px solid rgba(7,65,79,0.35);
-                    border-radius: 11px; color: #07414F;
-                    padding: 2px 10px; font-size: 11px; font-weight: 500;
-                }
-                QPushButton:hover { background: rgba(7,65,79,0.18); }
-            """)
+            text = f"Периодов: {s} из {n}"
+        self._btn.setText(f"{text}  ▾")
 
     def _open_menu(self):
         menu = QMenu(self)
@@ -208,18 +207,23 @@ class _RatesDialog(_FramelessDialog):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        header = QHBoxLayout()
-        header.setContentsMargins(12, 10, 12, 0)
-        header.addStretch()
-        btn_close = QPushButton("✕", objectName="btnPanelClose")
-        btn_close.setFixedSize(24, 24)
-        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_close.clicked.connect(self.reject)
-        header.addWidget(btn_close)
-        lay.addLayout(header)
+        # «✕» встраивается прямо в title_row виджета (тот же ряд, что и
+        # название) — так название стоит выше, без отдельного пустого
+        # ряда-шапки над ним. detach_close_button() убирает кнопку обратно
+        # при закрытии — rates_widget переиспользуется между открытиями.
+        self._rates_widget = rates_widget
+        self._btn_close = QPushButton("✕", objectName="btnPanelClose")
+        self._btn_close.setFixedSize(24, 24)
+        self._btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_close.clicked.connect(self.reject)
+        rates_widget.title_row.addWidget(self._btn_close)
 
         lay.addWidget(rates_widget, stretch=1)
+
+    def detach_close_button(self):
+        self._rates_widget.title_row.removeWidget(self._btn_close)
+        self._btn_close.setParent(None)
 
 
 # ============================================================================ #
@@ -235,7 +239,7 @@ class VznosyDebtWidget(QWidget):
         self._df = None
         self._last_debts: dict = {}
         self._col_syncing = False
-        self._search_filters: dict[int, str] = {}
+        self._search_text = ""
         self._setup_ui()
         self._rebuild()
 
@@ -244,71 +248,96 @@ class VznosyDebtWidget(QWidget):
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(12)
 
+        # ── Заголовок вкладки + фильтры — один ряд ────────────────────────────
         top = QHBoxLayout()
-
-        self.chk_active_only = QCheckBox("Только активный договор")
-        self.chk_active_only.setChecked(True)
-        self.chk_active_only.setToolTip(
-            "Если включено — начисления и оплаты считаются только с даты начала "
-            "текущей активной группы (договора). Если выключено — вся история "
-            "участка, включая прежних собственников."
-        )
-        self.chk_active_only.stateChanged.connect(self._rebuild)
-        top.addWidget(self.chk_active_only)
-
-        self.period_filter = _PeriodFilterButton()
-        self.period_filter.selectionChanged.connect(lambda _: self._rebuild())
-        top.addWidget(self.period_filter)
-
+        top.setSpacing(8)
+        lbl_title = QLabel("Взносы")
+        lbl_title.setStyleSheet(
+            "font-size:14px; font-weight:700; color:#1F2937; background:transparent;")
+        top.addWidget(lbl_title)
         top.addStretch()
 
         top.addWidget(QLabel("на дату:", objectName="filterLabel"))
-        self.date_as_of = QDateEdit(calendarPopup=True, objectName="datePicker",
-                                    displayFormat="dd.MM.yyyy")
+        # NoJumpDateEdit + ручной QSS — тот же стиль, что и «Дата начала:» в
+        # карточке группы участка (ui.plots_widget), вместо блёклого общего
+        # QDateEdit#datePicker: белый фон, синевато-серая рамка, свой шеврон.
+        self.date_as_of = NoJumpDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
         style_date_popup(self.date_as_of)
+        self.date_as_of.setFixedWidth(110)
+        _arr_dn = _icon_png_path("expand_more", 12, color="#6B7280")
+        _arr_up = _icon_png_path("expand_less", 12, color="#6B7280")
+        self.date_as_of.setStyleSheet(
+            "QDateEdit{background:#FFFFFF;border:1px solid " + _DATE_PILL_BORDER + ";"
+            "border-radius:6px;padding:2px 4px 2px 6px;font-size:12px;color:#1F2937;}"
+            "QDateEdit::drop-down{subcontrol-origin:padding;subcontrol-position:right;"
+            "width:18px;border:none;border-left:1px solid " + _DATE_PILL_BORDER + ";"
+            "background:transparent;border-top-right-radius:6px;border-bottom-right-radius:6px;}"
+            "QDateEdit::drop-down:hover{background:" + _DATE_PILL_HOVER + ";}"
+            f"QDateEdit::down-arrow{{image:url({_arr_dn});width:12px;height:12px;}}"
+            f'QDateEdit[calOpen="true"]::down-arrow{{image:url({_arr_up});}}')
+        CalendarArrowFlip(self.date_as_of)
         self.date_as_of.setDate(QDate.currentDate())
         self.date_as_of.setMaximumDate(QDate.currentDate())
         self.date_as_of.dateChanged.connect(self._rebuild)
         top.addWidget(self.date_as_of)
 
+        # Фильтр периодов — множественный выбор (чекбоксы), кнопка в том же
+        # визуальном стиле, что и поле даты выше.
+        self.period_filter = _PeriodFilterButton()
+        self.period_filter.selectionChanged.connect(lambda _: self._rebuild())
+        top.addWidget(self.period_filter)
+
         # Кнопки «Пересчитать» больше нет: любое изменение фильтров/даты и так
         # вызывает _rebuild (U2 из аудита UI).
-        self.btn_mass_pdf = SecondaryButton("Квитанции должникам", icon="receipt")
-        self.btn_mass_pdf.clicked.connect(self._export_debtor_receipts)
-        top.addWidget(self.btn_mass_pdf)
-
         btn_rates = SecondaryButton("Периоды", icon="calendar")
         btn_rates.clicked.connect(self._open_rates_dialog)
         top.addWidget(btn_rates)
 
-        btn_excel = SecondaryButton("Экспорт в Excel", icon="excel")
-        btn_excel.clicked.connect(self._export_excel)
-        top.addWidget(btn_excel)
-
         lay.addLayout(top)
 
-        # Легенда — те же цвета, что и заливка строк (C.DEBT / C.DEBT_BG)
-        legend = QHBoxLayout()
-        legend.setSpacing(20)
-        for color, text in [
-            (C.DEBT["ok"],   "■  без долга / аванс"),
-            (C.DEBT["low"],  "■  небольшой долг"),
-            (C.DEBT["mid"],  "■  средний"),
-            (C.DEBT["high"], "■  крупный"),
-        ]:
-            lb = QLabel(text)
-            lb.setStyleSheet(
-                f"color:{color};background:transparent;font-size:11px;"
-            )
-            legend.addWidget(lb)
-        legend.addStretch()
-        lay.addLayout(legend)
+        # ── Поиск по участку/собственнику — тот же приём, что и в «Операциях» ──
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 4, 0, 4)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Поиск по участку или собственнику")
+        self._search.setClearButtonEnabled(True)
+        self._search.setMinimumWidth(220)
+        self._search.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._search.setStyleSheet(
+            "QLineEdit{background:transparent;border:none;border-bottom:2px solid #D1D5DB;"
+            "border-radius:0;padding:6px 2px;font-size:13px;color:#1F2937;}"
+            "QLineEdit:focus{border-bottom:2px solid #07414F;}")
+        self._search.textChanged.connect(self._on_search_text)
+        search_row.addWidget(self._search, stretch=1)
+
+        # Переключатель «Только активный договор» — справа от поиска, тот же
+        # визуальный приём, что и «Показывать переплату» на вкладке «Участки».
+        self.chk_active_only = QPushButton(" Только активный договор")
+        self.chk_active_only.setCheckable(True)
+        self.chk_active_only.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_active_only.setIconSize(QSize(20, 20))
+        self.chk_active_only.setStyleSheet(
+            "QPushButton{background:transparent;border:none;border-radius:6px;"
+            "padding:4px 8px;font-size:12px;color:#374151;}"
+            "QPushButton:hover{background:#F3F4F6;}")
+        self.chk_active_only.setToolTip(
+            "Если включено — начисления и оплаты считаются только с даты начала "
+            "текущей активной группы (договора). Если выключено — вся история "
+            "участка, включая прежних собственников."
+        )
+        self.chk_active_only.setChecked(True)
+        self._refresh_active_only_icon()
+        self.chk_active_only.toggled.connect(self._on_toggle_active_only)
+        search_row.addWidget(self.chk_active_only)
+
+        lay.addLayout(search_row)
 
         # ── Модель ──────────────────────────────────────────────────────────
         self.model = _VznosyModel(self)
 
         # ── Шапка (внешняя) ─────────────────────────────────────────────────
-        self.hdr_view = _SortHeaderView()
+        self.hdr_view = _SortHeaderView(sort_left=True)
         self.hdr_view.setModel(self.model)
         self.hdr_view.sortIndicatorChanged.connect(self._on_sort_changed)
 
@@ -345,11 +374,6 @@ class VznosyDebtWidget(QWidget):
             self.tree.setStyle(self._tree_sb_style)
             self.tree.verticalScrollBar().setStyle(self._tree_sb_style)
         self.tree.doubleClicked.connect(self._open_card)
-
-        # Поиск в шапке: Участок, Собственник
-        self.hdr_view.add_search_col(_VznosyModel.COLUMNS.index("Участок"))
-        self.hdr_view.add_search_col(_VznosyModel.COLUMNS.index("Собственник"))
-        self.hdr_view.searchChanged.connect(self._on_search_changed)
 
         # Синхронизация ширин колонок между hdr_view и tree
         self.tree.header().sectionResized.connect(self._on_tree_hdr_resized)
@@ -401,8 +425,21 @@ class VznosyDebtWidget(QWidget):
 
     # -- поиск --------------------------------------------------------------- #
 
-    def _on_search_changed(self, col, text):
-        self._search_filters[col] = text.strip().lower()
+    def _on_search_text(self, text: str):
+        self._search_text = text.strip().lower()
+        self._rebuild()
+
+    # -- переключатель «Только активный договор» ------------------------------ #
+
+    def _refresh_active_only_icon(self):
+        checked = self.chk_active_only.isChecked()
+        cp = 0xE9F6 if checked else 0xE9F5  # toggle_on / toggle_off
+        self.chk_active_only.setIcon(
+            _get_icon(cp, 20, fill=1 if checked else 0,
+                      color="#07414F" if checked else "#9CA3AF"))
+
+    def _on_toggle_active_only(self, checked: bool):
+        self._refresh_active_only_icon()
         self._rebuild()
 
     # -- публичный API ------------------------------------------------------- #
@@ -410,6 +447,7 @@ class VznosyDebtWidget(QWidget):
     def _open_rates_dialog(self):
         dlg = _RatesDialog(self.rates, self)
         _exec_dialog(dlg, self)
+        dlg.detach_close_button()
         dlg.layout().removeWidget(self.rates)
         self.rates.setParent(self)  # type: ignore[arg-type]
         self._rebuild()
@@ -551,15 +589,14 @@ class VznosyDebtWidget(QWidget):
             debts_map[plot] = {"debt": debt, "charged": charged,
                                "paid": paid, "owner": owner_text}
 
-        # Применяем поиск
-        for col_idx, text in self._search_filters.items():
-            if not text:
-                continue
-            col_name = _VznosyModel.COLUMNS[col_idx]
-            if col_name == "Участок":
-                rows = [r for r in rows if text in r.get("_text_Участок", "").lower()]
-            elif col_name == "Собственник":
-                rows = [r for r in rows if text in r.get("_text_Собственник", "").lower()]
+        # Применяем поиск — один запрос сразу по Участку и Собственнику
+        text = self._search_text
+        if text:
+            rows = [
+                r for r in rows
+                if text in r.get("_text_Участок", "").lower()
+                or text in r.get("_text_Собственник", "").lower()
+            ]
 
         self.model.load(rows)
 
@@ -599,113 +636,3 @@ class VznosyDebtWidget(QWidget):
         dlg = VznosyCardDialog(plot_text, self._df, self, as_of=as_of)
         _exec_dialog(dlg, self)
         self._rebuild()
-
-    def _export_debtor_receipts(self):
-        if self._df is None or len(self._df) == 0:
-            _AlertDialog.show_alert(self, "Квитанции", "Сначала загрузите выписку.")
-            return
-        from core import vznosy
-        rates = vznosy.load_rates()
-        adj = vznosy.load_adjustments()
-        areas = vznosy.plot_area_map()
-        plot_recs = energy.plots_by_num()
-        as_of = self.date_as_of.date().toPyDate()
-
-        # Должник = участок, где задолженность есть у ТЕКУЩЕГО собственника
-        # (квитанция выставляется ему; долг прежнего сюда не входит).
-        pay_idx = vznosy.payments_index(self._df)
-        debtors: list[tuple[str, str]] = []
-        for plot in self._plot_list():
-            rec = plot_recs.get(plot, {})
-            owners_list = rec.get("owners", []) or []
-            rows = vznosy.balances_by_owner(
-                plot, areas.get(plot), as_of, rates, adj, self._df,
-                owners_list, ownership_form=rec.get("ownership_form"),
-                pay_index=pay_idx)
-            cur_debt = sum(r.debt for r in rows if r.is_current)
-            if cur_debt > 0.5:
-                cur_name = next((r.name for r in rows if r.is_current), "")
-                debtors.append((plot, cur_name))
-
-        if not debtors:
-            _AlertDialog.show_alert(self, "Квитанции", "Должников нет — квитанции не нужны.")
-            return
-        folder = QFileDialog.getExistingDirectory(self, "Папка для квитанций")
-        if not folder:
-            return
-        try:
-            from core import receipt
-        except ImportError as e:
-            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось импортировать модуль квитанций:\n{e}")
-            return
-
-        ok = 0
-        errors = []
-        # Пакетная генерация PDF заметно долгая — курсор занятости, чтобы
-        # окно не выглядело зависшим (U1 из аудита UI).
-        from PyQt6.QtWidgets import QApplication
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            for plot, cur_name in debtors:
-                surname = cur_name.split()[0] if cur_name else ""
-                fname = f"Уч_{plot}_ЧВ"
-                if surname:
-                    safe_surname = re.sub(r"[^\w\-]", "_", surname)
-                    fname += f"_{safe_surname}"
-                fname += f"_{as_of.isoformat()}.pdf"
-                fname = fname.replace("/", "-")
-                path = os.path.join(folder, fname)
-                try:
-                    receipt.save_vznosy_receipt_pdf(plot, self._df, path, as_of=as_of)
-                    ok += 1
-                except Exception as e:
-                    errors.append(f"уч. {plot}: {e}")
-        finally:
-            QApplication.restoreOverrideCursor()
-        if errors:
-            _AlertDialog.show_alert(
-                self, "Квитанции",
-                f"Создано: {ok}\nОшибки ({len(errors)}):\n" + "\n".join(errors[:10])
-            )
-        else:
-            _AlertDialog.show_alert(
-                self, "Квитанции",
-                f"✅  Сформировано {ok} квитанций в:\n{folder}"
-            )
-
-    def _export_excel(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Экспорт таблицы", "членские_взносы_долги.xlsx", "Excel (*.xlsx)")
-        if not path:
-            return
-        if not path.endswith(".xlsx"):
-            path += ".xlsx"
-
-        headers = [
-            self.hdr_view.headerData(c, Qt.Orientation.Horizontal)
-            for c in range(self.model.columnCount())
-        ]
-        rows = []
-        for r in range(self.model.rowCount()):
-            row_data = []
-            for c in range(self.model.columnCount()):
-                idx = self.model.index(r, c)
-                row_data.append(self.model.data(idx, Qt.ItemDataRole.DisplayRole) or "")
-            rows.append(row_data)
-
-        try:
-            import openpyxl
-            from openpyxl.styles import Font, Alignment
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Долги по членским взносам"
-            ws.append(headers)
-            for cell in ws[1]:
-                cell.font = Font(bold=True)
-                cell.alignment = Alignment(horizontal="center")
-            for row in rows:
-                ws.append(row)
-            wb.save(path)
-            _AlertDialog.show_alert(self, "Экспорт завершён", f"Файл сохранён:\n{path}")
-        except Exception as e:
-            _AlertDialog.show_alert(self, "Ошибка экспорта", str(e))

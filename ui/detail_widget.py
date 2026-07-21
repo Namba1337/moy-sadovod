@@ -4649,14 +4649,7 @@ class DetailWidget(QWidget):
         menu.setStyleSheet(menu_qss())
 
         if node.kind == "op":
-            act_dup = QAction("Дублировать операцию", self)
-            act_dup.triggered.connect(lambda: self._duplicate_op(node))
-            menu.addAction(act_dup)
-            act_del = QAction("Удалить операцию", self)
-            act_del.triggered.connect(lambda: self._delete_op(node))
-            menu.addAction(act_del)
             if node.df_idx in self._dup_pending:
-                menu.addSeparator()
                 act_restore = QAction("⟲ Восстановить данные повторного импорта", self)
                 act_restore.triggered.connect(lambda: self._restore_dup_pending(node))
                 menu.addAction(act_restore)
@@ -4669,20 +4662,6 @@ class DetailWidget(QWidget):
             menu.addAction(act_del)
 
         menu.exec(self.tree.viewport().mapToGlobal(pos))
-
-    def _duplicate_op(self, op_node: _Node):
-        if self.df_full is None or op_node.df_idx not in self.df_full.index:
-            return
-        try:
-            new_idx = int(self.df_full.index.max()) + 1
-            self.df_full.loc[new_idx] = self.df_full.loc[op_node.df_idx].copy()
-            self.apply_filters()
-            idx = self.model.index_for_df_idx(new_idx)
-            if idx.isValid():
-                self.tree.setCurrentIndex(idx)
-            self.dataLoaded.emit(self.df_full)
-        except Exception as e:
-            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка дублирования операции:\n{e}")
 
     def _restore_dup_pending(self, op_node: _Node):
         """Перезаписывает Дата/Сумма/Контрагент/Назначение строки значениями
@@ -4711,17 +4690,3 @@ class DetailWidget(QWidget):
         self._dup_pending.pop(op_node.df_idx, None)
         self.apply_filters()
 
-    def _delete_op(self, op_node: _Node):
-        confirmed = _ConfirmDialog.confirm(
-            self, "Удаление строки", "Удалить выбранную операцию?",
-            confirm_text="Удалить", cancel_text="Отмена",
-        )
-        if not confirmed:
-            return
-        try:
-            if self.df_full is not None and op_node.df_idx in self.df_full.index:
-                self.df_full = self.df_full.drop(index=op_node.df_idx)
-            self.apply_filters()
-            self.dataLoaded.emit(self.df_full)
-        except Exception as e:
-            _AlertDialog.show_alert(self, "Ошибка", f"Ошибка удаления операции:\n{e}")
