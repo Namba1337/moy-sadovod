@@ -54,7 +54,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 #: Текущая версия приложения. ЕДИНСТВЕННАЯ ТОЧКА ИСТИНЫ.
 #: При релизе: поднять здесь → прогнать build.bat → опубликовать GitHub Release.
-APP_VERSION = "0.6.3"
+APP_VERSION = "0.6.4"
 
 #: Таймаут сетевых запросов (секунды).
 NETWORK_TIMEOUT = 15
@@ -305,6 +305,30 @@ class UpdateChecker(QObject):
         else:
             self.updateAvailable.emit(info)
 
+    def stop(self) -> None:
+        """Безопасно остановить фоновый поток перед уничтожением объекта.
+
+        Qt не позволяет уничтожать работающий QThread — при закрытии
+        приложения, пока GitHub/GitVerse ещё не ответили (до ~30 сек на
+        оба источника), обычное закрытие окна крашило приложение
+        (`QThread: Destroyed while thread is still running`). Вызывать
+        из closeEvent перед тем, как отпустить владельца этого объекта.
+        """
+        w = self._worker
+        if w is None:
+            return
+        try:
+            w.finished_ok.disconnect()
+        except TypeError:
+            pass
+        try:
+            w.failed.disconnect()
+        except TypeError:
+            pass
+        if w.isRunning():
+            w.terminate()
+            w.wait(2000)
+
 
 # ──────────────────────────────────────────────────────────────────────────
 #  История релизов (GitHub Releases API)
@@ -381,6 +405,24 @@ class ReleaseHistoryFetcher(QObject):
         w.failed.connect(self.errorOccurred.emit)
         self._worker = w
         w.start()
+
+    def stop(self) -> None:
+        """См. UpdateChecker.stop() — та же защита от краша Qt при
+        закрытии диалога, пока поток ещё не ответил."""
+        w = self._worker
+        if w is None:
+            return
+        try:
+            w.finished_ok.disconnect()
+        except TypeError:
+            pass
+        try:
+            w.failed.disconnect()
+        except TypeError:
+            pass
+        if w.isRunning():
+            w.terminate()
+            w.wait(2000)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -572,6 +614,35 @@ class UpdateDownloader(QObject):
     def cancel(self) -> None:
         if self._worker:
             self._worker.cancel()
+
+    def stop(self) -> None:
+        """Безопасно остановить фоновый поток перед уничтожением объекта.
+
+        `cancel()` — кооперативный флаг, который поток проверяет только
+        между чанками уже идущей загрузки; если поток ещё не дошёл до
+        этого места (застрял в подключении к GitHub/GitVerse, до ~30 сек
+        на оба источника), `cancel()` его не остановит. Вызывать отсюда
+        из closeEvent/reject перед уничтожением владельца этого объекта.
+        """
+        w = self._worker
+        if w is None:
+            return
+        w.cancel()
+        try:
+            w.progress.disconnect()
+        except TypeError:
+            pass
+        try:
+            w.finished_ok.disconnect()
+        except TypeError:
+            pass
+        try:
+            w.failed.disconnect()
+        except TypeError:
+            pass
+        if w.isRunning():
+            w.terminate()
+            w.wait(2000)
 
 
 # ──────────────────────────────────────────────────────────────────────────

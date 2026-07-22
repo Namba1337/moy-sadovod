@@ -115,3 +115,9 @@ class UpdateHistoryDialog(BaseDialog):
     def _on_error(self, message: str):
         self._clear_contents()
         self._status_lbl.setText(f"Не удалось загрузить историю обновлений: {message}")
+
+    def closeEvent(self, event) -> None:
+        # Без явной остановки живой QThread-загрузки Qt крашится при
+        # уничтожении диалога (см. core.updater.ReleaseHistoryFetcher.stop).
+        self._fetcher.stop()
+        super().closeEvent(event)

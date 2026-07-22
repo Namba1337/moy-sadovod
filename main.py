@@ -353,6 +353,17 @@ class MainWindow(QMainWindow):
             self._update_check_scheduled = True
             QTimer.singleShot(1500, self._check_for_updates)
 
+    def closeEvent(self, event):
+        # Фоновая проверка обновлений (QThread) может быть ещё жива —
+        # застряла в сетевом запросе к GitHub/GitVerse (до ~30 сек на оба
+        # источника). Qt не даёт безопасно уничтожать работающий QThread —
+        # без явной остановки закрытие окна крашило приложение
+        # (QThread: Destroyed while thread is still running).
+        checker = getattr(self, "_update_checker", None)
+        if checker is not None:
+            checker.stop()
+        super().closeEvent(event)
+
     def _restore_win_resize(self):
         """Ensure full WS_OVERLAPPEDWINDOW style + DWM frame for animations."""
         try:

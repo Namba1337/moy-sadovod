@@ -184,6 +184,13 @@ class UpdateDialog(BaseDialog):
         self._downloader.cancel()
         self.reject()
 
+    def closeEvent(self, event) -> None:
+        # На случай закрытия окном (X/Escape) в обход кнопки «Отмена» —
+        # без явной остановки живой QThread-загрузки Qt крашится при
+        # уничтожении диалога (см. core.updater.UpdateDownloader.stop).
+        self._downloader.stop()
+        super().closeEvent(event)
+
     def _on_progress(self, done: int, total: int) -> None:
         if total > 0:
             pct = int(done * 100 / total)
