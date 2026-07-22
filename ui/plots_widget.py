@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 
 from core import ownership
 from core import people as people_reg
-from core.utils import DATA_DIR, fmt_money
+from core.utils import DATA_DIR, fmt_money, truncate_filename
 
 
 # Требования к документам по роли: required=True → «Отсутствует», False → «Не требуется»
@@ -2384,10 +2384,7 @@ class _DocFieldWidget(QFrame):
         self._refresh()
 
     def _display_name(self) -> str:
-        name = os.path.basename(self._path)
-        if len(name) > 24:
-            name = name[:17] + "\u2026" + name[-7:]
-        return name
+        return truncate_filename(os.path.basename(self._path))
 
     @staticmethod
     def _file_size_str(path: str) -> str:
