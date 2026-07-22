@@ -1,8 +1,8 @@
 {
-  "version": "0.6.4",
-  "notes": "ИСПРАВЛЕНИЯ:\r\n• Устранён краш приложения при закрытии окон с активными потоками",
-  "asset_name": "MoySadovod_Setup_v0.6.4.exe",
-  "size_bytes": 80309849,
-  "sha256": "350cda8f278df546cf82fbb4cf7f8e37c6892550e3fe6082476bed11b1dbf394",
-  "download_url": "https://gitverse.ru/api/attachments/afb2765a-f23e-4d4d-a7e4-7836543a2712"
+  "version": "0.7.0",
+  "notes": "НОВОЕ:\r\n• Обновлена логика автоматического начисления электроэнергии — начисления теперь работают по новой, более корректной схеме",
+  "asset_name": "MoySadovod_Setup_v0.7.0.exe",
+  "size_bytes": 80311377,
+  "sha256": "e17c6a751e9f32aafa8ea3b20dda270733c5663a09bb24295b798f062e860b12",
+  "download_url": "https://gitverse.ru/api/attachments/9e94ca2a-ed51-41ed-a592-ba1ca8648e48"
 }
