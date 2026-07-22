@@ -16,10 +16,21 @@
 изменений в коде или перекомпиляции не требуется. GitHub API отдаёт
 последний ОПУБЛИКОВАННЫЙ релиз (черновики и pre-release игнорируются).
 Никакой авторизации не нужно — репозиторий публичный.
+
+Фолбэк на GitVerse (на случай блокировки GitHub в РФ):
+    Репозиторий зеркалируется на gitverse.ru/namba1337/moy-sadovod.
+    Releases API GitVerse требует токен даже для чтения публичного
+    репозитория, поэтому вместо него используется его же публичный
+    Contents API (не требует авторизации) — он отдаёт содержимое файла
+    updates/latest.json (см. tools/gen_update_manifest.py) в base64.
+    Если запрос к GitHub падает по сети (не 404 — 404 значит просто
+    «релизов ещё нет», это не повод для фолбэка), проверка обновлений
+    и скачивание установщика при сбое пробуют этот манифест на GitVerse.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -53,9 +64,18 @@ USER_AGENT = f"MoySadovod/{APP_VERSION}"
 
 #: Публичный репозиторий на GitHub — источник обновлений и истории релизов
 #: (GitHub Releases API, без авторизации).
-GITHUB_REPO = "Namba1337/snt_helper_app"
+GITHUB_REPO = "Namba1337/moy-sadovod"
 GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_LATEST_RELEASE_API = f"{GITHUB_RELEASES_API}/latest"
+
+#: Зеркало на GitVerse — фолбэк, если GitHub недоступен (блокировки в РФ).
+#: Читаем не Releases API (там нужен токен даже для публичного репозитория),
+#: а публичный Contents API — он отдаёт содержимое updates/latest.json.
+GITVERSE_REPO = "namba1337/moy-sadovod"
+GITVERSE_MANIFEST_API = (
+    f"https://gitverse.ru/sc/sbt/api/v1/repos/{GITVERSE_REPO}"
+    "/contents/updates/latest.json?ref=main"
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -129,6 +149,38 @@ def _http_get(url: str, *, timeout: int = NETWORK_TIMEOUT,
 
 
 # ──────────────────────────────────────────────────────────────────────────
+#  Фолбэк на манифест GitVerse (см. docstring модуля)
+# ──────────────────────────────────────────────────────────────────────────
+
+def _fetch_gitverse_manifest() -> Optional[dict]:
+    """Скачать и разобрать updates/latest.json с зеркала на GitVerse.
+
+    Использует публичный Contents API (без токена). Возвращает None,
+    если файл пуст/отсутствует; бросает исключение при сетевой ошибке.
+    """
+    raw = _http_get(GITVERSE_MANIFEST_API, headers={"Accept": "application/json"})
+    data = json.loads(raw.decode("utf-8"))
+    content_b64 = data.get("content", "")
+    if not content_b64:
+        return None
+    return json.loads(base64.b64decode(content_b64).decode("utf-8"))
+
+
+def _manifest_to_release_info(manifest: dict) -> Optional["ReleaseInfo"]:
+    version = str(manifest.get("version", "")).strip()
+    if not version:
+        return None
+    return ReleaseInfo(
+        version=version,
+        notes=str(manifest.get("notes", "") or ""),
+        download_url=str(manifest.get("download_url", "")).strip(),
+        asset_name=str(manifest.get("asset_name", "")).strip() or "MoySadovod_Setup.exe",
+        size_bytes=int(manifest.get("size_bytes", 0) or 0),
+        sha256_expected=manifest.get("sha256") or None,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
 #  Проверка наличия обновлений
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -137,6 +189,40 @@ class _CheckWorker(QThread):
     failed = pyqtSignal(str)
 
     def run(self) -> None:
+        info, err = self._check_github()
+
+        if err == "no_release":
+            # GitHub доступен, но опубликованных релизов ещё нет — это не
+            # повод пробовать зеркало, это легитимное «обновлений нет».
+            self.finished_ok.emit(None)
+            return
+
+        if info is None:
+            # GitHub недоступен (сеть/таймаут — типичный симптом блокировки
+            # в РФ) либо релиз там неполный — пробуем зеркало на GitVerse.
+            try:
+                manifest = _fetch_gitverse_manifest()
+                info = _manifest_to_release_info(manifest) if manifest else None
+            except Exception:
+                info = None
+            if info is None:
+                self.failed.emit(err or "Не удалось проверить обновления.")
+                return
+
+        if not is_newer(info.version, APP_VERSION):
+            self.finished_ok.emit(None)
+            return
+
+        self.finished_ok.emit(info)
+
+    @staticmethod
+    def _check_github() -> tuple[Optional["ReleaseInfo"], Optional[str]]:
+        """Запросить последний релиз GitHub.
+
+        Возвращает (ReleaseInfo, None) при успехе, (None, "no_release")
+        если релизов ещё нет, (None, сообщение_об_ошибке) при любой другой
+        проблеме (в этом случае вызывающий код пробует зеркало GitVerse).
+        """
         try:
             raw = _http_get(
                 GITHUB_LATEST_RELEASE_API,
@@ -145,24 +231,15 @@ class _CheckWorker(QThread):
             data = json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                # Ещё нет ни одного опубликованного релиза.
-                self.finished_ok.emit(None)
-                return
-            self.failed.emit(f"HTTP {e.code}: {e.reason}")
-            return
+                return None, "no_release"
+            return None, f"HTTP {e.code}: {e.reason}"
         except Exception as e:
-            self.failed.emit(str(e))
-            return
+            return None, str(e)
 
         tag = str(data.get("tag_name", "")).strip()
         version = tag.lstrip("vV")
         if not version:
-            self.failed.emit("В ответе GitHub отсутствует тег релиза.")
-            return
-
-        if not is_newer(version, APP_VERSION):
-            self.finished_ok.emit(None)
-            return
+            return None, "В ответе GitHub отсутствует тег релиза."
 
         assets = data.get("assets") or []
         exe_asset = next(
@@ -170,8 +247,7 @@ class _CheckWorker(QThread):
             None,
         )
         if exe_asset is None:
-            self.failed.emit("В релизе не найден установщик (.exe).")
-            return
+            return None, "В релизе не найден установщик (.exe)."
 
         download_url = str(exe_asset.get("browser_download_url", "")).strip()
         asset_name = str(exe_asset.get("name", "")).strip() or "MoySadovod_Setup.exe"
@@ -193,14 +269,14 @@ class _CheckWorker(QThread):
             except Exception:
                 pass  # Проверка целостности просто будет пропущена.
 
-        self.finished_ok.emit(ReleaseInfo(
+        return ReleaseInfo(
             version=version,
             notes=str(data.get("body", "") or "").strip(),
             download_url=download_url,
             asset_name=asset_name,
             size_bytes=size_bytes,
             sha256_expected=sha256_expected,
-        ))
+        ), None
 
 
 class UpdateChecker(QObject):
@@ -311,6 +387,10 @@ class ReleaseHistoryFetcher(QObject):
 #  Скачивание установщика с прогрессом
 # ──────────────────────────────────────────────────────────────────────────
 
+class _DownloadCancelled(Exception):
+    pass
+
+
 class _DownloadWorker(QThread):
     progress = pyqtSignal(int, int)  # bytes_done, bytes_total
     finished_ok = pyqtSignal(str)   # путь к скачанному файлу
@@ -327,63 +407,132 @@ class _DownloadWorker(QThread):
         self._cancel = True
 
     def run(self) -> None:
-        dest = self._dest_path
+        url = self._info.download_url
+        tried_mirror = False
+        last_error: Optional[str] = None
+
+        while True:
+            try:
+                self._download_from(url)
+            except _DownloadCancelled:
+                self.failed.emit("Загрузка отменена")
+                return
+            except Exception as e:
+                last_error = str(e)
+                # Основная ссылка зависла/недоступна (типичный симптом
+                # блокировки GitHub в РФ) — один раз пробуем зеркало.
+                if tried_mirror:
+                    self.failed.emit(f"Ошибка загрузки: {last_error}")
+                    return
+                tried_mirror = True
+                mirror_url = self._find_mirror_url(url)
+                if mirror_url is None:
+                    self.failed.emit(f"Ошибка загрузки: {last_error}")
+                    return
+                url = mirror_url
+                continue
+            else:
+                self.finished_ok.emit(self._dest_path)
+                return
+
+    @staticmethod
+    def _find_mirror_url(current_url: str) -> Optional[str]:
+        """Найти альтернативную ссылку на установщик в манифесте GitVerse."""
         try:
-            req = urllib.request.Request(
-                self._info.download_url,
-                headers={"User-Agent": USER_AGENT},
-            )
-            opener = urllib.request.build_opener(
-                urllib.request.HTTPSHandler(context=_ssl_context())
-            )
-            with opener.open(req, timeout=NETWORK_TIMEOUT) as resp:
-                total = int(resp.headers.get("Content-Length") or
-                            self._info.size_bytes or 0)
-                hasher = hashlib.sha256()
-                done = 0
-                chunk_size = 64 * 1024
-                tmp_path = dest + ".part"
-                with open(tmp_path, "wb") as f:
-                    while True:
-                        if self._cancel:
-                            try:
-                                f.close()
-                                os.remove(tmp_path)
-                            except OSError:
-                                pass
-                            self.failed.emit("Загрузка отменена")
-                            return
-                        chunk = resp.read(chunk_size)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        hasher.update(chunk)
-                        done += len(chunk)
-                        self.progress.emit(done, total)
+            manifest = _fetch_gitverse_manifest()
+        except Exception:
+            return None
+        if not manifest:
+            return None
+        alt = str(manifest.get("download_url", "")).strip()
+        if not alt or alt == current_url:
+            return None
+        return alt
 
-                # Атомарно переименуем .part → финальное имя
-                if os.path.exists(dest):
-                    os.remove(dest)
-                os.rename(tmp_path, dest)
+    def _download_from(self, url: str) -> None:
+        """Скачать файл по url.
 
-                # Проверка целостности
-                if self._info.sha256_expected:
-                    actual = hasher.hexdigest().lower()
-                    if actual != self._info.sha256_expected:
+        GitVerse не разрешает прикладывать к релизу .exe напрямую (список
+        допустимых расширений — .zip, .7z и т.п.), поэтому его зеркало
+        отдаёт установщик запакованным в .zip — распознаём по расширению
+        ссылки и распаковываем после скачивания. GitHub отдаёт .exe как
+        есть, зеркало не участвует.
+        """
+        dest = self._dest_path
+        is_zip = url.lower().split("?")[0].endswith(".zip")
+        tmp_path = dest + (".zip.part" if is_zip else ".part")
+
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=_ssl_context())
+        )
+        with opener.open(req, timeout=NETWORK_TIMEOUT) as resp:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            chunk_size = 64 * 1024
+            with open(tmp_path, "wb") as f:
+                while True:
+                    if self._cancel:
                         try:
-                            os.remove(dest)
+                            f.close()
+                            os.remove(tmp_path)
                         except OSError:
                             pass
-                        self.failed.emit(
-                            "Проверка целостности не пройдена (SHA-256 не совпал).\n"
-                            "Файл удалён. Попробуйте позже."
-                        )
-                        return
-        except Exception as e:
-            self.failed.emit(f"Ошибка загрузки: {e}")
-            return
+                        raise _DownloadCancelled()
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    self.progress.emit(done, total)
 
-        self.finished_ok.emit(dest)
+        if is_zip:
+            self._extract_installer(tmp_path, dest)
+        else:
+            if os.path.exists(dest):
+                os.remove(dest)
+            os.rename(tmp_path, dest)
+        self._verify_sha256(dest)
+
+    @staticmethod
+    def _extract_installer(zip_path: str, dest: str) -> None:
+        """Достать единственный .exe из архива в dest и удалить архив."""
+        import zipfile
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                exe_names = [n for n in zf.namelist() if n.lower().endswith(".exe")]
+                if not exe_names:
+                    raise ValueError("в архиве не найден установщик (.exe)")
+                with zf.open(exe_names[0]) as src, open(dest, "wb") as out:
+                    while True:
+                        chunk = src.read(64 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+        finally:
+            try:
+                os.remove(zip_path)
+            except OSError:
+                pass
+
+    def _verify_sha256(self, path: str) -> None:
+        if not self._info.sha256_expected:
+            return
+        hasher = hashlib.sha256()
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(64 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        if hasher.hexdigest().lower() != self._info.sha256_expected:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise ValueError(
+                "проверка целостности не пройдена (SHA-256 не совпал)"
+            )
 
 
 class UpdateDownloader(QObject):
