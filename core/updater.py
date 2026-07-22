@@ -54,7 +54,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 #: Текущая версия приложения. ЕДИНСТВЕННАЯ ТОЧКА ИСТИНЫ.
 #: При релизе: поднять здесь → прогнать build.bat → опубликовать GitHub Release.
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.3"
 
 #: Таймаут сетевых запросов (секунды).
 NETWORK_TIMEOUT = 15
@@ -454,13 +454,13 @@ class _DownloadWorker(QThread):
 
         GitVerse не разрешает прикладывать к релизу .exe напрямую (список
         допустимых расширений — .zip, .7z и т.п.), поэтому его зеркало
-        отдаёт установщик запакованным в .zip — распознаём по расширению
-        ссылки и распаковываем после скачивания. GitHub отдаёт .exe как
-        есть, зеркало не участвует.
+        отдаёт установщик запакованным в .zip. Ссылки-вложения GitVerse
+        вида .../api/attachments/<uuid> не содержат расширения в самом URL
+        (тип — только в Content-Disposition ответа), поэтому zip определяем
+        не по ссылке, а по содержимому скачанного файла (сигнатура `PK`).
         """
         dest = self._dest_path
-        is_zip = url.lower().split("?")[0].endswith(".zip")
-        tmp_path = dest + (".zip.part" if is_zip else ".part")
+        tmp_path = dest + ".part"
 
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         opener = urllib.request.build_opener(
@@ -486,13 +486,22 @@ class _DownloadWorker(QThread):
                     done += len(chunk)
                     self.progress.emit(done, total)
 
-        if is_zip:
+        if self._is_zip_file(tmp_path):
             self._extract_installer(tmp_path, dest)
         else:
             if os.path.exists(dest):
                 os.remove(dest)
             os.rename(tmp_path, dest)
         self._verify_sha256(dest)
+
+    @staticmethod
+    def _is_zip_file(path: str) -> bool:
+        try:
+            with open(path, "rb") as f:
+                sig = f.read(2)
+        except OSError:
+            return False
+        return sig == b"PK"
 
     @staticmethod
     def _extract_installer(zip_path: str, dest: str) -> None:
