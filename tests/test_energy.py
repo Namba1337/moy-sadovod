@@ -132,6 +132,32 @@ class OwnAverageTests(unittest.TestCase):
                                      window_months=3)
         self.assertEqual(avg, 10.0)
 
+    def test_normalizes_intervals_longer_than_a_month(self):
+        # Показания передаются раз в год (обычная практика у части
+        # садоводов) — расход интервала (275/306/250) относится к ГОДУ, а
+        # не к месяцу. "Среднемесячный" расход должен делить его на 12, а
+        # не усреднять годовые расходы как будто это месячные значения
+        # (иначе начисление задирается в ~12 раз).
+        meters = {
+            "39:2022:12": "1856", "39:2023:12": "2131",
+            "39:2024:12": "2437", "39:2025:12": "2687",
+        }
+        avg = energy.own_average_kwh("39", meters, {}, before=date(2026, 7, 1))
+        # Последний интервал (12.2024 -> 12.2025) один уже покрывает 12 мес.
+        self.assertAlmostEqual(avg, 250.0 / 12, places=6)
+
+    def test_normalizes_and_spans_window_across_multiple_long_intervals(self):
+        # Окно уже, чем один интервал (6 мес. при годовых показаниях) —
+        # должен использоваться ближайший интервал целиком (он уже
+        # покрывает окно), а не "недобор" из-за нехватки пунктов.
+        meters = {
+            "39:2022:12": "1856", "39:2023:12": "2131",
+            "39:2024:12": "2437", "39:2025:12": "2687",
+        }
+        avg = energy.own_average_kwh("39", meters, {}, before=date(2026, 7, 1),
+                                     window_months=6)
+        self.assertAlmostEqual(avg, 250.0 / 12, places=6)
+
 
 class AvgWindowMonthsOfTests(unittest.TestCase):
     def test_default_when_unset(self):
@@ -363,12 +389,14 @@ class AutoEstimateTests(unittest.TestCase):
         meters = self._steady_history("1", 2023, 13)  # 30 кВт·ч/мес всю историю
         plots = [{"num": "1", "billing_type": energy.BILLING_METER,
                   "calc_method": energy.CALC_METHOD_OWN_AVERAGE}]
+        # 5 мес. без показаний, порог (= длина расчётного цикла) — 3: начисляем
+        # только 1 целиком прошедший цикл (Фев-Апр), Май-Июнь — недостроенный
+        # второй цикл, ждём его завершения.
         charges = energy.charges_for_plot(
             "1", meters, self.RATES, {}, up_to=date(2024, 6, 30), plots=plots,
             auto_settings={"enabled": True, "months": 3})
         auto = {(c["year"], c["month"]): c for c in charges if c.get("auto_estimate")}
-        self.assertEqual(set(auto.keys()),
-                         {(2024, 2), (2024, 3), (2024, 4), (2024, 5), (2024, 6)})
+        self.assertEqual(set(auto.keys()), {(2024, 2), (2024, 3), (2024, 4)})
         for c in auto.values():
             self.assertEqual(c["kwh"], 30.0)
             self.assertEqual(c["amount"], 30.0 * 5.00)
@@ -384,11 +412,41 @@ class AutoEstimateTests(unittest.TestCase):
             "1", meters, self.RATES, {}, up_to=date(2024, 6, 30), plots=plots,
             auto_settings={"enabled": True, "months": 3})
         auto = {(c["year"], c["month"]): c for c in charges if c.get("auto_estimate")}
-        self.assertEqual(set(auto.keys()),
-                         {(2024, 2), (2024, 3), (2024, 4), (2024, 5), (2024, 6)})
+        self.assertEqual(set(auto.keys()), {(2024, 2), (2024, 3), (2024, 4)})
         for c in auto.values():
             self.assertEqual(c["kwh"], 30.0)
             self.assertEqual(c["amount"], 30.0 * 5.00)
+
+    def test_charges_only_complete_cycles_not_open_tail(self):
+        # 14 мес. без показаний, порог 6: 2 целых цикла (12 мес.) начисляются,
+        # хвост в 2 мес. (недостроенный 3-й цикл) — нет, как и попросил
+        # пользователь ("нет смысла начислять за то, где человек ещё не
+        # обязан был вносить оплату").
+        meters = {"1:2022:12": "0", "1:2023:1": "30"}  # 1 интервал, 30 кВт·ч/мес
+        plots = [{"num": "1", "billing_type": energy.BILLING_METER,
+                  "calc_method": energy.CALC_METHOD_OWN_AVERAGE,
+                  "avg_window_months": 1}]
+        charges = energy.charges_for_plot(
+            "1", meters, self.RATES, {}, up_to=date(2024, 3, 31), plots=plots,
+            auto_settings={"enabled": True, "months": 6})
+        auto = {(c["year"], c["month"]) for c in charges if c.get("auto_estimate")}
+        # с 2023:1 по 2024:3 включительно — 14 месяцев разрыва (2023:2..2024:3)
+        expected = {(2023, m) for m in range(2, 13)} | {(2024, 1)}
+        self.assertEqual(auto, expected)
+        self.assertNotIn((2024, 2), auto)
+        self.assertNotIn((2024, 3), auto)
+
+    def test_threshold_of_one_charges_every_month_immediately(self):
+        # Порог 1 мес. — цикл длиной в месяц, ведёт себя как раньше:
+        # начисление сразу за каждый прошедший месяц, без накопления хвоста.
+        meters = self._steady_history("1", 2023, 13)
+        plots = [{"num": "1", "billing_type": energy.BILLING_METER,
+                  "calc_method": energy.CALC_METHOD_OWN_AVERAGE}]
+        charges = energy.charges_for_plot(
+            "1", meters, self.RATES, {}, up_to=date(2024, 4, 30), plots=plots,
+            auto_settings={"enabled": True, "months": 1})
+        auto = {(c["year"], c["month"]) for c in charges if c.get("auto_estimate")}
+        self.assertEqual(auto, {(2024, 2), (2024, 3), (2024, 4)})
 
     def test_respects_explicitly_chosen_norm_even_with_history(self):
         # Администратор когда-то явно выбрал "по нормативу" для этого участка —
@@ -441,10 +499,14 @@ class AutoEstimateTests(unittest.TestCase):
             auto_settings=auto_settings)
         before_total = sum(c["amount"] for c in before if c["amount"] is not None)
         self.assertTrue(any(c.get("auto_estimate") for c in before))
+        # Разрыв в 5 мес., порог (= цикл) 3 — начислен только 1 целый цикл
+        # (Фев-Апр = 3×30 кВт·ч), Май-Июнь ждут завершения второго цикла.
+        auto_before = {(c["year"], c["month"]) for c in before if c.get("auto_estimate")}
+        self.assertEqual(auto_before, {(2024, 2), (2024, 3), (2024, 4)})
 
         # Владелец наконец передаёт реальное показание за июнь — фактический
         # расход за пропущенные месяцы оказался БОЛЬШЕ, чем оценка (200 вместо
-        # 5×30=150 кВт·ч).
+        # 3×30=90 кВт·ч, начисленных по факту в "before").
         meters_after = dict(meters)
         meters_after["1:2024:6"] = str(360 + 200)
 
@@ -468,9 +530,10 @@ class AutoEstimateTests(unittest.TestCase):
         # без остатка от прежней оценки на Фев-Май.
         expected_after_total = 12 * 30 * 5.00 + 200 * 5.00
         self.assertAlmostEqual(after_total, expected_after_total, places=6)
-        # И разница с "before" — это ровно перерасчёт (было по оценке 150 за
-        # 5 мес, стало по факту 200 за тот же период), а не сумма того и другого.
-        self.assertAlmostEqual(after_total - before_total, (200 - 150) * 5.00, places=6)
+        # И разница с "before" — это ровно перерасчёт (было по оценке 90 за
+        # начисленный целый цикл, стало по факту 200 за пропущенные месяцы),
+        # а не сумма того и другого.
+        self.assertAlmostEqual(after_total - before_total, (200 - 90) * 5.00, places=6)
 
 
 class BalanceTests(unittest.TestCase):

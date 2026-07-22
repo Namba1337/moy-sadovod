@@ -17,7 +17,7 @@ import pandas as pd
 
 from core.utils import _read_json, _ensure_df, DATA_DIR
 METERS_FILE = os.path.join(DATA_DIR, "snt_meters.json")
-RATES_FILE = os.path.join(DATA_DIR, "snt_rates.json")
+RATES_FILE = os.path.join(DATA_DIR, "snt_energy_rates.json")
 REPLACEMENTS_FILE = os.path.join(DATA_DIR, "snt_meter_replacements.json")
 BASELINE_FILE = os.path.join(DATA_DIR, "snt_energy_baseline.json")
 COMMON_METER_FILE = os.path.join(DATA_DIR, "snt_common_meter.json")
@@ -443,20 +443,37 @@ def own_average_kwh(plot: str, meters: dict, replacements: dict, before: date,
     истории меньше — за фактически доступный период). None, если у участка нет
     ни одной пары показаний до этой даты (расход посчитать не из чего)."""
     readings = plot_readings(plot, meters)
-    values: list[tuple[date, float]] = []
+    # (дата показания, расход интервала, число месяцев, которое интервал
+    # реально охватывает) — расход интервала может относиться не к одному
+    # месяцу, а к нескольким (если показания передавались не каждый месяц,
+    # например раз в год), поэтому нельзя просто усреднять "пункты": нужно
+    # делить суммарный расход на суммарное число месяцев в окне.
+    intervals: list[tuple[date, float, int]] = []
     for i in range(1, len(readings)):
+        py, pm, _ = readings[i - 1]
         y, m, _ = readings[i]
         rd = reading_date(y, m)
         if rd >= before:
             continue
         kwh = consumption_kwh(plot, y, m, meters, replacements)
         if kwh is not None and kwh >= 0:
-            values.append((rd, kwh))
-    if not values:
+            months_span = max((y - py) * 12 + (m - pm), 1)
+            intervals.append((rd, kwh, months_span))
+    if not intervals:
         return None
-    values.sort(key=lambda t: t[0])
-    window = values[-window_months:]
-    return sum(kwh for _, kwh in window) / len(window)
+    intervals.sort(key=lambda t: t[0])
+
+    window: list[tuple[date, float, int]] = []
+    months_covered = 0
+    for item in reversed(intervals):
+        window.append(item)
+        months_covered += item[2]
+        if months_covered >= window_months:
+            break
+
+    total_kwh = sum(kwh for _, kwh, _ in window)
+    total_months = sum(months for _, _, months in window)
+    return total_kwh / total_months if total_months else None
 
 
 def own_average_charges(plot: str, avg_kwh_per_month: Optional[float], start: Optional[date],
@@ -634,9 +651,18 @@ def auto_estimate_charges(plot: str, meters: dict, rates: list, replacements: di
                           plots: Optional[list] = None) -> list[dict]:
     """Автоматическая оценка начисления для ОТКРЫТОГО «хвоста» участка типа
     «Счётчик» — периода после последнего показания (или после ввода счётчика
-    в эксплуатацию, если показаний не было вовсе), если он не передаётся уже
-    `auto_settings['months']` месяцев и более (см. Ситуация 1/2 порядка
-    действий СНТ по электроэнергии).
+    в эксплуатацию, если показаний не было вовсе).
+
+    `auto_settings['months']` — не просто «отступ» перед стартом оценки, а
+    длина расчётного цикла: она же определяет ожидаемую периодичность сдачи
+    показаний (если по правилам СНТ показания сдают раз в год — используют
+    порог 12, и оплата тоже требуется раз в год). Поэтому начисляется только
+    ЦЕЛЫМИ циклами по `months` месяцев — если разрыв ещё не набрал полный
+    цикл, начисления нет вообще (рано, участник ещё не обязан был сдавать
+    показания); если разрыв больше одного цикла (например, 14 мес. при
+    пороге 6), начисляются все целиком прошедшие циклы (2 цикла × 6 мес. =
+    12 мес.), а хвост незавершённого цикла (ещё 2 мес.) остаётся
+    неначисленным до его завершения.
 
     Отдельного «отката» не требуется: как только придёт новое показание,
     закрывающее разрыв, эти месяцы естественным образом попадут в обычный
@@ -679,6 +705,14 @@ def auto_estimate_charges(plot: str, meters: dict, rates: list, replacements: di
     if start > as_of:
         return []
 
+    # Начисляем только целыми расчётными циклами по `threshold` месяцев —
+    # см. докстрок выше. Хвост незавершённого цикла обрезаем.
+    months_to_charge = (mwr // threshold) * threshold
+    end_y, end_m = start.year, start.month
+    for _ in range(months_to_charge - 1):
+        end_y, end_m = (end_y + 1, 1) if end_m == 12 else (end_y, end_m + 1)
+    block_up_to = min(reading_date(end_y, end_m), as_of)
+
     rec = plot_record(plot, plots)
     raw_method = rec.get("calc_method")
     if raw_method in CALC_METHODS:
@@ -698,10 +732,10 @@ def auto_estimate_charges(plot: str, meters: dict, rates: list, replacements: di
         avg = own_average_kwh(plot, meters, replacements, before=start,
                               window_months=window)
         if avg is not None:
-            charges = own_average_charges(plot, avg, start, rates, up_to=as_of)
+            charges = own_average_charges(plot, avg, start, rates, up_to=block_up_to)
     if not charges:
         norm = norm_kw_of(plot, plots, auto_settings)
-        charges = calculated_charges(plot, norm, start, rates, up_to=as_of)
+        charges = calculated_charges(plot, norm, start, rates, up_to=block_up_to)
     for c in charges:
         c["auto_estimate"] = True
     return charges

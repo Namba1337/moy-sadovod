@@ -1053,9 +1053,8 @@ class HomeWidget(QWidget):
     def refresh(self, df=None):
         """Пересчитывает дашборд. df — выписка с вкладки «Детализация»."""
         try:
-            src = df if df is not None else dashboard.load_transactions_df()
-            self._df = src
-            data = dashboard.build(src)   # _AUTO: авто-сравнение с предыдущим
+            self._df = df
+            data = dashboard.build(df) if df is not None else None
         except Exception:
             data = None
             self._df = None

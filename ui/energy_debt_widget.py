@@ -118,11 +118,17 @@ class _EnergySettingsDialog(_FramelessDialog):
         lay.addWidget(sect1)
 
         info = QLabel(
-            "Если участок типа «Счётчик» не передаёт показания N месяцев "
-            "подряд — начисление за эти месяцы автоматически оценивается. "
-            "Тип расчёта на самом участке при этом НЕ меняется: как только "
-            "придёт реальное показание, закрывающее разрыв, начисление за "
-            "пропущенные месяцы автоматически пересчитается по факту."
+            "«Период сдачи» ниже — это не просто отсрочка перед стартом "
+            "оценки, а длина расчётного цикла: с такой периодичностью в "
+            "СНТ ожидают показания (и, соответственно, оплату) с участков "
+            "типа «Счётчик». Начисление автоматически оценивается только "
+            "ЦЕЛЫМИ прошедшими циклами — например, при периоде 6 мес. и "
+            "разрыве в 14 мес. начислятся 2 полных цикла (12 мес.), а "
+            "последние 2 мес. (незавершённый 3-й цикл) — нет, пока цикл не "
+            "закроется. Тип расчёта на самом участке при этом НЕ меняется: "
+            "как только придёт реальное показание, закрывающее разрыв, "
+            "начисление за пропущенные месяцы автоматически пересчитается "
+            "по факту."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color:#6B7280;font-size:12px;")
@@ -133,7 +139,7 @@ class _EnergySettingsDialog(_FramelessDialog):
         lay.addWidget(self.chk_enabled)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Порог отсутствия показаний, мес.:"))
+        row.addWidget(QLabel("Период сдачи показаний (= длина цикла), мес.:"))
         self.spin_months = QSpinBox()
         self.spin_months.setRange(1, 24)
         self.spin_months.setValue(
@@ -141,6 +147,19 @@ class _EnergySettingsDialog(_FramelessDialog):
         row.addWidget(self.spin_months)
         row.addStretch()
         lay.addLayout(row)
+
+        self.lbl_cycle_example = QLabel()
+        self.lbl_cycle_example.setWordWrap(True)
+        self.lbl_cycle_example.setStyleSheet(
+            f"color:{C.BRAND};font-size:12px;font-style:italic;")
+        lay.addWidget(self.lbl_cycle_example)
+        self.spin_months.valueChanged.connect(self._update_cycle_example)
+        self._update_cycle_example()
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet("background:#E5E7EB;max-height:1px;border:none;")
+        lay.addWidget(divider)
 
         # ── Глобальные значения по умолчанию ────────────────────────
         sect2 = QLabel("Значения по умолчанию для расчётного метода")
@@ -152,8 +171,11 @@ class _EnergySettingsDialog(_FramelessDialog):
             "Используются, только если на конкретном участке (кнопка "
             "«Тип расчёта») своё значение не задано — например, "
             "региональный норматив на освещение можно указать один раз "
-            "здесь, а не на каждом участке. Этими же значениями пользуется "
-            "и автопереход выше — для оценки «хвоста» участков-счётчиков."
+            "здесь, а не на каждом участке. «Окно усреднения» ниже — про "
+            "другое: за сколько МЕСЯЦЕВ ИСТОРИИ считать средний расход "
+            "кВт·ч (не путать с периодом сдачи показаний выше — тот про "
+            "то, КОГДА начислять). Этими же значениями пользуется и "
+            "автопереход выше — для оценки «хвоста» участков-счётчиков."
         )
         info2.setWordWrap(True)
         info2.setStyleSheet("color:#6B7280;font-size:12px;")
@@ -187,6 +209,18 @@ class _EnergySettingsDialog(_FramelessDialog):
         btn_save = PrimaryButton("Сохранить")
         btn_save.clicked.connect(self._on_accept)
         lay.addLayout(self.make_button_row(btn_cancel, btn_save))
+
+    def _update_cycle_example(self):
+        n = self.spin_months.value()
+        gap = n * 2 + 2
+        cycles = gap // n
+        charged = cycles * n
+        leftover = gap - charged
+        self.lbl_cycle_example.setText(
+            f"Например: нет показаний {gap} мес. подряд → начислится "
+            f"{charged} мес. ({cycles} полных цикла по {n}), ещё {leftover} "
+            f"мес. — после закрытия следующего цикла."
+        )
 
     def _on_accept(self):
         raw_norm = self.inp_default_norm.text().strip().replace(",", ".")
@@ -270,8 +304,9 @@ class EnergyDebtWidget(QWidget):
 
         btn_settings = SecondaryButton("Настройки", icon="settings")
         btn_settings.setToolTip(
-            "Автопереход при отсутствии показаний + глобальные значения "
-            "по умолчанию (норматив, окно усреднения) для расчётного метода."
+            "Автопереход при отсутствии показаний (начисляется целыми "
+            "расчётными циклами) + глобальные значения по умолчанию "
+            "(норматив, окно усреднения) для расчётного метода."
         )
         btn_settings.clicked.connect(self._open_energy_settings_dialog)
         top.addWidget(btn_settings)

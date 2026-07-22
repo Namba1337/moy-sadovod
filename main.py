@@ -719,12 +719,13 @@ class MainWindow(QMainWindow):
     # ── Сохранение / загрузка проекта ────────────────────────────────────
 
     _PROJECT_JSON_FILES = [
-        "snt_plots.json", "snt_rates.json",
+        "snt_plots.json", "snt_energy_rates.json",
         "snt_vznosy_rates.json", "snt_vznosy_adjustments.json",
         "snt_map_plots.json", "snt_map_image.json",
-        "snt_meters.json", "snt_meters_years.json",
+        "snt_meters.json",
         "snt_meter_replacements.json", "snt_energy_baseline.json",
         "snt_common_meter.json", "snt_categories.json", "snt_people.json",
+        "snt_energy_auto_settings.json",
     ]
 
     def _build_file_menu(self) -> QMenu:
@@ -969,6 +970,20 @@ class MainWindow(QMainWindow):
         try:
             with zipfile.ZipFile(path, "r") as zf:
                 names = zf.namelist()
+
+                # Сносим текущие файлы данных перед распаковкой: если в
+                # загружаемом .snt какого-то из них нет (например, проект
+                # сохранён до первого ввода показаний счётчиков), он не
+                # должен молча пережить загрузку в виде «хвоста» от
+                # предыдущей открытой базы — иначе её данные (участки,
+                # показания, тарифы и т.п.) просочатся в новый проект.
+                for fname in self._PROJECT_JSON_FILES:
+                    f = data_dir / fname
+                    if f.exists():
+                        try:
+                            f.unlink()
+                        except OSError:
+                            pass
 
                 # извлекаем JSON-файлы данных (кроме транзакций — они в памяти)
                 for name in names:

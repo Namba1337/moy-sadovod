@@ -5,13 +5,12 @@
 предыдущий по списку. Это позволяет сравнивать поток средств по членским
 периодам (июль→июль), а не по календарным годам.
 
-Модуль не лезет в Qt и почти не лезет в файловую систему: транзакции
-принимаются готовым DataFrame, а если его нет — подхватывается
-data/detail_transactions.json через load_transactions_df().
+Модуль не лезет в Qt: транзакции принимаются готовым DataFrame — сама
+выписка живёт только в памяти вкладки «Детализация» (см. main.py), на
+диск отдельно не сохраняется.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional
@@ -19,9 +18,6 @@ from typing import Optional
 import pandas as pd
 
 from core import energy, vznosy
-from core.utils import _read_json, DATA_DIR
-
-TRANSACTIONS_FILE = os.path.join(DATA_DIR, "detail_transactions.json")
 
 # Сентинел для build(): «автоматически выбрать предыдущий период» (обратная совместимость)
 _AUTO = object()
@@ -93,18 +89,6 @@ def _normalize_df(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     if df.empty:
         return None
     return df
-
-
-def load_transactions_df() -> Optional[pd.DataFrame]:
-    """Читает data/detail_transactions.json (если есть) и возвращает
-    нормализованный DataFrame. None — файла нет или он пуст/битый."""
-    recs = _read_json(TRANSACTIONS_FILE, None)
-    if not recs:
-        return None
-    try:
-        return _normalize_df(pd.DataFrame(recs))
-    except Exception:
-        return None
 
 
 # ── периоды членских взносов ──────────────────────────────────────────

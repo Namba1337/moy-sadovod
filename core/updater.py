@@ -54,7 +54,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 #: Текущая версия приложения. ЕДИНСТВЕННАЯ ТОЧКА ИСТИНЫ.
 #: При релизе: поднять здесь → прогнать build.bat → опубликовать GitHub Release.
-APP_VERSION = "0.6.5"
+APP_VERSION = "0.7.0"
 
 #: Таймаут сетевых запросов (секунды).
 NETWORK_TIMEOUT = 15

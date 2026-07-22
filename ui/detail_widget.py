@@ -4430,6 +4430,14 @@ class DetailWidget(QWidget):
 
     def apply_filters(self):
         if self.df_full is None:
+            # df_full сброшен (новая/загруженная база без операций) — модель
+            # тоже нужно явно очистить, иначе дерево продолжает показывать
+            # строки предыдущего проекта (данные внутри уже не те, что на
+            # экране).
+            empty = pd.DataFrame(columns=[
+                "Дата", "Контрагент", "Назначение", "Сумма", "Категория", "Участок"])
+            self._refresh_op_tabs(empty)
+            self._rebuild_model(empty)
             return
         self._rebuild_model(self._filtered_df())
 
