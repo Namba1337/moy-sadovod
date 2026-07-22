@@ -60,32 +60,8 @@ snt_app/
 ## Облачные обновления
 
 Приложение само проверяет наличие новой версии при запуске и через кнопку
-**«Проверить обновления»** в сайдбаре. Источник — GitHub Releases приватного репозитория.
-
-### Настройка (однократно)
-
-#### 1. Создать GitHub Personal Access Token
-
-1. Открыть **GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens**.
-2. Нажать **Generate new token**, заполнить:
-   - **Token name**: `MoySadovod Updater`
-   - **Expiration**: по желанию (или No expiration)
-   - **Repository access**: Only selected repositories → выбрать `snt_helper_app`
-   - **Permissions → Contents**: `Read-only`
-3. Скопировать токен (показывается один раз).
-
-#### 2. Прописать токен в updater.py
-
-Открыть `core/updater.py` и вставить токен:
-
-```python
-GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "ghp_ВАШ_ТОКЕН_ЗДЕСЬ")
-```
-
-`GITHUB_OWNER` и `GITHUB_REPO` уже заполнены верно.
-
-> **Безопасность:** токен имеет права только на чтение содержимого одного репозитория,
-> поэтому его можно безопасно бандлить внутрь `.exe`.
+**«Проверить обновления»** в сайдбаре. Источник — GitHub Releases этого
+репозитория (публичный REST API, без токена и авторизации).
 
 ### Выпуск новой версии
 
@@ -117,26 +93,19 @@ GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "ghp_ВАШ_ТОКЕН_ЗДЕ
    ```
 
 6. На GitHub: **Releases → Draft new release** → выбрать тег `v1.0.1`,
-   приложить ОБА файла (`.exe` и `.sha256`) как assets, заполнить
+   приложить ОБА файла (`.exe` и `.exe.sha256`) как assets, заполнить
    release notes (их увидит пользователь в диалоге обновления) → **Publish**.
 
-7. Открыть Gist и обновить `update.json`:
-   ```json
-   {
-     "version": "1.0.1",
-     "notes": "Что нового...",
-     "download_url": "https://github.com/Namba1337/snt_helper_app_public_releases/releases/download/v1.0.1/MoySadovod_Setup_v1.0.1.exe",
-     "sha256": "<хеш из .sha256 файла>",
-     "size_bytes": 0
-   }
-   ```
-   Нажать **Update** — установленные клиенты получат уведомление при
-   следующем запуске.
+   Готово — никакого дополнительного шага (Gist и т.п.) не требуется:
+   приложение само найдёт этот релиз через GitHub Releases API.
 
 После публикации все установленные клиенты при следующем запуске увидят
 плашку «Доступна новая версия» с кнопкой «Обновить». При нажатии:
-1. Скачивается установщик в `%TEMP%\MoySadovod_update\`.
-2. Проверяется SHA-256 (из поля `sha256` в `update.json`).
+1. Скачивается установщик из `browser_download_url` приложенного `.exe`.
+2. Проверяется SHA-256 (из приложенного `.exe.sha256`, если он есть).
 3. Запускается Inno Setup в тихом режиме (`/SILENT /CLOSEAPPLICATIONS
    /RESTARTAPPLICATIONS`), приложение завершается, установщик
    обновляет файлы и заново запускает приложение.
+
+> GitHub Releases API возвращает только опубликованные (не draft,
+> не pre-release) релизы, поэтому черновики безопасны — клиенты их не увидят.

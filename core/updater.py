@@ -1,9 +1,9 @@
-"""Система облачных обновлений через публичный JSON-манифест.
+"""Система облачных обновлений через GitHub Releases (публичный репозиторий).
 
 Архитектура:
-    1. UpdateChecker.check() — фоновой поток, скачивает UPDATE_MANIFEST_URL,
-       сравнивает версии, отдаёт ReleaseInfo сигналом updateAvailable
-       (или noUpdate / errorOccurred).
+    1. UpdateChecker.check() — фоновой поток, запрашивает у GitHub
+       последний релиз (releases/latest), сравнивает версии, отдаёт
+       ReleaseInfo сигналом updateAvailable (или noUpdate / errorOccurred).
     2. UpdateDownloader.start() — фоновой поток, качает установщик
        с прогрессом (downloadProgress), проверяет SHA-256, отдаёт путь
        к локальному .exe сигналом downloadFinished.
@@ -11,17 +11,11 @@
        (/SILENT /NORESTART /CLOSEAPPLICATIONS) и просит приложение
        завершиться.
 
-Формат манифеста (публичный Gist или любой HTTPS-URL):
-    {
-        "version": "1.2.3",
-        "notes":   "Что нового в этой версии...",
-        "download_url": "https://..../MoySadovod_Setup_v1.2.3.exe",
-        "sha256":  "abcdef0123456789...",   // опционально, 64 hex-символа
-        "size_bytes": 12345678              // опционально
-    }
-
-При каждом релизе достаточно обновить JSON в Gist — никаких изменений
-в коде или перекомпиляции не требуется.
+При каждом релизе достаточно опубликовать GitHub Release с тегом
+`vX.Y.Z` и приложенными файлами `*.exe` + `*.exe.sha256` — никаких
+изменений в коде или перекомпиляции не требуется. GitHub API отдаёт
+последний ОПУБЛИКОВАННЫЙ релиз (черновики и pre-release игнорируются).
+Никакой авторизации не нужно — репозиторий публичный.
 """
 
 from __future__ import annotations
@@ -48,14 +42,8 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 # ──────────────────────────────────────────────────────────────────────────
 
 #: Текущая версия приложения. ЕДИНСТВЕННАЯ ТОЧКА ИСТИНЫ.
-#: При релизе: поднять здесь → прогнать build.bat → обновить Gist.
+#: При релизе: поднять здесь → прогнать build.bat → опубликовать GitHub Release.
 APP_VERSION = "0.5.0"
-
-#: URL публичного JSON-манифеста обновлений (GitHub Gist raw или любой HTTPS).
-#: Как создать Gist: https://gist.github.com → New gist → Public.
-#: Скопируйте ссылку «Raw» и вставьте сюда.
-#: Пример: "https://gist.githubusercontent.com/Namba1337/<id>/raw/update.json"
-UPDATE_MANIFEST_URL: str = "https://gist.githubusercontent.com/Namba1337/39df34c920f5105092075ef4bc316c09/raw/update.json"
 
 #: Таймаут сетевых запросов (секунды).
 NETWORK_TIMEOUT = 15
@@ -63,11 +51,11 @@ NETWORK_TIMEOUT = 15
 #: User-Agent для HTTP-запросов.
 USER_AGENT = f"MoySadovod/{APP_VERSION}"
 
-#: Публичный репозиторий на GitHub — источник истории релизов (Releases API).
-#: Основной репозиторий приватный; установщики и релизы публикуются в
-#: отдельном публичном репозитории (см. download_url в манифесте обновлений).
-GITHUB_REPO = "Namba1337/snt_helper_app_public_releases"
+#: Публичный репозиторий на GitHub — источник обновлений и истории релизов
+#: (GitHub Releases API, без авторизации).
+GITHUB_REPO = "Namba1337/snt_helper_app"
 GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+GITHUB_LATEST_RELEASE_API = f"{GITHUB_RELEASES_API}/latest"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -104,7 +92,7 @@ def is_newer(remote: str, local: str) -> bool:
 
 @dataclass(frozen=True)
 class ReleaseInfo:
-    """Информация о доступном обновлении, прочитанная из манифеста."""
+    """Информация о доступном обновлении, прочитанная из GitHub Release."""
     version: str                    # '1.2.3'
     notes: str                      # release notes (произвольный текст)
     download_url: str               # прямая ссылка на .exe установщика
@@ -149,50 +137,68 @@ class _CheckWorker(QThread):
     failed = pyqtSignal(str)
 
     def run(self) -> None:
-        # Проверяем, что URL манифеста задан
-        if "REPLACE_WITH_YOUR_GIST_ID" in UPDATE_MANIFEST_URL:
-            self.failed.emit("URL манифеста обновлений не настроен.")
-            return
-
         try:
-            raw = _http_get(UPDATE_MANIFEST_URL)
+            raw = _http_get(
+                GITHUB_LATEST_RELEASE_API,
+                headers={"Accept": "application/vnd.github+json"},
+            )
             data = json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Ещё нет ни одного опубликованного релиза.
+                self.finished_ok.emit(None)
+                return
             self.failed.emit(f"HTTP {e.code}: {e.reason}")
             return
         except Exception as e:
             self.failed.emit(str(e))
             return
 
-        version = str(data.get("version", "")).strip()
+        tag = str(data.get("tag_name", "")).strip()
+        version = tag.lstrip("vV")
         if not version:
-            self.failed.emit("В манифесте отсутствует поле 'version'.")
+            self.failed.emit("В ответе GitHub отсутствует тег релиза.")
             return
 
         if not is_newer(version, APP_VERSION):
             self.finished_ok.emit(None)
             return
 
-        download_url = str(data.get("download_url", "")).strip()
-        if not download_url:
-            self.failed.emit("В манифесте отсутствует поле 'download_url'.")
+        assets = data.get("assets") or []
+        exe_asset = next(
+            (a for a in assets if str(a.get("name", "")).lower().endswith(".exe")),
+            None,
+        )
+        if exe_asset is None:
+            self.failed.emit("В релизе не найден установщик (.exe).")
             return
 
-        # Имя файла берём из URL
-        asset_name = Path(download_url.split("?")[0]).name or "MoySadovod_Setup.exe"
+        download_url = str(exe_asset.get("browser_download_url", "")).strip()
+        asset_name = str(exe_asset.get("name", "")).strip() or "MoySadovod_Setup.exe"
+        size_bytes = int(exe_asset.get("size", 0) or 0)
 
-        # SHA-256 — опционально
-        sha256_raw = str(data.get("sha256", "")).strip().lower()
+        # SHA-256 — из приложенного *.exe.sha256, если есть (опционально).
         sha256_expected: Optional[str] = None
-        if re.fullmatch(r"[0-9a-f]{64}", sha256_raw):
-            sha256_expected = sha256_raw
+        sha_asset = next(
+            (a for a in assets if str(a.get("name", "")).lower().endswith(".sha256")),
+            None,
+        )
+        if sha_asset is not None:
+            sha_url = str(sha_asset.get("browser_download_url", "")).strip()
+            try:
+                sha_raw = _http_get(sha_url).decode("utf-8", errors="ignore")
+                first_token = sha_raw.strip().split()[0] if sha_raw.strip() else ""
+                if re.fullmatch(r"[0-9a-fA-F]{64}", first_token):
+                    sha256_expected = first_token.lower()
+            except Exception:
+                pass  # Проверка целостности просто будет пропущена.
 
         self.finished_ok.emit(ReleaseInfo(
             version=version,
-            notes=str(data.get("notes", "")).strip(),
+            notes=str(data.get("body", "") or "").strip(),
             download_url=download_url,
             asset_name=asset_name,
-            size_bytes=int(data.get("size_bytes", 0) or 0),
+            size_bytes=size_bytes,
             sha256_expected=sha256_expected,
         ))
 
