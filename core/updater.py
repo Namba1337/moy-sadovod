@@ -678,8 +678,10 @@ def run_installer(installer_path: str) -> bool:
 
     try:
         import subprocess
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        # DETACHED_PROCESS/CREATE_NEW_PROCESS_GROUP конфликтуют с
+        # CREATE_NO_WINDOW (Windows игнорирует скрытие окна) — отсюда
+        # всплывавшее консольное окно с "ping". Достаточно CREATE_NO_WINDOW:
+        # он и создаёт независимый от нас процесс, и не показывает окно.
         CREATE_NO_WINDOW = 0x08000000
 
         command = (
@@ -689,7 +691,7 @@ def run_installer(installer_path: str) -> bool:
         subprocess.Popen(
             command,
             shell=True,
-            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            creationflags=CREATE_NO_WINDOW,
             close_fds=True,
         )
         return True
