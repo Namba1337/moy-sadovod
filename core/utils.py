@@ -30,6 +30,17 @@ def _ensure_df(df) -> Optional[pd.DataFrame]:
     return df
 
 
+def truncate_filename(name: str, limit: int = 24) -> str:
+    """Сокращает длинное имя файла: первые 17 + «…» + последние 7 символов.
+
+    Правило единое для всего приложения — карточка контакта (загрузка
+    документов) и заголовок/меню проекта используют его одинаково.
+    """
+    if len(name) > limit:
+        return name[:17] + "…" + name[-7:]
+    return name
+
+
 def fmt_money(v) -> str:
     if v is None:
         return "—"

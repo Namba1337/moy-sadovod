@@ -10,11 +10,12 @@ from pathlib import Path
 import pandas as pd
 
 from core import energy
-from core.utils import DATA_DIR
+from core import app_state
+from core.utils import DATA_DIR, truncate_filename
 from core.updater import APP_VERSION, UpdateChecker
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QStackedWidget, QLabel, QPushButton,
+    QStackedWidget, QLabel, QPushButton, QMenu,
     QTableWidget, QHeaderView, QLineEdit, QComboBox,
     QDateEdit, QFrame, QFileDialog, QMessageBox,
     QScrollArea, QStyleOption, QStyle,
@@ -22,10 +23,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (Qt, QPoint, QRect, QRectF, QTimer, pyqtSignal,
                            QPropertyAnimation, QParallelAnimationGroup,
                            QEasingCurve)
-from PyQt6.QtGui import QFont, QFontMetrics, QColor, QPainter, QPixmap, QFontDatabase, QPalette, QBitmap, QPainterPath
+from PyQt6.QtGui import (QFont, QFontMetrics, QColor, QPainter, QPixmap,
+                          QFontDatabase, QPalette, QBitmap, QPainterPath,
+                          QAction, QKeySequence)
 
 
-from ui.theme import C, FS, RAD, checkbox_qss, scrollbar_qss, summary_table_qss
+from ui.theme import C, FS, RAD, checkbox_qss, scrollbar_qss, summary_table_qss, menu_qss
 # QMessageBox остаётся только в аварийных обработчиках (_qt_msg_handler,
 # _excepthook): когда приложение сломано, нативное окно надёжнее кастомного.
 from ui.dialogs import AlertDialog as _AlertDialog, ConfirmDialog as _ConfirmDialog
@@ -58,14 +61,27 @@ class _TitleBar(QWidget):
         lyt.setContentsMargins(16, 0, 0, 0)
         lyt.setSpacing(0)
 
+        self._file_btn = QPushButton("Файл", objectName="btnFileMenu")
+        self._file_btn.setFixedHeight(24)
+        self._file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._file_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        lyt.addWidget(self._file_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         lyt.addStretch()
+
+        # Имя текущей базы — по центру шапки, независимо от содержимого слева
+        # и справа (которое переменной ширины: пилюля версии растягивается
+        # при предупреждении об обновлении). Поэтому не часть flow-layout —
+        # позиционируется вручную в _center_project_label / resizeEvent.
+        self._project_lbl = QLabel("", self, objectName="titleProjectLabel")
+        self._project_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._project_lbl.show()
 
         self._version_btn = QPushButton(APP_VERSION, objectName="btnVersionPill")
         self._version_btn.setFixedHeight(24)
         self._version_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._version_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._version_btn.setToolTip(
-            "Проверить обновления и открыть историю версий")
+        self._version_btn.setToolTip("Открыть историю версий")
         self._version_btn.clicked.connect(window._on_update_pill_clicked)
         lyt.addWidget(self._version_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
         lyt.addSpacing(10)
@@ -86,6 +102,35 @@ class _TitleBar(QWidget):
             lyt.addWidget(btn)
 
         self._btn_max = self.findChild(QPushButton, "btnWinMax")
+
+    def set_update_available(self, available: bool) -> None:
+        """Подсветить пилюлю версии предупреждающим цветом при наличии обновления."""
+        if available:
+            self._version_btn.setText(
+                f"Вышла новая версия! Нажмите чтобы обновить  |  {APP_VERSION}")
+            self._version_btn.setToolTip("Доступно обновление — нажмите, чтобы установить")
+        else:
+            self._version_btn.setText(APP_VERSION)
+            self._version_btn.setToolTip("Открыть историю версий")
+        self._version_btn.setProperty("updateAvailable", "true" if available else "false")
+        self._version_btn.style().unpolish(self._version_btn)
+        self._version_btn.style().polish(self._version_btn)
+
+    def set_project_name(self, display_text: str) -> None:
+        """Показать (уже сокращённое) имя текущей базы по центру шапки."""
+        self._project_lbl.setText(display_text)
+        self._center_project_label()
+
+    def _center_project_label(self) -> None:
+        lbl = self._project_lbl
+        lbl.adjustSize()
+        x = max(0, (self.width() - lbl.width()) // 2)
+        y = (self.height() - lbl.height()) // 2
+        lbl.move(x, y)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._center_project_label()
 
     def paintEvent(self, event):
         opt = QStyleOption()
@@ -193,60 +238,6 @@ class _NavButton(QWidget):
         super().mousePressEvent(event)
 
 
-class _ActionButton(QWidget):
-    """Кнопка действия в нижней части сайдбара: значок + подпись."""
-    clicked = pyqtSignal()
-
-    def __init__(self, icon_char: str, label: str, parent=None):
-        super().__init__(parent)
-        self.setObjectName("btnNavAction")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
-        self.setFixedHeight(38)
-
-        lyt = QHBoxLayout(self)
-        lyt.setContentsMargins(10, 0, 15, 0)
-        lyt.setSpacing(7)
-
-        self._icon = QLabel(icon_char, objectName="navIcon")
-        icon_font = QFont("Material Symbols Rounded")
-        icon_font.setPixelSize(17)
-        self._icon.setFont(icon_font)
-        self._icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-        self._lbl = QLabel(label, objectName="actionLabel")
-        self._lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-        lyt.addWidget(self._icon)
-        lyt.addWidget(self._lbl)
-        lyt.addStretch()
-
-    def paintEvent(self, event):
-        opt = QStyleOption()
-        opt.initFrom(self)
-        p = QPainter(self)
-        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, p, self)
-
-    def set_collapsed(self, collapsed: bool):
-        lyt = self.layout()
-        if collapsed:
-            self._saved_margins = lyt.contentsMargins()
-            m = self._saved_margins.left()
-            lyt.setContentsMargins(m, 0, m, 0)
-            icon_w = max(self._icon.sizeHint().width(), 1)
-            self.setFixedWidth(m * 2 + icon_w)
-        else:
-            if hasattr(self, "_saved_margins"):
-                lyt.setContentsMargins(self._saved_margins)
-            self.setMinimumWidth(0)
-            self.setMaximumWidth(16777215)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
-
-
 class _BrandText(QWidget):
     """Надпись «МОЙ / САДОВОД / Бухгалтерский учет для СНТ».
 
@@ -339,9 +330,16 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1280, 720)
         self.resize(1500, 860)
         self._update_checker = None
-        self._update_manual = False
+        self._pending_update = None  # ReleaseInfo | None — результат последней проверки
+        # Путь к базе, с которой сейчас ведётся работа (None — ещё ни разу не
+        # сохранялась/не открывалась). data/ уже содержит её данные — сама
+        # выписка/участки и т.п. переживают перезапуск приложения независимо
+        # от этого пути, он нужен только для заголовка, Ctrl+S и MRU-списка.
+        self._current_project_path = app_state.get_last_project()
         self._setup_ui()
         self._apply_styles()
+        self._update_title_display()
+        self._refresh_recent_menu()
 
     # ── Native resize support on Windows ─────────────────────────────────
 
@@ -353,7 +351,7 @@ class MainWindow(QMainWindow):
         # после первого показа окна (чтобы UI успел отрисоваться).
         if not getattr(self, "_update_check_scheduled", False):
             self._update_check_scheduled = True
-            QTimer.singleShot(1500, lambda: self._check_for_updates(manual=False))
+            QTimer.singleShot(1500, self._check_for_updates)
 
     def _restore_win_resize(self):
         """Ensure full WS_OVERLAPPEDWINDOW style + DWM frame for animations."""
@@ -471,14 +469,16 @@ class MainWindow(QMainWindow):
                 if py < tb_h:
                     if px >= w - btn_w:
                         return True, HTCLIENT
-                    # Пилюля версии — тоже кликабельный виджет, а не часть
-                    # перетаскиваемой рамки (иначе WM_NCHITTEST перехватывает
-                    # клик как HTCAPTION раньше, чем он доходит до Qt).
-                    pill = getattr(self._title_bar, "_version_btn", None)
-                    if pill is not None:
-                        pill_rect = QRect(pill.mapTo(self, QPoint(0, 0)), pill.size())
-                        if pill_rect.contains(px, py):
-                            return True, HTCLIENT
+                    # Пилюля версии и кнопка «Файл» — кликабельные виджеты, а
+                    # не часть перетаскиваемой рамки (иначе WM_NCHITTEST
+                    # перехватывает клик как HTCAPTION раньше, чем он доходит
+                    # до Qt).
+                    for attr in ("_version_btn", "_file_btn"):
+                        w_ = getattr(self._title_bar, attr, None)
+                        if w_ is not None:
+                            rect = QRect(w_.mapTo(self, QPoint(0, 0)), w_.size())
+                            if rect.contains(px, py):
+                                return True, HTCLIENT
                     return True, HTCAPTION
 
         return False, 0
@@ -495,6 +495,8 @@ class MainWindow(QMainWindow):
 
         self._title_bar = _TitleBar(self)
         outer.addWidget(self._title_bar)
+        self._file_menu = self._build_file_menu()
+        self._title_bar._file_btn.setMenu(self._file_menu)
 
         # Body: левый сайдбар + область контента
         body = QWidget(objectName="bodyArea")
@@ -577,20 +579,10 @@ class MainWindow(QMainWindow):
 
         btn_container_lyt.addStretch()
 
-        btn_save_proj = _ActionButton(chr(0xf09b), "Сохранить базу СНТ")
-        btn_save_proj.clicked.connect(self._save_project)
-        btn_container_lyt.addWidget(btn_save_proj)
-
-        btn_load_proj = _ActionButton(chr(0xf090), "Загрузить базу СНТ")
-        btn_load_proj.clicked.connect(self._load_project)
-        btn_container_lyt.addWidget(btn_load_proj)
-
         side_lyt.addWidget(btn_container, stretch=1)
 
         self._sidebar = sidebar
         self._sidebar_expanded = True
-        self._btn_save = btn_save_proj
-        self._btn_load = btn_load_proj
 
         body_lyt.addWidget(sidebar)
 
@@ -684,9 +676,6 @@ class MainWindow(QMainWindow):
             for btn in self._nav_buttons:
                 btn._lbl.setVisible(False)
                 btn.set_collapsed(True)
-            for b in (self._btn_save, self._btn_load):
-                b._lbl.setVisible(False)
-                b.set_collapsed(True)
             self._btn_container_lyt.setContentsMargins(0, 0, 0, 16)
 
         if getattr(self, "_sidebar_anim", None) is not None:
@@ -711,9 +700,6 @@ class MainWindow(QMainWindow):
                 for btn in self._nav_buttons:
                     btn.set_collapsed(False)
                     btn._lbl.setVisible(True)
-                for b in (self._btn_save, self._btn_load):
-                    b.set_collapsed(False)
-                    b._lbl.setVisible(True)
 
         anim.finished.connect(_on_done)
         self._sidebar_anim = anim
@@ -730,64 +716,234 @@ class MainWindow(QMainWindow):
         "snt_common_meter.json", "snt_categories.json", "snt_people.json",
     ]
 
-    def _save_project(self):
+    def _build_file_menu(self) -> QMenu:
+        """Меню «Файл» (кнопка в левом углу шапки): создание/открытие/
+        сохранение базы + список недавних баз (MRU), вставляемый перед
+        self._recent_separator в _refresh_recent_menu."""
+        menu = QMenu(self)
+        menu.setStyleSheet(menu_qss())
+        self._recent_menu_actions: list[QAction] = []
+
+        act_new = QAction("Новая база СНТ", self)
+        act_new.setShortcut(QKeySequence("Ctrl+N"))
+        act_new.triggered.connect(self._new_project)
+        self.addAction(act_new)
+        menu.addAction(act_new)
+
+        menu.addSeparator()
+
+        act_open = QAction("Открыть файл СНТ", self)
+        act_open.setShortcut(QKeySequence("Ctrl+O"))
+        act_open.triggered.connect(self._load_project)
+        self.addAction(act_open)
+        menu.addAction(act_open)
+
+        self._recent_separator = menu.addSeparator()
+
+        act_save = QAction("Сохранить", self)
+        act_save.setShortcut(QKeySequence("Ctrl+S"))
+        act_save.triggered.connect(self._save_project)
+        self.addAction(act_save)
+        menu.addAction(act_save)
+
+        act_save_as = QAction("Сохранить как...", self)
+        act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        act_save_as.triggered.connect(self._save_project_as)
+        self.addAction(act_save_as)
+        menu.addAction(act_save_as)
+
+        return menu
+
+    def _update_title_display(self) -> None:
+        """Обновить имя текущей базы по центру шапки (сокращённое по общему
+        правилу — как в карточке контакта при загрузке документов)."""
+        path = self._current_project_path
+        name = truncate_filename(os.path.basename(path)) if path else ""
+        self._title_bar.set_project_name(name)
+
+    def _refresh_recent_menu(self) -> None:
+        """Перестроить пункты «Открыть [база]» в меню «Файл» из MRU-списка."""
+        for act in getattr(self, "_recent_menu_actions", []):
+            self._file_menu.removeAction(act)
+        self._recent_menu_actions = []
+
+        recent = [p for p in app_state.get_recent_projects()
+                  if p != self._current_project_path]
+        for path in recent:
+            name = truncate_filename(os.path.basename(path))
+            act = QAction(f"Открыть {name}", self)
+            act.setToolTip(path)
+            act.triggered.connect(lambda checked=False, p=path: self._load_project_from(p))
+            self._file_menu.insertAction(self._recent_separator, act)
+            self._recent_menu_actions.append(act)
+
+    def _remember_current_project(self) -> None:
+        if self._current_project_path:
+            app_state.remember_project(self._current_project_path)
+        self._update_title_display()
+        self._refresh_recent_menu()
+
+    def _write_project_to(self, path: str) -> list[str]:
+        """Записать текущее состояние (data/ + выписка) в zip-файл базы.
+
+        Возвращает список некритичных предупреждений (пустой — если без
+        замечаний). Бросает исключение при неустранимой ошибке записи."""
+        data_dir = Path(DATA_DIR)
+        errors: list[str] = []
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fname in self._PROJECT_JSON_FILES:
+                src = data_dir / fname
+                if src.exists():
+                    zf.write(src, f"data/{fname}")
+
+            # сохраняем данные вкладки «Детализация»
+            if self.detail.df_full is not None:
+                try:
+                    json_str = self.detail.df_full.to_json(
+                        orient="records", force_ascii=False)
+                    zf.writestr("data/detail_transactions.json", json_str)
+                except Exception as e:
+                    errors.append(f"Детализация: {e}")
+                try:
+                    cells_data = self.detail.get_manual_cells_data()
+                    zf.writestr(
+                        "data/detail_manual_cells.json",
+                        json.dumps(cells_data, ensure_ascii=False),
+                    )
+                except Exception as e:
+                    errors.append(f"Пометки редактирования: {e}")
+
+            # включаем файл карты, если он локальный
+            map_cfg = data_dir / "snt_map_image.json"
+            if map_cfg.exists():
+                try:
+                    with open(map_cfg, encoding="utf-8") as f:
+                        img_path = json.load(f).get("path", "")
+                    if img_path and Path(img_path).is_file():
+                        ext = Path(img_path).suffix
+                        zf.write(img_path, f"map_image{ext}")
+                except Exception as e:
+                    errors.append(f"Изображение карты: {e}")
+        return errors
+
+    def _save_project_as(self) -> None:
+        """Ctrl+Shift+S — всегда спрашивает новое имя/расположение файла."""
         path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить проект СНТ", "", "Проект СНТ (*.snt)")
+            self, "Сохранить проект СНТ как", "", "Проект СНТ (*.snt)")
         if not path:
             return
         if not path.endswith(".snt"):
             path += ".snt"
 
-        data_dir = Path(DATA_DIR)
-        errors = []
         try:
-            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for fname in self._PROJECT_JSON_FILES:
-                    src = data_dir / fname
-                    if src.exists():
-                        zf.write(src, f"data/{fname}")
-
-                # сохраняем данные вкладки «Детализация»
-                if self.detail.df_full is not None:
-                    try:
-                        json_str = self.detail.df_full.to_json(
-                            orient="records", force_ascii=False)
-                        zf.writestr("data/detail_transactions.json", json_str)
-                    except Exception as e:
-                        errors.append(f"Детализация: {e}")
-                    try:
-                        cells_data = self.detail.get_manual_cells_data()
-                        zf.writestr(
-                            "data/detail_manual_cells.json",
-                            json.dumps(cells_data, ensure_ascii=False),
-                        )
-                    except Exception as e:
-                        errors.append(f"Пометки редактирования: {e}")
-
-                # включаем файл карты, если он локальный
-                map_cfg = data_dir / "snt_map_image.json"
-                if map_cfg.exists():
-                    try:
-                        with open(map_cfg, encoding="utf-8") as f:
-                            img_path = json.load(f).get("path", "")
-                        if img_path and Path(img_path).is_file():
-                            ext = Path(img_path).suffix
-                            zf.write(img_path, f"map_image{ext}")
-                    except Exception as e:
-                        errors.append(f"Изображение карты: {e}")
+            errors = self._write_project_to(path)
         except Exception as e:
             _AlertDialog.show_alert(self, "Ошибка", f"Не удалось сохранить проект:\n{e}")
             return
+
+        self._current_project_path = path
+        self._remember_current_project()
 
         msg = f"Проект сохранён:\n{path}"
         if errors:
             msg += "\n\nПредупреждения:\n" + "\n".join(errors)
         _AlertDialog.show_alert(self, "Сохранено", msg)
 
-    def _load_project(self):
+    def _save_project(self) -> None:
+        """Ctrl+S — сохраняет в уже известный файл базы; если такого пока нет
+        (свежий запуск без истории), ведёт себя как «Сохранить как…»."""
+        if not self._current_project_path:
+            self._save_project_as()
+            return
+
+        try:
+            errors = self._write_project_to(self._current_project_path)
+        except Exception as e:
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось сохранить проект:\n{e}")
+            return
+
+        self._remember_current_project()
+
+        msg = f"Проект сохранён:\n{self._current_project_path}"
+        if errors:
+            msg += "\n\nПредупреждения:\n" + "\n".join(errors)
+        _AlertDialog.show_alert(self, "Сохранено", msg)
+
+    def _clear_detail_session(self) -> None:
+        """Сбросить вкладку «Детализация» и обновить остальные вкладки под
+        пустую выписку (нет сохранённых операций / не распознались)."""
+        self.detail._manual_rows.clear()
+        self.detail._manual_cells.clear()
+        self.detail._dup_pending.clear()
+        self.detail.df_full = None
+        self.detail.apply_filters()
+        self.energy_debt.refresh(None)
+        self.vznosy_debt.refresh(None)
+        self.home.refresh(None)
+        # Кэш долгов на «Участках» тоже считался по старой выписке
+        self.plots.refresh(None)
+        self._plots_stale = False
+
+    def _new_project(self) -> None:
+        """Ctrl+N — пустая база: подтверждение, затем имя и расположение
+        нового файла (как «Сохранить как»); данные очищаются и файл
+        создаётся сразу."""
+        if not _ConfirmDialog.confirm(
+            self, "Новая база СНТ",
+            "Текущие данные будут закрыты, и вы начнёте с пустой базы.\n"
+            "Несохранённые изменения будут потеряны.\nПродолжить?",
+            confirm_text="Продолжить", danger=False,
+        ):
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Новая база СНТ — сохранить как", "", "Проект СНТ (*.snt)")
+        if not path:
+            return
+        if not path.endswith(".snt"):
+            path += ".snt"
+
+        data_dir = Path(DATA_DIR)
+        for fname in self._PROJECT_JSON_FILES:
+            f = data_dir / fname
+            if f.exists():
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+
+        self.plots.reload()
+        self.energy_debt.rates.reload()
+        self.vznosy_debt.rates.reload()
+        self._clear_detail_session()
+
+        try:
+            self._write_project_to(path)
+        except Exception as e:
+            _AlertDialog.show_alert(self, "Ошибка", f"Не удалось создать файл базы:\n{e}")
+            return
+
+        self._current_project_path = path
+        self._remember_current_project()
+        _AlertDialog.show_alert(self, "Готово", "Создана новая пустая база СНТ.")
+
+    def _load_project(self) -> None:
+        """Ctrl+O — выбрать файл базы через диалог и открыть его."""
         path, _ = QFileDialog.getOpenFileName(
             self, "Загрузить проект СНТ", "", "Проект СНТ (*.snt)")
         if not path:
+            return
+        self._load_project_from(path)
+
+    def _load_project_from(self, path: str) -> None:
+        """Открыть базу из указанного .snt-файла (используется и «Открыть
+        файл СНТ», и пунктами MRU-списка «Открыть [база]»)."""
+        if not os.path.isfile(path):
+            _AlertDialog.show_alert(
+                self, "Файл не найден",
+                f"База не найдена по сохранённому пути:\n{path}")
+            app_state.forget_project(path)
+            self._refresh_recent_menu()
             return
 
         if not _ConfirmDialog.confirm(
@@ -857,47 +1013,45 @@ class MainWindow(QMainWindow):
             if manual_cells_data is not None:
                 self.detail.restore_manual_cells(manual_cells_data)
         else:
-            # В загруженном проекте нет сохранённой выписки (или она не
+            # В загруженной базе нет сохранённой выписки (или она не
             # распарсилась) — явно очищаем self.detail, иначе виджеты ниже
-            # обновятся СТАРОЙ выпиской из предыдущего проекта, и новые
+            # обновятся СТАРОЙ выпиской из предыдущей базы, и новые
             # участки/тарифы окажутся смешаны с чужими операциями.
-            self.detail._manual_rows.clear()
-            self.detail._manual_cells.clear()
-            self.detail._dup_pending.clear()
-            self.detail.df_full = None
-            self.detail.apply_filters()
-            self.energy_debt.refresh(None)
-            self.vznosy_debt.refresh(None)
-            self.home.refresh(None)
-            # Кэш долгов на «Участках» тоже считался по старой выписке
-            self.plots.refresh(None)
-            self._plots_stale = False
+            self._clear_detail_session()
 
+        self._current_project_path = path
+        self._remember_current_project()
         _AlertDialog.show_alert(self, "Загружено", "Проект успешно загружен.")
 
     # ── Облачные обновления ─────────────────────────────────────────────
 
     def _on_update_pill_clicked(self) -> None:
-        """Клик по пилюле версии в шапке: проверка обновлений + история релизов."""
-        self._check_for_updates(manual=True)
+        """Клик по пилюле версии в шапке.
+
+        Версия уже проверена при запуске приложения и закэширована в
+        self._pending_update — повторный запрос на клик не делаем.
+        Если найдено обновление — открываем окно обновления, иначе — историю версий.
+        """
+        if self._pending_update is not None:
+            from ui.update_dialog import UpdateDialog
+            from ui.detail_widget import _exec_dialog
+            dlg = UpdateDialog(self._pending_update, self)
+            _exec_dialog(dlg, self)
+            return
+
         from ui.update_history_dialog import UpdateHistoryDialog
         from ui.detail_widget import _exec_dialog
         dlg = UpdateHistoryDialog(self)
         _exec_dialog(dlg, self)
 
-    def _check_for_updates(self, *, manual: bool) -> None:
-        """Запросить latest-release с GitHub.
-
-        manual=True  — показываем «нет обновлений»/ошибку явно.
-        manual=False — авто-проверка на старте; молчим, если нечего сказать.
-        """
+    def _check_for_updates(self) -> None:
+        """Запросить latest-release с GitHub. Вызывается один раз при старте."""
         # Не плодим параллельные проверки
         if getattr(self, "_update_checker", None) is not None:
             return
 
         checker = UpdateChecker(self)
         self._update_checker = checker
-        self._update_manual = manual
 
         checker.updateAvailable.connect(self._on_update_available)
         checker.noUpdate.connect(self._on_no_update)
@@ -909,6 +1063,8 @@ class MainWindow(QMainWindow):
 
     def _on_update_available(self, info) -> None:
         self._release_checker()
+        self._pending_update = info
+        self._title_bar.set_update_available(True)
         # Импортируем здесь — чтобы избежать ненужной зависимости UI от ядра
         # на этапе импорта main.py (PyInstaller-frozen инициализация и т.п.).
         from ui.update_dialog import UpdateDialog
@@ -917,25 +1073,14 @@ class MainWindow(QMainWindow):
         _exec_dialog(dlg, self)
 
     def _on_no_update(self) -> None:
-        manual = self._update_manual
         self._release_checker()
-        if manual:
-            from ui.detail_widget import _AlertDialog
-            _AlertDialog.show_alert(
-                self, "Обновления",
-                f"У вас актуальная версия ({APP_VERSION}).",
-            )
+        self._pending_update = None
+        self._title_bar.set_update_available(False)
 
     def _on_update_error(self, msg: str) -> None:
-        manual = self._update_manual
         self._release_checker()
-        if manual:
-            from ui.detail_widget import _AlertDialog
-            _AlertDialog.show_alert(
-                self, "Не удалось проверить обновления",
-                f"Не удалось связаться с сервером обновлений:\n{msg}",
-            )
-        # При авто-проверке молча игнорируем — нет интернета, нет проблемы.
+        # Молча игнорируем — нет интернета, нет проблемы. Пилюлю не трогаем:
+        # состояние остаётся таким же, как после предыдущей успешной проверки.
 
     def _apply_styles(self):
         # QSS собирается из токенов темы (ui.theme.C/FS/RAD) через
@@ -949,6 +1094,17 @@ class MainWindow(QMainWindow):
             QWidget#titleBar {
                 background: ${BG_WINDOW};
             }
+            QPushButton#btnFileMenu {
+                background: transparent; border: none; border-radius: 6px;
+                color: ${TEXT_BODY}; font-size: ${FS_SMALL}px; font-weight: 600;
+                padding: 2px 12px;
+            }
+            QPushButton#btnFileMenu:hover    { background: ${NAV_HOVER}; }
+            QPushButton#btnFileMenu:pressed  { background: ${BRAND_TINT}; }
+            QLabel#titleProjectLabel {
+                background: transparent; border: none;
+                color: ${TEXT_MUTED}; font-size: ${FS_SMALL}px; font-weight: 500;
+            }
             QPushButton#btnVersionPill {
                 background: rgba(7,65,79,0.1); border: 1px solid rgba(7,65,79,0.35);
                 border-radius: 12px; color: ${BRAND}; font-size: ${FS_SMALL}px; font-weight: 600;
@@ -956,6 +1112,12 @@ class MainWindow(QMainWindow):
             }
             QPushButton#btnVersionPill:hover   { background: rgba(7,65,79,0.18); }
             QPushButton#btnVersionPill:pressed { background: rgba(7,65,79,0.24); }
+            QPushButton#btnVersionPill[updateAvailable="true"] {
+                background: ${WARNING_BG}; border: 1px solid ${WARNING};
+                color: ${WARNING};
+            }
+            QPushButton#btnVersionPill[updateAvailable="true"]:hover   { background: #FDE9B0; }
+            QPushButton#btnVersionPill[updateAvailable="true"]:pressed { background: #FCE0A0; }
             QPushButton#btnWinMin, QPushButton#btnWinMax {
                 background: transparent; border: none;
                 color: #1A1A1A;
@@ -990,14 +1152,6 @@ class MainWindow(QMainWindow):
             QWidget#navBtn[active="true"] QLabel#navLabel {
                 color: #FFFFFF; font-weight: 600;
             }
-
-            QWidget#btnNavAction {
-                background: ${BG_SURFACE};
-                border: 1px solid ${BORDER}; border-radius: 8px;
-            }
-            QWidget#btnNavAction:hover { background: #D7DCE8; }
-            QWidget#btnNavAction:pressed { background: #CBD2E0; }
-            QLabel#actionLabel { color: ${TEXT_BODY}; background: transparent; font-size: ${FS_BODY}px; font-weight: 600; }
 
             /* ── Content area ─────────────────────────────────── */
             QWidget#bodyArea { background: ${BG_WINDOW}; }
@@ -1158,6 +1312,7 @@ class MainWindow(QMainWindow):
             BORDER=C.BORDER, BORDER_LIGHT=C.BORDER_LIGHT,
             NAV_HOVER=C.NAV_HOVER, TABLE_HEADER_BG=C.TABLE_HEADER_BG,
             INCOME=C.INCOME, EXPENSE=C.EXPENSE,
+            WARNING=C.WARNING, WARNING_BG=C.WARNING_BG,
             WIN_CLOSE_HOVER=C.WIN_CLOSE_HOVER, WIN_CLOSE_PRESSED=C.WIN_CLOSE_PRESSED,
             FS_CAPTION=FS.CAPTION, FS_SMALL=FS.SMALL, FS_BODY=FS.BODY,
             FS_H1=FS.H1, FS_H2=FS.H2, FS_H3=FS.H3,
