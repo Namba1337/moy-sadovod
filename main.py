@@ -326,7 +326,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.Window)
-        self.setWindowTitle(f"Мой Садовод — v{APP_VERSION}")
+        self.setWindowTitle("Мой Садовод")
         self.setMinimumSize(1280, 720)
         self.resize(1500, 860)
         self._update_checker = None
