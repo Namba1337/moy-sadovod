@@ -54,7 +54,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 #: Текущая версия приложения. ЕДИНСТВЕННАЯ ТОЧКА ИСТИНЫ.
 #: При релизе: поднять здесь → прогнать build.bat → опубликовать GitHub Release.
-APP_VERSION = "0.6.1"
+APP_VERSION = "0.6.2"
 
 #: Таймаут сетевых запросов (секунды).
 NETWORK_TIMEOUT = 15
@@ -576,7 +576,20 @@ def run_installer(installer_path: str) -> bool:
       /SILENT              — без визарда, только прогресс-окно
       /NORESTART           — не перезагружать ПК автоматически
       /CLOSEAPPLICATIONS   — закрыть запущенное приложение перед обновлением
-      /RESTARTAPPLICATIONS — запустить после установки
+                              (подстраховка — см. задержку ниже)
+
+    Установщик запускается не мгновенно, а через обёртку с ~2-секундной
+    задержкой (`ping` вместо `timeout` — тот падает с ошибкой без консоли,
+    а нам нужен именно бесконсольный запуск). Наш процесс к этому моменту
+    уже успевает полностью завершиться (QApplication.quit() вызывается
+    сразу следом) и снять блокировку с MoySadovod.exe — без этого
+    Inno Setup иногда не успевал закрыть нас через Restart Manager и
+    показывал диалог «Не удалось автоматически закрыть все приложения».
+
+    Повторный запуск приложения после установки — не через
+    /RESTARTAPPLICATIONS (это дублировало бы запуск с [Run]-секцией
+    installer.iss в редких гонках), а через постоянную [Run]-запись
+    в installer.iss (работает и в тихом режиме).
     """
     if not os.path.isfile(installer_path):
         return False
@@ -587,15 +600,16 @@ def run_installer(installer_path: str) -> bool:
         import subprocess
         DETACHED_PROCESS = 0x00000008
         CREATE_NEW_PROCESS_GROUP = 0x00000200
+        CREATE_NO_WINDOW = 0x08000000
+
+        command = (
+            'ping -n 3 127.0.0.1 >nul & '
+            f'"{installer_path}" /SILENT /NORESTART /CLOSEAPPLICATIONS'
+        )
         subprocess.Popen(
-            [
-                installer_path,
-                "/SILENT",
-                "/NORESTART",
-                "/CLOSEAPPLICATIONS",
-                "/RESTARTAPPLICATIONS",
-            ],
-            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            command,
+            shell=True,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
             close_fds=True,
         )
         return True
