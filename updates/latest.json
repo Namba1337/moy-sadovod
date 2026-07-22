@@ -1,8 +1,8 @@
 {
-  "version": "0.6.2",
-  "notes": "УЛУЧШЕНИЯ:\r\n• Улучшена логика запуска установщика — установка стала надёжнее и проще",
-  "asset_name": "MoySadovod_Setup_v0.6.2.exe",
-  "size_bytes": 80307806,
-  "sha256": "5e4f265fee9ff9a7f3d76ccf4c517af47f0522b4fde2e3f914240eace80820bd",
-  "download_url": "https://gitverse.ru/api/attachments/64330b8b-e601-40dd-b90a-ed5baceb704b"
+  "version": "0.6.3",
+  "notes": "УЛУЧШЕНИЯ:\r\n• Улучшена логика определения zip — обновлятор точнее воспринимает архивы",
+  "asset_name": "MoySadovod_Setup_v0.6.3.exe",
+  "size_bytes": 80308048,
+  "sha256": "0af815fad7e583a42f04a229d0f1fa73ae14dd33e280e31bd8205cbf1f440244",
+  "download_url": "https://gitverse.ru/api/attachments/f036f9a5-1841-44fb-b256-e244c6f2f73b"
 }
