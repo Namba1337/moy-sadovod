@@ -1,8 +1,8 @@
 {
-  "version": "0.6.3",
-  "notes": "УЛУЧШЕНИЯ:\r\n• Улучшена логика определения zip — обновлятор точнее воспринимает архивы",
-  "asset_name": "MoySadovod_Setup_v0.6.3.exe",
-  "size_bytes": 80308048,
-  "sha256": "0af815fad7e583a42f04a229d0f1fa73ae14dd33e280e31bd8205cbf1f440244",
-  "download_url": "https://gitverse.ru/api/attachments/f036f9a5-1841-44fb-b256-e244c6f2f73b"
+  "version": "0.6.4",
+  "notes": "ИСПРАВЛЕНИЯ:\r\n• Устранён краш приложения при закрытии окон с активными потоками",
+  "asset_name": "MoySadovod_Setup_v0.6.4.exe",
+  "size_bytes": 80309849,
+  "sha256": "350cda8f278df546cf82fbb4cf7f8e37c6892550e3fe6082476bed11b1dbf394",
+  "download_url": "https://gitverse.ru/api/attachments/afb2765a-f23e-4d4d-a7e4-7836543a2712"
 }
